@@ -1,0 +1,55 @@
+# Model registry for the orchestrator.
+#
+# Each entry defines a routable model the orchestrator can select. The
+# `description` field is what the orchestrator LLM sees when deciding which
+# model fits the user's request — write it for an LLM audience.
+#
+# `provider` is fed into the same factory used elsewhere (build_llm_client_
+# from_entry), so any provider supported by llm/client.py works here.
+#
+# Per-entry fields:
+#   provider     (required)  one of: gemini, anthropic, openai
+#   model        (required)  provider-specific model identifier
+#   description  (required)  human/LLM-readable summary of strengths
+#   max_tokens   (optional)  per-model output cap; falls back to Settings
+#   default      (optional)  exactly one entry may be marked default: true.
+#                            Used as the fallback when orchestration fails
+#                            and as the orchestrator's own model unless
+#                            overridden by Settings.orchestrator_model_id.
+
+models:
+  # gemini-flash:
+  #   provider: gemini
+  #   model: gemini-3-flash-preview
+  #   description: >
+  #     Fast, cost-efficient. Best for straightforward queries, lookups,
+  #     single-tool calls, and short summaries. Use by default unless the
+  #     task clearly needs deeper reasoning.
+
+  # gemini-pro:
+  #   provider: gemini
+  #   model: gemini-3.1-pro-preview
+  #   description: >
+  #     Heavyweight advanced reasoning model. Select this ONLY for complex
+  #     logic puzzles, zero-shot architectural design, advanced mathematics,
+  #     deep analytical work, or highly ambiguous workflows demanding the
+  #     deepest level of deliberate planning.
+
+  # Local model served via the OpenAI-compatible `openai` provider.
+  # Set OPENAI_BASE_URL and OPENAI_API_KEY in the environment.
+  # `model` must match a tools-capable model if you want tool calling.
+  qwen3.6:
+    provider: openai
+    model: qwen3.6-35b-a3b
+    description: >
+      Local Qwen3.6 model served over the OpenAI-compatible endpoint.
+      Suitable for complex reasoning and tool calling tasks.
+
+  gpt-oss-20b:
+    provider: openai
+    model: gpt-oss-20b
+    description: >
+      GPT-OSS-20B is a powerful general-purpose model offering a balance between performance and cost.
+      It excels at complex reasoning, code generation, and tool-calling. Suitable for a wide range of LLM tasks, 
+      from natural language understanding to advanced problem solving.
+    default: true

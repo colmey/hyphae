@@ -1,0 +1,24 @@
+{
+  "prompt": "Search the database for information pertaining to X and search the web for similar instances",
+  "commands": {
+    "session": "session_id",
+    "max_iterations": 10,
+    "system": "You are a research assistant. Be concise."
+  },
+  "MCP": [
+    {
+      "name": "MCP_server_1",
+      "tools": {
+        "tool_a": ["arg1", "arg2"],
+        "tool_b": ["arg1", "arg2"]
+      }
+    },
+    {
+      "name": "MCP_server_2",
+      "tools": {
+        "tool_a": ["arg1", "arg2"],
+        "tool_b": ["arg1", "arg2"]
+      }
+    }
+  ]
+}

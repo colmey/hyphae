@@ -1,0 +1,31 @@
+# MCP server configuration for the harness.
+#
+# Supported transports:
+#   - streamable-http: modern MCP HTTP transport (recommended for new servers)
+#   - sse:             older SSE-based HTTP transport
+#   - stdio:           local subprocess (command/args/env) -- not used yet
+#
+# Per-server fields:
+#   transport       (required) one of the above
+#   url             (required for streamable-http and sse)
+#   command, args, env  (required for stdio)
+#   disabled        (optional, default false) skip this server entirely
+#   disabled_tools  (optional) list of tool names to hide from the LLM
+#
+# String values support ${ENV_VAR} interpolation; the host/port for each
+# server lives in the .env file so this config carries no environment
+# specifics. A referenced var that is unset raises a clear error at startup.
+
+#NO MCPs currently enabled
+mcpServers:
+  google-toolbox:
+    transport: streamable-http
+    url: ${GOOGLE_TOOLBOX_URL}
+    disabled: false
+    disabled_tools: []
+
+  open-websearch:
+    transport: sse
+    url: ${OPEN_WEBSEARCH_URL}
+    disabled: false
+    disabled_tools: []

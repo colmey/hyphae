@@ -16,16 +16,18 @@
 # server lives in the .env file so this config carries no environment
 # specifics. A referenced var that is unset raises a clear error at startup.
 
-#NO MCPs currently enabled
+# No MCP servers are running locally right now, so both are disabled. Flip
+# `disabled: false` (and start the server) to re-enable. With both disabled the
+# harness runs tool-less; the model answers from its own knowledge.
 mcpServers:
   google-toolbox:
     transport: streamable-http
     url: ${GOOGLE_TOOLBOX_URL}
-    disabled: false
+    disabled: true
     disabled_tools: []
 
   open-websearch:
     transport: sse
     url: ${OPEN_WEBSEARCH_URL}
-    disabled: false
+    disabled: true
     disabled_tools: []

@@ -77,6 +77,7 @@ class MCPClient:
             raise RuntimeError(f"MCPClient {self.name!r} is already connected")
 
         stack = AsyncExitStack()
+        connected = False
         try:
             # Open the right transport. Each transport context manager returns
             # (read_stream, write_stream); streamable-http also returns a third
@@ -123,11 +124,18 @@ class MCPClient:
 
             self._session = session
             self._exit_stack = stack
+            connected = True
             logger.info("connected to %r: %d tool(s) available", self.name, len(self._tools))
-        except Exception:
-            # Clean up anything we managed to open before the failure.
-            await stack.aclose()
-            raise
+        finally:
+            # Tear down anything we opened unless we fully connected. This MUST
+            # run on BaseException, not just Exception: an unreachable server
+            # makes the SDK's transport cancel its internal task-group scope,
+            # surfacing as CancelledError. A bare `except Exception` misses it,
+            # leaving the transport's background tasks alive and spinning the
+            # event loop on a dead connection (100% CPU). A finally keyed on a
+            # success flag always unwinds the stack and re-raises the original.
+            if not connected:
+                await stack.aclose()
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> ToolCallResult:
         """Call a tool by its un-namespaced name."""

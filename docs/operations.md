@@ -119,12 +119,31 @@ Streaming is implemented on the OpenAI-compatible adapter: `POST
 already an async generator, so no loop change was needed — orchestration runs
 once (inside `_turn_events`) before the first frame is emitted.
 
-To add a streaming variant on the **native** `/chat` surface (e.g.
-`POST /chat/stream` emitting the raw typed events), drop a new route in
-`api/routes.py` that iterates `_turn_events(...)` the same way and serializes
-each event explicitly — never `dataclasses.asdict`, since `provider_metadata`
-can hold bytes. Run the orchestration step before opening the stream (it's a
-single decision) rather than streaming it.
+For a *live activity feed* — seeing the agent's tool calls and results as they
+happen, not just the final answer — use the native **`POST /chat/stream`** route
+(`api/routes.py`). Same dumb-pipe contract as `/chat` (plain-text body = prompt,
+optional `X-Session-Id`), but instead of collecting the events it forwards the
+loop's typed events over SSE as they occur: `text`, `tool_call`, `tool_result`,
+`usage`, `done`, `error` (see [api.md](api.md#post-chatstream)). It is the same
+kind of thin renderer as the `/v1` SSE branch — it iterates the shared
+`_turn_events` generator and serializes each event with the bytes-safe
+`event_record` mapping (the same one the tracer uses; never `dataclasses.asdict`,
+since `provider_metadata` can hold bytes — events don't carry it, but reusing the
+explicit mapping keeps one source of truth). No orchestration or loop logic is
+duplicated; orchestration still runs once inside `_turn_events` before the first
+frame.
+
+This is the design seam for *any* live-update consumer: a custom dashboard, a
+voice assistant, or an OpenWebUI **pipe** (a plug-in that lives inside OpenWebUI,
+not the harness) that renders `tool_call`/`tool_result` as status updates. The
+harness stays a dumb event source; each consumer is a renderer at the edge.
+
+Note: text is **not** token-streamed — assistant text arrives as one `text`
+event per loop iteration, not token-by-token. The harness deliberately has no
+provider-level token streaming (it would mean per-provider stream plumbing and a
+reasoning-tag stripper in the core); `/chat/stream` trades token-smooth text for
+a simple core plus live *activity* visibility. The OpenAI `/v1` SSE path is
+unaffected and still chunks text per `TextEvent`.
 
 ### Adding new loop strategies
 
@@ -326,6 +345,7 @@ are run via `./runscript.sh tests/<file>`.
 | `smoke_test_orchestrator.py`      | Orchestrator decisions: model selection, tool filtering, system prompt generation, thinking level (parsing + live), history block. Asserts `fallback_used=false`. |
 | `smoke_test_http.py`              | Full HTTP surface in-process (lifespan, plain-text `/chat`, session header, 400/404) |
 | `smoke_test_openai_api.py`        | OpenAI-compatible `/v1`: `/v1/models` shape, non-stream `chat.completion`, SSE chunk deltas + `[DONE]`, error JSON. Hermetic (scripted fake LLM, no backend). |
+| `smoke_test_event_stream.py`      | Native `POST /chat/stream`: live SSE event feed — tool_call/tool_result/text/done in order on a tool turn, text+done on a plain turn, 400 on empty body, X-Session-Id header. Hermetic (scripted fake LLM + one-tool fake MCP, no backend). |
 | `smoke_test_tracing.py`           | Run tracing via `JSONLTracer`: one record per event, stable `run_id`, increasing step indices, timestamps + `latency_ms` on LLM/tool records, bytes serialize, no-op default path. Hermetic (scripted fake LLM + MCP, no backend). |
 | `smoke_test_concurrency.py`       | Concurrent `/chat`: distinct-session isolation + same-session 409 guard |
 

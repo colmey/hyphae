@@ -27,7 +27,7 @@ mcpServers:
     disabled_tools: []
 
   open-websearch:
-    transport: sse
+    transport: streamable-http
     url: ${OPEN_WEBSEARCH_URL}
-    disabled: true
+    disabled: false
     disabled_tools: []

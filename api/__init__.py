@@ -1,12 +1,12 @@
 """HTTP API layer for the harness.
 
 Exposes one combined router: the native plain-text `/chat` + `/health`
-(api/routes.py) and the OpenAI-compatible `/v1` adapter (api/openai_compat.py),
+(api/routes.py) and the OpenAI-compatible `/v1` adapter (api/openai_compatible.py),
 both thin shells over the same shared core.
 """
 from fastapi import APIRouter
 
-from .openai_compat import router as _openai_router
+from .openai_compatible import router as _openai_router
 from .routes import router as _routes_router
 
 router = APIRouter()

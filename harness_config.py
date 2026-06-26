@@ -126,7 +126,7 @@ class Settings(BaseSettings):
 
     # Harness paths. All runtime config lives under config/ by convention.
     mcp_config_path: Path = Field(default=Path("config/mcp_config.yaml"))
-    max_loop_iterations: int = Field(default=25)
+    max_loop_iterations: int = Field(default=10) # was 25, find a good balance
     log_level: str = Field(default="INFO")
 
     # --- Observability (run tracing) --------------------------------------

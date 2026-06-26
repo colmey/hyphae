@@ -1,4 +1,4 @@
-# api/openai_compat.py
+# api/openai_compatible.py
 
 """
 OpenAI-compatible inbound adapter.
@@ -6,7 +6,7 @@ OpenAI-compatible inbound adapter.
 A thin translator that lets OpenWebUI / LibreChat (and any OpenAI client) talk to
 the harness by pointing `base_url` at `/v1`. It owns only wire-format translation:
 OpenAI JSON in -> internal Message list -> the shared core (`_turn_events` /
-`_run_turn` in api/routes.py) -> an OpenAI `chat.completion` object, or an SSE
+`_run_turn` in api/turn.py) -> an OpenAI `chat.completion` object, or an SSE
 stream of `chat.completion.chunk` frames. No orchestration or loop logic lives
 here -- both invariants are preserved by routing every turn through the one core.
 
@@ -55,7 +55,7 @@ from .dependencies import (
     get_store,
     get_tracer,
 )
-from .routes import _run_turn, _turn_events
+from .turn import _run_turn, _turn_events
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

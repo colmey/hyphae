@@ -1,10 +1,11 @@
 # PyAiHarness — HTTP API
 
-The full request/response contract for the endpoints. Two native surfaces —
-`GET /health` and the plain-text `POST /chat` — plus an OpenAI-compatible
-adapter (`POST /v1/chat/completions`, `GET /v1/models`) so tools like OpenWebUI
-and LibreChat connect natively. All of them are thin shells over one shared
-core (`api/routes.py::_turn_events`).
+The full request/response contract for the endpoints. Native surfaces —
+`GET /health`, the plain-text `POST /chat`, and the live event feed
+`POST /chat/stream` — plus an OpenAI-compatible adapter
+(`POST /v1/chat/completions`, `GET /v1/models`) so tools like OpenWebUI and
+LibreChat connect natively. All of them are thin shells over one shared core
+(`api/turn.py::_turn_events`).
 
 > See also: [README.md](README.md) (overview + quick start),
 > [architecture.md](architecture.md) (how the route is wired,
@@ -106,9 +107,50 @@ has a request in flight. Distinct sessions run concurrently without
 restriction; only same-session overlap is rejected. Retry once the first
 request completes.
 
+## `POST /chat/stream`
+
+The **live activity feed**: same turn as `/chat`, but streamed as the loop's
+typed events instead of one collected answer. Use it to show *what the agent is
+doing* — tool calls and results appear the instant the loop reaches them, then
+the answer text follows. Clients that only want the final answer should use
+`/chat` (or `/v1`) instead.
+
+Same dumb-pipe contract as `/chat`: the request body **is** the prompt;
+`X-Session-Id` (optional) continues a session; an empty body returns **400**, an
+unknown session **404**.
+
+**Response (200):** a `text/event-stream` (`sse-starlette`). Each frame is one
+loop event, JSON in the `data:` field, with a `type` discriminator. The stream
+ends after the `done` event. `X-Session-Id` is returned as a response header.
+
+```
+data: {"type":"usage","iteration":1,"total_tokens":42,"latency_ms":120.4, ...}
+
+data: {"type":"tool_call","tool_use_id":"call_1","name":"web_search","args":{"q":"..."}}
+
+data: {"type":"tool_result","tool_use_id":"call_1","name":"web_search","content":"...","is_error":false,"latency_ms":1830.2}
+
+data: {"type":"text","text":"SpaceX launched ..."}
+
+data: {"type":"done","reason":"end_turn","iterations":2,"total_tokens":1875}
+```
+
+Event `type`s: `text`, `tool_call`, `tool_result`, `usage`, `done`, `error`
+(payload fields mirror `agent/events.py`, serialized by the same bytes-safe
+mapping the tracer uses). A failure mid-turn — including the same-session 409 or
+an LLM error — is delivered as a terminal `{"type":"error","message":...}` frame
+rather than an HTTP status, since the SSE response is already open.
+
+**Text is not token-streamed:** assistant text arrives as one `text` event per
+loop iteration, not token-by-token. This endpoint streams *activity*, not tokens
+— the harness has no provider-level token streaming by design (it would push
+per-provider stream plumbing and reasoning-tag stripping into the core). It is
+the seam any live-update consumer plugs into: a dashboard, a voice assistant, or
+an OpenWebUI pipe that renders tool events as status updates.
+
 ## `POST /v1/chat/completions`
 
-An **OpenAI-compatible** adapter (`api/openai_compat.py`) so any OpenAI client —
+An **OpenAI-compatible** adapter (`api/openai_compatible.py`) so any OpenAI client —
 OpenWebUI, LibreChat, the `openai` SDK — drives the harness by pointing its
 base URL at `/v1`. It is a thin wire-format translator over the same shared core
 as `/chat`; no orchestration or loop logic is duplicated.

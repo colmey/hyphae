@@ -38,12 +38,12 @@ models:
   # Local model served via the OpenAI-compatible `openai` provider.
   # Set OPENAI_BASE_URL and OPENAI_API_KEY in the environment.
   # `model` must match a tools-capable model if you want tool calling.
-  qwen3.6:
-    provider: openai
-    model: qwen3.6-35b-a3b
-    description: >
-      Local Qwen3.6 model served over the OpenAI-compatible endpoint.
-      Suitable for complex reasoning and tool calling tasks.
+  # qwen3.6:
+  #   provider: openai
+  #   model: qwen3.6-35b-a3b
+  #   description: >
+  #     Local Qwen3.6 model served over the OpenAI-compatible endpoint.
+  #     Suitable for complex reasoning and tool calling tasks.
 
   gpt-oss-20b:
     provider: openai

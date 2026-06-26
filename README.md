@@ -36,9 +36,11 @@ Built on **FastAPI**, the official **`mcp`** Python SDK, and
 - 🚦 **Concurrency-safe** — `async def` handlers service many requests at
   once; distinct sessions are fully isolated, and `SessionGuard` returns 409
   if two requests overlap on the same `session_id`.
-- 🌊 **Streaming** — the loop is an async generator yielding typed events;
+- 🌊 **Streaming** — the loop is an async generator yielding typed events.
   `/v1/chat/completions` streams them as SSE `chat.completion.chunk` frames
-  (`stream: true`). Native `/chat` stays non-streaming.
+  (`stream: true`); the native `POST /chat/stream` forwards the raw typed events
+  (`tool_call`, `tool_result`, `text`, `done`, …) as an SSE activity feed. Plain
+  `/chat` stays non-streaming.
 - 🔭 **Observable runs** — opt-in JSONL tracing (`TRACE_ENABLED=true`) serializes
   the loop's event stream: one record per event, tagged with a per-request
   `run_id` (also stamped on every log line), a step index, a timestamp, and
@@ -235,6 +237,16 @@ reuse for the next turn; `X-Done-Reason` says why the loop stopped
 (`end_turn`, `max_iterations`, `truncated`, ...). Which model handled the
 request and what it spent is recorded in the server logs, not the response.
 
+### `POST /chat/stream`
+
+The same turn as `/chat`, but streamed live as the loop's typed events instead
+of one collected answer — for clients that want to show *what the agent is
+doing* (each `tool_call`/`tool_result` as it happens, then the answer). Same
+plain-text body + `X-Session-Id` contract; the response is an SSE stream of
+`{type, …}` event frames ending on a `done` event. Text arrives per loop
+iteration, not token-by-token. Full detail in
+[docs/api.md](docs/api.md#post-chatstream).
+
 ### `POST /v1/chat/completions` + `GET /v1/models`
 
 OpenAI-compatible adapter so OpenWebUI / LibreChat / the `openai` SDK connect
@@ -268,7 +280,7 @@ PyAiHarness/
 │   └── providers/          #   One file per provider (gemini.py); imported lazily
 ├── agent/                  # Session, events, the reasoning loop
 ├── orchestrator/           # Model + tool + system-prompt router
-├── api/                    # FastAPI routes, dependencies, request/response schemas
+├── api/                    # HTTP renderers (native /chat + /chat/stream, OpenAI /v1) over a shared turn core (turn.py)
 └── docs/                   # Reference docs (README router + architecture/api/configuration/operations)
 ```
 
@@ -309,9 +321,11 @@ disrupting existing code. Each is documented in detail in
   legacy behavior (default LLM, all tools).
 - **Add session persistence** — implement `SessionStore` against a real DB,
   swap the one-liner in `main.py`'s lifespan.
-- **Streaming** — done on `/v1/chat/completions` (`stream: true`) via
-  `sse-starlette` over the shared `_turn_events` generator; the loop is already
-  an async generator. Same pattern adds an SSE variant to native `/chat`.
+- **Streaming** — `/v1/chat/completions` (`stream: true`) and the native
+  `/chat/stream` event feed both render the shared `_turn_events` generator as
+  SSE via `sse-starlette`; the loop is already an async generator. Adding
+  another transport is one more renderer over the same core (`api/turn.py`), no
+  loop change.
 - **Tracing / observability** — set `TRACE_ENABLED=true` for a JSONL trace of
   every run. Implement another `Tracer` (e.g. an OpenTelemetry exporter) in
   `agent/tracing.py` and return it from `build_tracer` — the loop is unchanged.
@@ -345,8 +359,10 @@ path):
 
 - Sessions are in-memory by design (LibreChat holds durable context); the
   store is bounded by TTL + max-size so it can't grow without limit.
-- Streaming is available on `/v1/chat/completions` (SSE); native `/chat`
-  stays non-streaming.
+- Streaming: `/v1/chat/completions` (SSE) and the native `/chat/stream` event
+  feed both stream the loop's events; plain `/chat` stays non-streaming. There
+  is no provider-level *token* streaming by design — `/chat/stream` emits one
+  `text` event per iteration (activity, not tokens).
 - No authentication on `/chat` or `/v1`. Relatedly, the JSONL trace
   (`TRACE_ENABLED`) captures full prompts/args/results by default — fine for a
   single-operator dev harness, but a metadata-only mode is future work once the

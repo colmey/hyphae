@@ -175,17 +175,18 @@ PyAiHarness/
 │   └── orchestrator.py       # Orchestrator.decide() -> OrchestrationDecision
 │
 ├── api/
-│   ├── __init__.py
-│   ├── schemas.py            # ChatRequest (strict; prompt + Commands + MCP prefs),
-│   │                         #   ChatResponse, HealthResponse, OrchestrationInfo (Pydantic)
+│   ├── __init__.py           # Combines the routers into one
+│   ├── schemas.py            # HealthResponse, OrchestrationInfo, TokenUsage (Pydantic)
 │   ├── dependencies.py       # FastAPI Depends() providers (pull from app.state)
-│   └── routes.py             # POST /chat, GET /health
+│   ├── turn.py               # Shared orchestrate→loop core (_turn_events / _run_turn)
+│   ├── routes.py             # Native: GET /health, POST /chat, POST /chat/stream
+│   └── openai_compatible.py  # OpenAI adapter: POST /v1/chat/completions, GET /v1/models
 │
 └── docs/                     # Split reference docs (read on demand)
     ├── README.md             # Index / router + quick start
     ├── architecture.md       # This file: overview, subsystems, principles, decisions
     ├── configuration.md      # Env vars + config/*.yaml + orchestrator prompt
-    ├── api.md                # HTTP /chat and /health contract
+    ├── api.md                # HTTP /chat, /chat/stream, /health, and /v1 contract
     └── operations.md         # Running, extending, smoke tests, limitations
 ```
 
@@ -689,8 +690,9 @@ return `Optional` — routes must handle the `None` case (legacy mode).
    with the conversation in view. The new prompt is **not** appended yet — it's
    passed to the orchestrator separately, so `session.messages` at routing time
    is the prior history only.
-2. **`_run_turn(...)`** is the shared core (also reused by the planned
-   OpenAI-compatible endpoint). It calls
+2. **`_run_turn(...)`** (in `api/turn.py` — the shared core every renderer
+   drives: `/chat`, `/chat/stream`, and the OpenAI-compatible `/v1` adapter).
+   It calls
    **`_resolve_routing(prompt, system_override, preferences, ...)`** which
    returns `(llm_client, tools_for_llm, system_prompt, thinking_level,
    OrchestrationInfo | None)`. In legacy mode (orchestrator is `None`): default
@@ -734,10 +736,12 @@ orchestration. See `agent/tracing.py` (the `Tracer` ABC / `NoOpTracer` /
 3. **One bridge between worlds.** `agent/loop.py` is the only module
    that touches both the LLM client and the MCP manager. Neither of
    those two knows the other exists.
-4. **The loop is an async generator** yielding typed events. The
-   non-streaming endpoint collects all events into one response.
-   Streaming endpoints become trivial to add later — same generator,
-   adapt to SSE frames.
+4. **The loop is an async generator** yielding typed events. Each HTTP
+   surface is a thin renderer over the same generator (`api/turn.py`):
+   `/chat` collects all events into one plain-text response, `/chat/stream`
+   forwards them as native SSE event frames, and the `/v1` adapter maps them
+   to OpenAI `chat.completion.chunk` frames. Adding a transport is a new
+   renderer, not a loop change.
 5. **Session abstraction from day one.** Even v1 threads message history
    through loop iterations via a `Session` object. A minimal abstraction
    now beats retrofitting it later.

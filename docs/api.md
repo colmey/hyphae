@@ -219,8 +219,15 @@ data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":
 data: [DONE]
 ```
 
-**Errors** use the OpenAI error envelope and keep orchestration's
-degrade-don't-fail behavior:
+**Tool-call visibility (stream only).** Because OpenAI clients render only
+`delta.content`, the harness folds each completed server-side tool call into a
+collapsible `<details>` block emitted as a `delta.content` chunk (tool name,
+arguments, result, and `✅`/`❌` + latency). UIs like OpenWebUI render it as an
+expandable "tool" section inline with the answer. These blocks are part of the
+assistant message, so a stateless client re-feeds them on the next turn — the
+adapter strips them back out of assistant history on the inbound path
+(`_strip_tool_blocks`) so they never re-enter the agent's context. The
+non-stream JSON response carries plain text only (no blocks).
 
 ```json
 {"error": {"message": "'messages' must be a non-empty array", "type": "invalid_request_error", "param": null, "code": null}}

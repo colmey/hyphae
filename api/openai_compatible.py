@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, AsyncIterator, Optional
@@ -37,6 +38,8 @@ from agent import (
     DoneEvent,
     SessionStore,
     TextEvent,
+    ToolCallEvent,
+    ToolResultEvent,
 )
 from llm.schemas import AssistantMessage, TextBlock
 from orchestrator import LLMRegistry
@@ -103,18 +106,79 @@ def _text_of(content: Any) -> str:
     return str(content)
 
 
+# ---------------------------------------------------------------------------
+# Tool-call presentation: outbound render <-> inbound strip.
+#
+# Chat UIs (OpenWebUI/LibreChat) only render `delta.content`, so the harness's
+# server-side tool steps are surfaced by folding each completed call into a
+# collapsible <details> block in the streamed content (`_tool_details`). The same
+# blocks are stripped back out of assistant history on the inbound path
+# (`_strip_tool_blocks`) so they never re-enter the agent's context when a
+# stateless client re-feeds prior turns. The 🔧 summary marker is the seam.
+# ---------------------------------------------------------------------------
+
+_TOOL_SUMMARY_MARK = "🔧 "
+_TOOL_RESULT_MAX = 2000
+
+# One rendered block: <details><summary>🔧 …</summary> … </details>. Keyed on the
+# marker so a model-authored <details> is never touched; non-greedy to the first
+# close (blocks never nest, and embedded results have their closing tag defanged
+# so a result containing "</details>" can't end the block early).
+_TOOL_BLOCK_RE = re.compile(
+    r"\n*<details>\s*<summary>" + _TOOL_SUMMARY_MARK + r".*?</details>\n*",
+    re.DOTALL,
+)
+
+
+def _tool_details(event: ToolResultEvent, args: Any) -> str:
+    """Render one completed tool call as a self-contained collapsible block.
+
+    Opened and closed in a single delta so a UI's progressive markdown render
+    never sees an unbalanced tag. `args` come from the matching ToolCallEvent
+    (the result event doesn't carry them); None omits the args fence.
+    """
+    icon = "❌" if event.is_error else "✅"
+    ms = f" · {event.latency_ms:.0f} ms" if event.latency_ms is not None else ""
+    out = [f"\n\n<details>\n<summary>{_TOOL_SUMMARY_MARK}{event.name} {icon}{ms}</summary>\n"]
+    if args:
+        out.append(f"\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```\n")
+    result = event.content
+    if len(result) > _TOOL_RESULT_MAX:
+        result = result[:_TOOL_RESULT_MAX] + "\n…[truncated]"
+    # Defang a closing tag inside the result so it can't end the block early --
+    # visually or for the inbound strip regex (zero-width space breaks the tag,
+    # stays invisible). open-websearch results can carry raw HTML.
+    result = result.replace("</details>", "<\u200b/details>")
+    out.append(f"\n```\n{result}\n```\n\n</details>\n\n")
+    return "".join(out)
+
+
+def _strip_tool_blocks(text: str) -> str:
+    """Remove rendered tool-call blocks from assistant text on the inbound path."""
+    return _TOOL_BLOCK_RE.sub("", text)
+
+
 def _prepare(messages: list[_ChatMessage]) -> tuple[str | None, list[tuple[str, str]], str | None]:
     """Map OpenAI `messages[]` to (system_override, history, prompt).
 
     `system` messages are concatenated into the system override. The final user
     message is the turn to run (`prompt`); every other user/assistant message
-    becomes history seeded into the ephemeral session. `prompt` is None when no
-    user message is present.
+    becomes history seeded into the ephemeral session. Tool-call presentation
+    blocks are stripped from assistant turns so the UI clutter never re-enters the
+    agent's context. `prompt` is None when no user message is present.
     """
     systems = [t for m in messages if m.role == "system" and (t := _text_of(m.content))]
     system_override = "\n\n".join(systems) if systems else None
 
-    convo = [(m.role, _text_of(m.content)) for m in messages if m.role in ("user", "assistant")]
+    convo: list[tuple[str, str]] = []
+    for m in messages:
+        if m.role not in ("user", "assistant"):
+            continue
+        text = _text_of(m.content)
+        if m.role == "assistant":
+            text = _strip_tool_blocks(text)
+        convo.append((m.role, text))
+
     last_user = next((i for i in range(len(convo) - 1, -1, -1) if convo[i][0] == "user"), None)
     if last_user is None:
         return system_override, convo, None
@@ -184,10 +248,16 @@ async def _stream(model: str, runner: TurnRunner, turn: dict) -> AsyncIterator[d
     yield {"data": json.dumps(_chunk(cid, created, model, {"role": "assistant"}, None))}
 
     done_reason = "end_turn"
+    pending_args: dict[str, Any] = {}  # tool_use_id -> input; set on call, used on result
     try:
         async for event in runner.events(**turn):
             if isinstance(event, TextEvent):
                 yield {"data": json.dumps(_chunk(cid, created, model, {"content": event.text}, None))}
+            elif isinstance(event, ToolCallEvent):
+                pending_args[event.id] = event.input
+            elif isinstance(event, ToolResultEvent):
+                block = _tool_details(event, pending_args.pop(event.id, None))
+                yield {"data": json.dumps(_chunk(cid, created, model, {"content": block}, None))}
             elif isinstance(event, DoneEvent):
                 done_reason = event.reason
     except Exception as e:  # noqa: BLE001 -- the stream is already open; surface, don't crash.

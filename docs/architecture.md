@@ -178,7 +178,7 @@ PyAiHarness/
 │   ├── __init__.py           # Combines the routers into one
 │   ├── schemas.py            # HealthResponse, OrchestrationInfo, TokenUsage (Pydantic)
 │   ├── dependencies.py       # FastAPI Depends() providers (pull from app.state)
-│   ├── turn.py               # Shared orchestrate→loop core (_turn_events / _run_turn)
+│   ├── turn.py               # Shared orchestrate→loop core + TurnRunner seam (events/run)
 │   ├── routes.py             # Native: GET /health, POST /chat, POST /chat/stream
 │   └── openai_compatible.py  # OpenAI adapter: POST /v1/chat/completions, GET /v1/models
 │
@@ -690,9 +690,11 @@ return `Optional` — routes must handle the `None` case (legacy mode).
    with the conversation in view. The new prompt is **not** appended yet — it's
    passed to the orchestrator separately, so `session.messages` at routing time
    is the prior history only.
-2. **`_run_turn(...)`** (in `api/turn.py` — the shared core every renderer
-   drives: `/chat`, `/chat/stream`, and the OpenAI-compatible `/v1` adapter).
-   It calls
+2. **`runner.run(...)`** — every renderer (`/chat`, `/chat/stream`, the
+   OpenAI-compatible `/v1` adapter) reaches the shared core in `api/turn.py`
+   through the **`TurnRunner`** seam (injected via `get_turn_runner`): it bundles
+   the process-wide singletons so a route wires *one* object, exposing `events()`
+   (live stream) and `run()` (collect to an answer). Internally that drives
    **`_resolve_routing(prompt, system_override, preferences, ...)`** which
    returns `(llm_client, tools_for_llm, system_prompt, thinking_level,
    OrchestrationInfo | None)`. In legacy mode (orchestrator is `None`): default

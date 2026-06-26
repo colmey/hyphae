@@ -10,15 +10,21 @@ its events. Keeping the core here -- rather than inside any one route module --
 lets those surfaces be peers over a neutral seam instead of importing each other.
 
 `_turn_events` is the single place orchestration and the agent loop are wired
-together; `_resolve_routing` decides model/tools/system for a turn; `_run_turn`
-is the non-streaming convenience collector.
+together; `_resolve_routing` decides model/tools/system for a turn.
+
+`TurnRunner` is the narrow seam every renderer depends on: it bundles the
+process-wide singletons so a route wires *one* object instead of eight, and
+exposes `events()` (the live event stream) and `run()` (collect to a final
+answer). It is also the extraction seam -- an out-of-process adapter would swap
+only this class's body for an HTTP/SSE client, leaving the renderers unchanged.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from typing import AsyncIterator, Optional
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Optional
 
 from fastapi import HTTPException
 
@@ -182,16 +188,16 @@ async def _turn_events(
         )
 
 
-async def _run_turn(**kwargs) -> tuple[str, str, TokenUsage]:
+async def _collect(events: AsyncIterator[Event]) -> tuple[str, str, TokenUsage]:
     """Collect a turn's events into a final answer. Returns (answer, done_reason, usage).
 
-    A thin non-streaming wrapper over `_turn_events`; takes the same keyword
-    arguments. Streaming callers iterate `_turn_events` directly.
+    The non-streaming reduction over an event stream; streaming callers iterate
+    the stream directly.
     """
     text_parts: list[str] = []
     done_reason = "unknown"
     usage = TokenUsage()
-    async for event in _turn_events(**kwargs):
+    async for event in events:
         if isinstance(event, TextEvent):
             text_parts.append(event.text)
         elif isinstance(event, DoneEvent):
@@ -203,3 +209,71 @@ async def _run_turn(**kwargs) -> tuple[str, str, TokenUsage]:
                 thinking_tokens=event.thinking_tokens,
             )
     return "".join(text_parts).strip(), done_reason, usage
+
+
+@dataclass(frozen=True)
+class TurnRunner:
+    """The seam between an API renderer and the orchestrate->loop core.
+
+    Holds the process-wide singletons (built once in main.py's lifespan, assembled
+    on demand by `get_turn_runner`) so a renderer depends on this one object rather
+    than wiring eight. `events()` yields the loop's typed events for one turn;
+    `run()` reduces them to a final answer. Both take only per-request primitives,
+    which is what makes this the clean extraction point for a future out-of-process
+    adapter: swap the body, keep the renderers.
+    """
+
+    llm: LLMClient
+    mcp: MCPManager
+    store: SessionStore
+    guard: SessionGuard
+    settings: Any
+    orchestrator: Optional[Orchestrator]
+    registry: Optional[LLMRegistry]
+    tracer: Optional[Tracer]
+
+    def events(
+        self,
+        *,
+        prompt: str,
+        session: Session,
+        system_override: str | None = None,
+        preferences: ToolPreferences | None = None,
+        model_id: str | None = None,
+    ) -> AsyncIterator[Event]:
+        """Run one turn, yielding the loop's events live. See `_turn_events`."""
+        return _turn_events(
+            prompt=prompt,
+            session=session,
+            system_override=system_override,
+            preferences=preferences,
+            model_id=model_id,
+            llm=self.llm,
+            mcp=self.mcp,
+            store=self.store,
+            guard=self.guard,
+            settings=self.settings,
+            orchestrator=self.orchestrator,
+            registry=self.registry,
+            tracer=self.tracer,
+        )
+
+    async def run(
+        self,
+        *,
+        prompt: str,
+        session: Session,
+        system_override: str | None = None,
+        preferences: ToolPreferences | None = None,
+        model_id: str | None = None,
+    ) -> tuple[str, str, TokenUsage]:
+        """Run one turn and collect it into (answer, done_reason, usage)."""
+        return await _collect(
+            self.events(
+                prompt=prompt,
+                session=session,
+                system_override=system_override,
+                preferences=preferences,
+                model_id=model_id,
+            )
+        )

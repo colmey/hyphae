@@ -24,6 +24,8 @@ from llm.client import LLMClient
 from mcp_layer import MCPManager
 from orchestrator import LLMRegistry, Orchestrator
 
+from .turn import TurnRunner
+
 
 def get_llm(request: Request) -> LLMClient:
     return request.app.state.llm
@@ -58,3 +60,24 @@ def get_registry(request: Request) -> Optional[LLMRegistry]:
 def get_tracer(request: Request) -> Optional[Tracer]:
     """Return the run tracer, or None when tracing is disabled."""
     return getattr(request.app.state, "tracer", None)
+
+
+def get_turn_runner(request: Request) -> TurnRunner:
+    """Assemble the TurnRunner seam from the published app.state singletons.
+
+    Renderers depend on this one object instead of wiring eight, and it is the
+    single place a future out-of-process adapter would swap for an HTTP-backed
+    runner. The TurnRunner is a cheap value object, so building it per request
+    (rather than stashing one on app.state) keeps lifespan and the hand-wired
+    smoke tests free of an extra field while staying override-friendly.
+    """
+    return TurnRunner(
+        llm=get_llm(request),
+        mcp=get_mcp(request),
+        store=get_store(request),
+        guard=get_guard(request),
+        settings=get_settings_obj(request),
+        orchestrator=get_orchestrator(request),
+        registry=get_registry(request),
+        tracer=get_tracer(request),
+    )

@@ -14,7 +14,7 @@ header (echoed back on the response, alongside `X-Done-Reason`). `/chat/stream`
 shares that contract but forwards events live instead of collecting them.
 
 These are thin renderers over the shared orchestrate->loop core in
-`api/turn.py` (`_turn_events` / `_run_turn`); the OpenAI-compatible
+`api/turn.py`, reached through the `TurnRunner` seam; the OpenAI-compatible
 `/v1/chat/completions` adapter (`api/openai_compatible.py`) is a peer renderer
 over the same core.
 """
@@ -31,28 +31,22 @@ from fastapi.responses import PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
 
 from agent import (
-    SessionGuard,
     SessionNotFoundError,
     SessionStore,
-    Tracer,
 )
 from agent.tracing import event_record
-from llm.client import LLMClient
 from mcp_layer import MCPManager
-from orchestrator import LLMRegistry, Orchestrator
+from orchestrator import LLMRegistry
 
 from .dependencies import (
-    get_guard,
-    get_llm,
     get_mcp,
-    get_orchestrator,
     get_registry,
     get_settings_obj,
     get_store,
-    get_tracer,
+    get_turn_runner,
 )
 from .schemas import HealthResponse
-from .turn import _run_turn, _turn_events
+from .turn import TurnRunner
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -78,21 +72,15 @@ async def health(
 @router.post("/chat", response_class=PlainTextResponse)
 async def chat(
     request: Request,
-    llm: LLMClient = Depends(get_llm),
-    mcp: MCPManager = Depends(get_mcp),
     store: SessionStore = Depends(get_store),
-    guard: SessionGuard = Depends(get_guard),
-    settings = Depends(get_settings_obj),
-    orchestrator: Optional[Orchestrator] = Depends(get_orchestrator),
-    registry: Optional[LLMRegistry] = Depends(get_registry),
-    tracer: Optional[Tracer] = Depends(get_tracer),
+    runner: TurnRunner = Depends(get_turn_runner),
 ) -> PlainTextResponse:
     prompt = (await request.body()).decode("utf-8").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="empty body; send the prompt as plain text")
 
     # Resolve the session before routing so a follow-up turn is routed with the
-    # conversation in view. The new prompt is appended later, inside _run_turn.
+    # conversation in view. The new prompt is appended later, inside the runner.
     session_id = request.headers.get("X-Session-Id")
     if session_id:
         try:
@@ -102,21 +90,8 @@ async def chat(
     else:
         session = await store.create()
 
-    answer, done_reason, _usage = await _run_turn(
-        prompt=prompt,
-        session=session,
-        system_override=None,
-        preferences=None,
-        model_id=None,
-        llm=llm,
-        mcp=mcp,
-        store=store,
-        guard=guard,
-        settings=settings,
-        orchestrator=orchestrator,
-        registry=registry,
-        tracer=tracer,
-    )
+    # Dumb-pipe contract: no system override, model hint, or tool prefs on the wire.
+    answer, done_reason, _usage = await runner.run(prompt=prompt, session=session)
     return PlainTextResponse(
         answer,
         headers={"X-Session-Id": session.session_id, "X-Done-Reason": done_reason},
@@ -126,14 +101,8 @@ async def chat(
 @router.post("/chat/stream")
 async def chat_stream(
     request: Request,
-    llm: LLMClient = Depends(get_llm),
-    mcp: MCPManager = Depends(get_mcp),
     store: SessionStore = Depends(get_store),
-    guard: SessionGuard = Depends(get_guard),
-    settings = Depends(get_settings_obj),
-    orchestrator: Optional[Orchestrator] = Depends(get_orchestrator),
-    registry: Optional[LLMRegistry] = Depends(get_registry),
-    tracer: Optional[Tracer] = Depends(get_tracer),
+    runner: TurnRunner = Depends(get_turn_runner),
 ) -> EventSourceResponse:
     """Native live event stream for one turn — the activity feed.
 
@@ -173,26 +142,12 @@ async def chat_stream(
     async def _events() -> AsyncIterator[dict]:
         step = 0
         try:
-            async for event in _turn_events(
-                prompt=prompt,
-                session=session,
-                system_override=None,
-                preferences=None,
-                model_id=None,
-                llm=llm,
-                mcp=mcp,
-                store=store,
-                guard=guard,
-                settings=settings,
-                orchestrator=orchestrator,
-                registry=registry,
-                tracer=tracer,
-            ):
+            async for event in runner.events(prompt=prompt, session=session):
                 step += 1
                 yield {"data": json.dumps(event_record(event, run_id=run_id, step=step))}
         except HTTPException as exc:
             # The same-session 409 surfaces here (the guard claim is the first
-            # thing _turn_events does). The SSE response is already 200, so we
+            # thing the runner does). The SSE response is already 200, so we
             # report it as a terminal error frame rather than an HTTP status.
             yield {"data": json.dumps({"type": "error", "message": str(exc.detail)})}
         except Exception as exc:  # noqa: BLE001 - stream is open; surface, don't crash.

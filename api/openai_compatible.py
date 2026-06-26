@@ -5,10 +5,10 @@ OpenAI-compatible inbound adapter.
 
 A thin translator that lets OpenWebUI / LibreChat (and any OpenAI client) talk to
 the harness by pointing `base_url` at `/v1`. It owns only wire-format translation:
-OpenAI JSON in -> internal Message list -> the shared core (`_turn_events` /
-`_run_turn` in api/turn.py) -> an OpenAI `chat.completion` object, or an SSE
-stream of `chat.completion.chunk` frames. No orchestration or loop logic lives
-here -- both invariants are preserved by routing every turn through the one core.
+OpenAI JSON in -> internal Message list -> the shared core (the `TurnRunner`
+seam in api/turn.py) -> an OpenAI `chat.completion` object, or an SSE stream of
+`chat.completion.chunk` frames. No orchestration or loop logic lives here --
+both invariants are preserved by routing every turn through the one core.
 
 Stateless by design: each request seeds a fresh ephemeral Session from
 `messages[]` (the client re-feeds history), so there is no server-side
@@ -35,27 +35,19 @@ from sse_starlette.sse import EventSourceResponse
 
 from agent import (
     DoneEvent,
-    SessionGuard,
     SessionStore,
     TextEvent,
-    Tracer,
 )
-from llm.client import LLMClient
 from llm.schemas import AssistantMessage, TextBlock
-from mcp_layer import MCPManager
-from orchestrator import LLMRegistry, Orchestrator
+from orchestrator import LLMRegistry
 
 from .dependencies import (
-    get_guard,
-    get_llm,
-    get_mcp,
-    get_orchestrator,
     get_registry,
     get_settings_obj,
     get_store,
-    get_tracer,
+    get_turn_runner,
 )
-from .turn import _run_turn, _turn_events
+from .turn import TurnRunner
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -182,7 +174,7 @@ def _chunk(cid: str, created: int, model: str, delta: dict, finish_reason: str |
     }
 
 
-async def _stream(model: str, turn_kwargs: dict) -> AsyncIterator[dict]:
+async def _stream(model: str, runner: TurnRunner, turn: dict) -> AsyncIterator[dict]:
     """SSE generator: one role frame, a content delta per TextEvent, a final
     frame carrying finish_reason, then the `[DONE]` sentinel. Each TextEvent is
     mapped explicitly (never dataclasses.asdict -- provider_metadata holds bytes).
@@ -193,7 +185,7 @@ async def _stream(model: str, turn_kwargs: dict) -> AsyncIterator[dict]:
 
     done_reason = "end_turn"
     try:
-        async for event in _turn_events(**turn_kwargs):
+        async for event in runner.events(**turn):
             if isinstance(event, TextEvent):
                 yield {"data": json.dumps(_chunk(cid, created, model, {"content": event.text}, None))}
             elif isinstance(event, DoneEvent):
@@ -210,14 +202,10 @@ async def _stream(model: str, turn_kwargs: dict) -> AsyncIterator[dict]:
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
-    llm: LLMClient = Depends(get_llm),
-    mcp: MCPManager = Depends(get_mcp),
     store: SessionStore = Depends(get_store),
-    guard: SessionGuard = Depends(get_guard),
     settings = Depends(get_settings_obj),
-    orchestrator: Optional[Orchestrator] = Depends(get_orchestrator),
     registry: Optional[LLMRegistry] = Depends(get_registry),
-    tracer: Optional[Tracer] = Depends(get_tracer),
+    runner: TurnRunner = Depends(get_turn_runner),
 ):
     try:
         payload = await request.json()
@@ -246,27 +234,20 @@ async def chat_completions(
         else:
             session.append_assistant(AssistantMessage(content=[TextBlock(text=text)]))
 
-    turn_kwargs = dict(
+    # Only per-request primitives cross the seam; the runner carries the
+    # singletons. `model` is a hint -- the orchestrator still picks tools/system.
+    turn = dict(
         prompt=prompt,
         session=session,
         system_override=system_override,
-        preferences=None,
         model_id=req.model,
-        llm=llm,
-        mcp=mcp,
-        store=store,
-        guard=guard,
-        settings=settings,
-        orchestrator=orchestrator,
-        registry=registry,
-        tracer=tracer,
     )
 
     if req.stream:
-        return EventSourceResponse(_stream(reported_model, turn_kwargs))
+        return EventSourceResponse(_stream(reported_model, runner, turn))
 
     try:
-        answer, done_reason, usage = await _run_turn(**turn_kwargs)
+        answer, done_reason, usage = await runner.run(**turn)
     except Exception as e:  # noqa: BLE001 -- never leak a stack trace to the client.
         logger.exception("error handling /v1/chat/completions")
         return _error_response(str(e), status=500, err_type="server_error")

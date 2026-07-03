@@ -14,7 +14,8 @@ limitations and their extension paths.
 1. [Extending the Harness](#extending-the-harness)
 2. [Operations](#operations)
 3. [Smoke Tests](#smoke-tests)
-4. [Known Limitations](#known-limitations)
+4. [Eval Suite](#eval-suite)
+5. [Known Limitations](#known-limitations)
 
 ---
 
@@ -321,6 +322,10 @@ check if you need one.
 | `done_reason: "llm_error"`                    | API call failed (after retries); see logs for the underlying exception |
 | `done_reason: "truncated"`                    | Model hit `LLM_MAX_TOKENS` mid-answer; `response` is clipped. Raise `LLM_MAX_TOKENS` or the model's per-entry `max_tokens`. |
 | `tool_result` with `is_error` "timed out"     | A tool exceeded `TOOL_TIMEOUT_SECONDS`. The MCP server is slow/hung; the loop continues and the model sees the error. |
+| `tool_result` with `is_error` "invalid arguments for field ..." | The model's tool call failed `jsonschema` validation against the tool's `input_schema`; `mcp.call_tool` was never reached. The model sees the offending field + expected shape and can retry. |
+| `done_reason: "budget_exceeded"`              | Run hit `MAX_RUN_TOKENS`. Disabled (`0`) by default; raise or disable the cap. Inert if the provider reports all-zero usage. |
+| `done_reason: "deadline_exceeded"`            | Run hit `MAX_RUN_SECONDS`, including while an LLM/tool call or retry sleep was in flight. Disabled (`0`) by default; raise or disable the cap, or investigate why the run is slow (retries, a slow provider). |
+| `done_reason: "no_progress"`                  | `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` consecutive tool-call failures (including validation failures). Disabled (`0`) by default. Review the failing tool/args in the logs — the consecutive-failure nudge already tried to steer the model before the abort fired. |
 | 404 on `/chat`                                | The `X-Session-Id` header names a session that doesn't exist (e.g. evicted by TTL/max-size, or after a restart wiped state)|
 | 409 on `/chat`                                | The `X-Session-Id` session already has a request in flight; `SessionGuard` rejects the concurrent turn. Retry after the first completes. |
 
@@ -342,6 +347,7 @@ are run via `./runscript.sh tests/<file>`.
 | `smoke_test_agent.py`             | Full agent loop via Python API (no HTTP)                        |
 | `smoke_test_reliability.py`       | Loop hardening with scripted fakes (no network): LLM retry/backoff, non-transient fast-fail, empty-response retry, truncation reason, tool timeout, tool-result clip |
 | `smoke_test_loop_intelligence.py` | Loop steering with scripted fakes (no network): final-iteration wrap-up, stall detection, consecutive-failure nudge |
+| `smoke_test_bounded_runs.py`      | Phase 1 bounded & safe runs with scripted fakes (no network): token cap, in-flight wall-clock cap, final-answer cap edges, zero-usage-inert-against-token-cap, tool-argument validation, no-progress abort + counter reset, mid-batch abort shape, `/v1` finish_reason mapping for the new reasons |
 | `smoke_test_orchestrator.py`      | Orchestrator decisions: model selection, tool filtering, system prompt generation, thinking level (parsing + live), history block. Asserts `fallback_used=false`. |
 | `smoke_test_http.py`              | Full HTTP surface in-process (lifespan, plain-text `/chat`, session header, 400/404) |
 | `smoke_test_openai_api.py`        | OpenAI-compatible `/v1`: `/v1/models` shape, non-stream `chat.completion`, SSE chunk deltas + `[DONE]`, error JSON. Hermetic (scripted fake LLM, no backend). |
@@ -364,6 +370,53 @@ to pytest.
 
 ---
 
+## Eval Suite
+
+The deterministic eval suite is the harness's regression net for "did the
+agent produce the right outcome?", separate from smoke tests that prove
+subsystems run. It is intentionally cheap: no pytest, no LLM judge, no external
+eval framework.
+
+Run the hermetic tier:
+
+```bash
+./runscript.sh tests/eval_agent.py
+```
+
+Hermetic evals load `tests/eval_data/agent_eval_v1.yaml`, drive the agent loop
+or `TurnRunner` with scripted LLM/MCP fakes, print a per-case pass/fail table,
+and exit non-zero if the pass rate is below the dataset threshold. The live tier
+is skipped loudly by default.
+
+Run live evals manually:
+
+```bash
+EVAL_LIVE=1 ./runscript.sh tests/eval_agent.py
+```
+
+Live evals use the configured real LLM backend from `.env`/`Settings` and an
+empty MCP inventory unless a future live case says otherwise. They are
+best-effort and should not be treated as hermetic CI signal.
+
+Add a new eval case by editing only `tests/eval_data/agent_eval_v1.yaml`:
+
+1. Add an entry under `cases` with a unique `id`, `tier`, `prompt`, scripted
+   `llm.script` responses, optional `mcp.tools`/`mcp.results`, optional `run`
+   knobs, and an `expect` block.
+2. Prefer programmatic expectations: `done_reason`, `answer_contains`,
+   `tool_called`, `tool_not_called`, `tool_call_count`, `mcp_call_count`,
+   `tool_result_contains`, `tool_result_error_count`, `llm_calls`, and
+   `max_iterations`.
+3. Keep the case hermetic unless it genuinely needs a real model; mark live
+   cases with `tier: live`.
+
+The dataset threshold is the minimum pass rate required for the selected tier.
+The current hermetic dataset uses `threshold: 1.0`, meaning any hermetic
+regression fails the runner. If the suite grows to include known-flaky live
+cases, keep that tolerance in the live tier, not in hermetic checks.
+
+---
+
 ## Known Limitations
 
 These are deliberate v1 simplifications, not bugs. Each has a clear
@@ -379,14 +432,18 @@ extension path described above.
   native `/chat` endpoint is still non-streaming (the loop is ready for it; see
   "Streaming" above for the one-route extension).
 - **No authentication.** `/chat` and `/v1` are wide open.
-- **Per-call timeouts, but no overall wall-clock cap.** Each `llm.complete()`
-  attempt is bounded by `LLM_TIMEOUT_SECONDS` and each `mcp.call_tool()` by
-  `TOOL_TIMEOUT_SECONDS`, so a single hung call can't stall a request
-  indefinitely. There is still no cap on *total* request duration — a
-  misbehaving model can consume `max_iterations` of (bounded) tool calls
-  before hitting the iteration cap. A timeout cancels the in-flight call and
+- **Per-call timeouts, plus optional overall token/wall-clock caps.** Each
+  `llm.complete()` attempt is bounded by `LLM_TIMEOUT_SECONDS` and each
+  `mcp.call_tool()` by `TOOL_TIMEOUT_SECONDS`, so a single hung call can't
+  stall a request indefinitely. A timeout cancels the in-flight call and
   abandons it; for the LLM that feeds the retry path, for a tool it becomes an
-  `is_error` result.
+  `is_error` result. `MAX_RUN_TOKENS` and `MAX_RUN_SECONDS` (both `0`/disabled
+  by default) additionally bound *total* run cost/duration across all
+  iterations; the wall-clock budget is also applied to in-flight LLM/tool calls
+  and retry sleeps. See [configuration.md](configuration.md) and the *Bounded &
+  safe runs* section of [architecture.md](architecture.md). The token cap is
+  inert against a provider that reports all-zero usage (no token estimator
+  yet — Phase 3), so the wall-clock cap is the reliable bound until then.
 - **No parallel tool execution.** Sequential is safer; switch when you
   need it.
 - **No token/cost tracking aggregated across requests.** Per-request

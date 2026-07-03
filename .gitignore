@@ -9,3 +9,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+
+
+# DEV SCAFFOLDING (TEMPORARY)
+EXECUTION_PLAN/*
+agentic-harness-design-reference.md
+STREAMING-NEXT-STEPS.md
+AUDIT-DOCS/*

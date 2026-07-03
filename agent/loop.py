@@ -58,7 +58,9 @@ import json
 import logging
 import random
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
+
+import jsonschema
 
 from llm.client import LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock, Usage
@@ -112,6 +114,19 @@ _FAILURE_NUDGE = (
     "reconsider your tool choice and arguments before trying again."
 )
 _CONSECUTIVE_ERROR_NUDGE_THRESHOLD = 3
+_SKIPPED_TOOL_ABORT_MESSAGE = (
+    "tool call skipped because the run aborted after consecutive tool failures"
+)
+_SKIPPED_TOOL_DEADLINE_MESSAGE = (
+    "tool call skipped because the run deadline was exceeded"
+)
+_SKIPPED_TOOL_BUDGET_MESSAGE = (
+    "tool call skipped because the run token budget was exceeded"
+)
+
+
+class _RunDeadlineExceeded(TimeoutError):
+    """Internal signal that the run-level wall clock expired."""
 
 
 def _canonical_args(args: dict[str, Any]) -> str:
@@ -126,6 +141,31 @@ def _canonical_args(args: dict[str, Any]) -> str:
         return json.dumps(args, sort_keys=True, ensure_ascii=False)
     except (TypeError, ValueError):
         return repr(args)
+
+
+def _validate_tool_args(schema: dict[str, Any] | None, args: dict[str, Any]) -> str | None:
+    """Validate a tool call's arguments against its declared `input_schema`.
+
+    Returns a teaching message (bad/missing field + expected shape) on
+    failure, else None. A missing schema is treated as permissive -- we
+    enforce what the tool declares, not constraints we'd have to invent. A
+    malformed schema (the tool's own bug) is logged and skipped rather than
+    blocking an otherwise-valid call.
+    """
+    if not schema:
+        return None
+    try:
+        jsonschema.validate(instance=args, schema=schema)
+    except jsonschema.ValidationError as exc:
+        field = "/".join(str(p) for p in exc.path) or "(top level)"
+        return (
+            f"invalid arguments for field {field!r}: {exc.message}. "
+            f"Expected shape: {json.dumps(exc.schema, ensure_ascii=False)}"
+        )
+    except jsonschema.SchemaError:
+        logger.warning("tool input_schema is invalid; skipping arg validation", exc_info=True)
+        return None
+    return None
 
 
 def _with_wrapup(system: str | None) -> str:
@@ -159,6 +199,8 @@ async def _complete_with_retry(
     max_retries: int,
     base_delay: float,
     thinking_level: str | None = None,
+    deadline_expired: Callable[[], bool] | None = None,
+    remaining_seconds: Callable[[], float | None] | None = None,
 ) -> AssistantMessage:
     """Call llm.complete() with a per-attempt timeout and bounded retries.
 
@@ -176,6 +218,8 @@ async def _complete_with_retry(
     last_response: AssistantMessage | None = None
 
     for attempt in range(attempts):
+        if deadline_expired is not None and deadline_expired():
+            raise _RunDeadlineExceeded()
         try:
             if timeout and timeout > 0:
                 async with asyncio.timeout(timeout):
@@ -195,6 +239,8 @@ async def _complete_with_retry(
                     thinking_level=thinking_level,
                 )
         except Exception as exc:
+            if deadline_expired is not None and deadline_expired():
+                raise _RunDeadlineExceeded() from exc
             transient = isinstance(exc, TimeoutError) or llm.is_transient_error(exc)
             if not transient or attempt == attempts - 1:
                 raise
@@ -203,6 +249,12 @@ async def _complete_with_retry(
                 "transient LLM error (attempt %d/%d), retrying in %.2fs: %s",
                 attempt + 1, attempts, delay, exc,
             )
+            if remaining_seconds is not None:
+                remaining = remaining_seconds()
+                if remaining is not None:
+                    if remaining <= 0:
+                        raise _RunDeadlineExceeded() from exc
+                    delay = min(delay, remaining)
             await asyncio.sleep(delay)
             continue
 
@@ -214,6 +266,12 @@ async def _complete_with_retry(
                 "empty LLM response (attempt %d/%d), retrying in %.2fs",
                 attempt + 1, attempts, delay,
             )
+            if remaining_seconds is not None:
+                remaining = remaining_seconds()
+                if remaining is not None:
+                    if remaining <= 0:
+                        raise _RunDeadlineExceeded()
+                    delay = min(delay, remaining)
             await asyncio.sleep(delay)
             continue
         return response
@@ -245,6 +303,9 @@ async def run_agent(
     max_retries: int = 0,
     retry_base_delay: float = 0.5,
     tool_result_max_chars: int | None = None,
+    max_run_tokens: int | None = None,
+    max_run_seconds: float | None = None,
+    abort_after_consecutive_tool_failures: int | None = None,
     thinking_level: str | None = None,
     tracer: Tracer | None = None,
     run_id: str | None = None,
@@ -281,6 +342,20 @@ async def run_agent(
       tool_result_max_chars: clip threshold for a single flattened tool
              result before it enters session history. None (or <=0) disables
              clipping.
+      max_run_tokens: hard ceiling on cumulative Usage.total_tokens for this
+             run. On trip, exits done_reason="budget_exceeded" with the
+             partial answer. None (or <=0) disables. Inert when the provider
+             reports all-zero usage -- there is no token estimator (yet).
+      max_run_seconds: hard wall-clock ceiling on this run, measured from
+             just before the first iteration. On trip, exits
+             done_reason="deadline_exceeded" with the partial answer. None
+             (or <=0) disables.
+      abort_after_consecutive_tool_failures: abort the run
+             done_reason="no_progress" after this many tool-call failures in
+             a row (a success resets the count). Checked in addition to the
+             always-on consecutive-failure nudge at 3; set higher than 3 so
+             the model gets a chance to recover first. None (or <=0)
+             disables.
       thinking_level: optional "low"|"medium"|"high" deliberation hint passed
              to llm.complete() on every iteration of this run. None leaves the
              model default. The orchestrator-aware route supplies this from its
@@ -302,8 +377,12 @@ async def run_agent(
     # list governs what the model SEES, not what the manager can ROUTE.
     if tools is None:
         tools = mcp.get_tools_for_llm()
+    tool_schemas: dict[str, dict[str, Any] | None] = {
+        t["name"]: t.get("input_schema") for t in tools
+    }
     iteration = 0
     cumulative = Usage()
+    run_started = time.perf_counter()
 
     # Run-scoped loop-intelligence state. `seen_calls` keys every executed
     # tool call so an identical repeat is short-circuited; `consecutive_tool_errors`
@@ -341,7 +420,77 @@ async def run_agent(
             thinking_tokens=cumulative.thinking_tokens,
         )
 
+    def _remaining_run_seconds() -> float | None:
+        if not max_run_seconds or max_run_seconds <= 0:
+            return None
+        return max_run_seconds - (time.perf_counter() - run_started)
+
+    def _deadline_exceeded() -> bool:
+        remaining = _remaining_run_seconds()
+        return remaining is not None and remaining <= 0
+
+    def _effective_timeout(per_call_timeout: float | None) -> float | None:
+        timeouts = [
+            t for t in (per_call_timeout, _remaining_run_seconds())
+            if t is not None and t > 0
+        ]
+        return min(timeouts) if timeouts else None
+
+    def _token_budget_exceeded() -> bool:
+        return (
+            bool(max_run_tokens)
+            and max_run_tokens > 0
+            and cumulative.total_tokens >= max_run_tokens
+        )
+
+    def _skipped_result(tu: ToolUseBlock, content: str) -> ToolResultBlock:
+        return ToolResultBlock(
+            tool_use_id=tu.id,
+            name=tu.name,
+            content=content,
+            is_error=True,
+        )
+
+    def _skipped_tool_events(
+        skipped_tools: list[ToolUseBlock],
+        content: str,
+        *,
+        first_call_already_emitted: bool = False,
+    ) -> tuple[list[Event], list[ToolResultBlock]]:
+        events: list[Event] = []
+        results: list[ToolResultBlock] = []
+        for index, skipped in enumerate(skipped_tools):
+            if not (first_call_already_emitted and index == 0):
+                events.append(ToolCallEvent(
+                    id=skipped.id,
+                    name=skipped.name,
+                    input=skipped.input,
+                ))
+            result = _skipped_result(skipped, content)
+            events.append(ToolResultEvent(
+                id=skipped.id,
+                name=skipped.name,
+                content=result.content,
+                is_error=result.is_error,
+                latency_ms=None,
+            ))
+            results.append(result)
+        return events, results
+
     while iteration < max_iterations:
+        # ----- bounded-run guards before spending another LLM call -----
+        if _deadline_exceeded():
+            elapsed = time.perf_counter() - run_started
+            logger.warning("run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
+                           max_run_seconds, elapsed)
+            yield await _emit(_done(reason="deadline_exceeded"))
+            return
+        if _token_budget_exceeded():
+            logger.warning("run exceeded max_run_tokens=%d (used=%d)",
+                           max_run_tokens, cumulative.total_tokens)
+            yield await _emit(_done(reason="budget_exceeded"))
+            return
+
         iteration += 1
 
         # ----- final-iteration wrap-up -----
@@ -370,11 +519,19 @@ async def run_agent(
                 tools=effective_tools or None,
                 system=effective_system,
                 max_tokens=max_tokens,
-                timeout=llm_timeout_seconds,
+                timeout=_effective_timeout(llm_timeout_seconds),
                 max_retries=max_retries,
                 base_delay=retry_base_delay,
                 thinking_level=thinking_level,
+                deadline_expired=_deadline_exceeded,
+                remaining_seconds=_remaining_run_seconds,
             )
+        except _RunDeadlineExceeded:
+            elapsed = time.perf_counter() - run_started
+            logger.warning("run exceeded max_run_seconds=%.1f during LLM call (elapsed=%.1fs)",
+                           max_run_seconds, elapsed)
+            yield await _emit(_done(reason="deadline_exceeded"))
+            return
         except Exception as e:
             # LLM failures we cannot recover from (after retries). The model
             # never sees this; the caller does.
@@ -413,6 +570,38 @@ async def run_agent(
         tool_uses: list[ToolUseBlock] = [
             b for b in response.content if isinstance(b, ToolUseBlock)
         ]
+
+        # A guard can trip immediately after this LLM call's usage/latency is
+        # known. If the assistant already requested tools, close that protocol
+        # turn with synthetic skipped results before terminating the run.
+        guard_reason: str | None = None
+        skipped_message: str | None = None
+        if _deadline_exceeded():
+            guard_reason = "deadline_exceeded"
+            skipped_message = _SKIPPED_TOOL_DEADLINE_MESSAGE
+        elif _token_budget_exceeded():
+            guard_reason = "budget_exceeded"
+            skipped_message = _SKIPPED_TOOL_BUDGET_MESSAGE
+
+        if guard_reason is not None:
+            if tool_uses:
+                assert skipped_message is not None
+                events, results = _skipped_tool_events(tool_uses, skipped_message)
+                for event in events:
+                    yield await _emit(event)
+                session.append_tool_results(results)
+                if store is not None:
+                    await store.save(session)
+            if guard_reason == "deadline_exceeded":
+                elapsed = time.perf_counter() - run_started
+                logger.warning("run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
+                               max_run_seconds, elapsed)
+            else:
+                logger.warning("run exceeded max_run_tokens=%d (used=%d)",
+                               max_run_tokens, cumulative.total_tokens)
+            yield await _emit(_done(reason=guard_reason))
+            return
+
         if not tool_uses:
             # No tools requested -> the model is done. Distinguish a truncated
             # answer (stopped on max_tokens) from a genuine end_turn so callers
@@ -429,8 +618,26 @@ async def run_agent(
 
         # ----- execute the tools sequentially -----
         results: list[ToolResultBlock] = []
-        for tu in tool_uses:
+        for tool_index, tu in enumerate(tool_uses):
             yield await _emit(ToolCallEvent(id=tu.id, name=tu.name, input=tu.input))
+
+            if _deadline_exceeded():
+                events, skipped_results = _skipped_tool_events(
+                    tool_uses[tool_index:],
+                    _SKIPPED_TOOL_DEADLINE_MESSAGE,
+                    first_call_already_emitted=True,
+                )
+                for event in events:
+                    yield await _emit(event)
+                results.extend(skipped_results)
+                session.append_tool_results(results)
+                if store is not None:
+                    await store.save(session)
+                elapsed = time.perf_counter() - run_started
+                logger.warning("run exceeded max_run_seconds=%.1f before tool dispatch (elapsed=%.1fs)",
+                               max_run_seconds, elapsed)
+                yield await _emit(_done(reason="deadline_exceeded"))
+                return
 
             # ----- stall detection -----
             # If the model asks for a call identical to one already run this
@@ -444,31 +651,65 @@ async def run_agent(
                 is_error = True
             else:
                 seen_calls.add(call_key)
-                tool_started = time.perf_counter()
-                try:
-                    if tool_timeout_seconds and tool_timeout_seconds > 0:
-                        async with asyncio.timeout(tool_timeout_seconds):
+
+                # ----- tool-argument validation -----
+                # Model-hallucinated args would otherwise reach the MCP server
+                # and come back as an opaque remote error. Validate against the
+                # tool's own input_schema and short-circuit with a teaching
+                # message naming the bad field -- mcp.call_tool never runs.
+                validation_error = _validate_tool_args(tool_schemas.get(tu.name), tu.input)
+                if validation_error is not None:
+                    logger.info("invalid args for %s: %s", tu.name, validation_error)
+                    content = validation_error
+                    is_error = True
+                    tool_latency_ms = None
+                else:
+                    tool_started = time.perf_counter()
+                    try:
+                        effective_tool_timeout = _effective_timeout(tool_timeout_seconds)
+                        if effective_tool_timeout and effective_tool_timeout > 0:
+                            async with asyncio.timeout(effective_tool_timeout):
+                                call_result = await mcp.call_tool(tu.name, tu.input)
+                        else:
                             call_result = await mcp.call_tool(tu.name, tu.input)
-                    else:
-                        call_result = await mcp.call_tool(tu.name, tu.input)
-                    content = call_result.content
-                    is_error = call_result.is_error
-                except TimeoutError:
-                    # A hung tool would otherwise hang the request (and lock the
-                    # session via SessionGuard). Surface it as a tool-result error
-                    # so the model can react and the loop keeps going.
-                    logger.warning("tool %s timed out after %ss", tu.name, tool_timeout_seconds)
-                    content = f"tool {tu.name!r} timed out after {tool_timeout_seconds}s"
-                    is_error = True
-                except Exception as e:
-                    # An exception escaping mcp.call_tool() is unusual (it normally
-                    # returns ToolCallResult(is_error=True) on failures). Still,
-                    # we convert to a tool-result-shaped error so the model can
-                    # react rather than the whole loop dying.
-                    logger.exception("tool execution raised for %s", tu.name)
-                    content = f"tool execution raised: {e}"
-                    is_error = True
-                tool_latency_ms = round((time.perf_counter() - tool_started) * 1000, 2)
+                        content = call_result.content
+                        is_error = call_result.is_error
+                    except TimeoutError:
+                        if _deadline_exceeded():
+                            events, skipped_results = _skipped_tool_events(
+                                tool_uses[tool_index:],
+                                _SKIPPED_TOOL_DEADLINE_MESSAGE,
+                                first_call_already_emitted=True,
+                            )
+                            for event in events:
+                                yield await _emit(event)
+                            results.extend(skipped_results)
+                            session.append_tool_results(results)
+                            if store is not None:
+                                await store.save(session)
+                            elapsed = time.perf_counter() - run_started
+                            logger.warning(
+                                "run exceeded max_run_seconds=%.1f during tool dispatch (elapsed=%.1fs)",
+                                max_run_seconds,
+                                elapsed,
+                            )
+                            yield await _emit(_done(reason="deadline_exceeded"))
+                            return
+                        # A hung tool would otherwise hang the request (and lock the
+                        # session via SessionGuard). Surface it as a tool-result error
+                        # so the model can react and the loop keeps going.
+                        logger.warning("tool %s timed out after %ss", tu.name, tool_timeout_seconds)
+                        content = f"tool {tu.name!r} timed out after {tool_timeout_seconds}s"
+                        is_error = True
+                    except Exception as e:
+                        # An exception escaping mcp.call_tool() is unusual (it normally
+                        # returns ToolCallResult(is_error=True) on failures). Still,
+                        # we convert to a tool-result-shaped error so the model can
+                        # react rather than the whole loop dying.
+                        logger.exception("tool execution raised for %s", tu.name)
+                        content = f"tool execution raised: {e}"
+                        is_error = True
+                    tool_latency_ms = round((time.perf_counter() - tool_started) * 1000, 2)
 
             # Bound the result so one large output can't flood context for the
             # rest of the run. Clip once, before both the event and the block,
@@ -496,6 +737,35 @@ async def run_agent(
                 content=content,
                 is_error=is_error,
             ))
+
+            # ----- no-progress abort -----
+            # The nudge (above) informs the model; this stops a cascade it
+            # doesn't recover from. Checked after the nudge so the threshold
+            # ordering (abort > nudge) always gives the model its shot first.
+            # Ends the run mid-batch -- whatever results were already
+            # collected this iteration are still recorded before returning.
+            if (
+                is_error
+                and abort_after_consecutive_tool_failures
+                and abort_after_consecutive_tool_failures > 0
+                and consecutive_tool_errors >= abort_after_consecutive_tool_failures
+            ):
+                events, skipped_results = _skipped_tool_events(
+                    tool_uses[tool_index + 1:],
+                    _SKIPPED_TOOL_ABORT_MESSAGE,
+                )
+                for event in events:
+                    yield await _emit(event)
+                results.extend(skipped_results)
+                logger.warning(
+                    "aborting run: %d consecutive tool failures (threshold=%d)",
+                    consecutive_tool_errors, abort_after_consecutive_tool_failures,
+                )
+                session.append_tool_results(results)
+                if store is not None:
+                    await store.save(session)
+                yield await _emit(_done(reason="no_progress"))
+                return
 
         # ----- record the tool results turn and loop -----
         session.append_tool_results(results)

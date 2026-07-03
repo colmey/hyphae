@@ -1,5 +1,11 @@
 # 10 — Implementation Progress
 
+> **⚠️ Superseded (2026-07-01):** active tracking has moved to
+> [`EXECUTION_PLAN/README.md`](../EXECUTION_PLAN/README.md), which sequences the
+> remaining roadmap items plus the adapter-architecture work as per-session phase
+> files. This file remains as the historical record of milestones 1–3 (and the
+> decided API contract below still stands). Start new sessions from EXECUTION_PLAN.
+
 The execution tracker for the audit-driven improvements. **Every working session
 starts by reading this file's *Start here* and ends by updating the *Status* table
 + *Session log* below.** Each milestone is a separate session that ships clean code

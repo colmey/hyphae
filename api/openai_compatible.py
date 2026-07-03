@@ -80,6 +80,9 @@ _FINISH_REASONS = {
     "truncated": "length",
     "max_tokens": "length",
     "max_iterations": "length",
+    "budget_exceeded": "length",
+    "deadline_exceeded": "length",
+    "no_progress": "stop",
 }
 
 

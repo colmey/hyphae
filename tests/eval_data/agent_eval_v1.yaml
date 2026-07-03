@@ -1,0 +1,514 @@
+version: 1
+threshold: 1.0
+cases:
+  - id: hermetic_no_tool_answer
+    tier: hermetic
+    prompt: "Answer without tools."
+    llm:
+      script:
+        - text: "Final: the capital of France is Paris."
+          stop_reason: end_turn
+          usage: {total_tokens: 8}
+    expect:
+      done_reason: end_turn
+      answer_contains: ["Paris"]
+      tool_not_called: ["srv__lookup"]
+      max_iterations: 1
+
+  - id: hermetic_two_text_blocks
+    tier: hermetic
+    prompt: "Give a two-part answer."
+    llm:
+      script:
+        - text_blocks: ["Hello", ", deterministic evals."]
+          stop_reason: end_turn
+    expect:
+      done_reason: end_turn
+      answer_contains: ["Hello, deterministic evals."]
+      tool_call_count: 0
+      max_iterations: 1
+
+  - id: hermetic_single_tool_chain
+    tier: hermetic
+    prompt: "Look up the order status."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_1, name: srv__lookup, input: {order_id: "A100"}}
+        - text: "Order A100 is shipped."
+    mcp:
+      tools:
+        - name: srv__lookup
+          input_schema:
+            type: object
+            properties: {order_id: {type: string}}
+            required: [order_id]
+      results:
+        - content: "status=shipped"
+          is_error: false
+    expect:
+      done_reason: end_turn
+      answer_contains: ["shipped"]
+      tool_called: ["srv__lookup"]
+      tool_result_contains: ["status=shipped"]
+      max_iterations: 2
+
+  - id: hermetic_multi_step_tool_chain
+    tier: hermetic
+    prompt: "Find a user, then fetch invoices."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_user, name: srv__lookup_user, input: {email: "ada@example.test"}}
+        - tool_calls:
+            - {id: call_invoice, name: srv__lookup_invoice, input: {user_id: "u-123"}}
+        - text: "Ada has invoice INV-9 open."
+    mcp:
+      tools:
+        - name: srv__lookup_user
+          input_schema: {}
+        - name: srv__lookup_invoice
+          input_schema: {}
+      results:
+        - content: "user_id=u-123"
+          is_error: false
+        - content: "invoice=INV-9"
+          is_error: false
+    expect:
+      done_reason: end_turn
+      answer_contains: ["INV-9"]
+      tool_called: ["srv__lookup_user", "srv__lookup_invoice"]
+      tool_call_count: 2
+      max_iterations: 3
+
+  - id: hermetic_parallel_tool_batch
+    tier: hermetic
+    prompt: "Fetch two independent facts."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_a, name: srv__lookup, input: {key: "alpha"}}
+            - {id: call_b, name: srv__lookup, input: {key: "beta"}}
+        - text: "Alpha is 1 and beta is 2."
+    mcp:
+      results:
+        - content: "alpha=1"
+          is_error: false
+        - content: "beta=2"
+          is_error: false
+    expect:
+      done_reason: end_turn
+      answer_contains: ["Alpha is 1", "beta is 2"]
+      tool_call_count: 2
+      mcp_call_count: 2
+      max_iterations: 2
+
+  - id: hermetic_abstention_no_tool
+    tier: hermetic
+    prompt: "Do not browse; answer from the provided context."
+    llm:
+      script:
+        - text: "I cannot verify that from the provided context."
+    expect:
+      done_reason: end_turn
+      answer_contains: ["cannot verify"]
+      tool_not_called: ["srv__lookup", "srv__web"]
+      tool_call_count: 0
+      max_iterations: 1
+
+  - id: hermetic_tool_error_recovery
+    tier: hermetic
+    prompt: "Recover when the first lookup fails."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_bad, name: srv__lookup, input: {key: "missing"}}
+        - tool_calls:
+            - {id: call_good, name: srv__lookup, input: {key: "backup"}}
+        - text: "Recovered with the backup result: green."
+    mcp:
+      results:
+        - content: "not found"
+          is_error: true
+        - content: "color=green"
+          is_error: false
+    expect:
+      done_reason: end_turn
+      answer_contains: ["green"]
+      tool_result_error_count: 1
+      mcp_call_count: 2
+      max_iterations: 3
+
+  - id: hermetic_tool_exception_recovery
+    tier: hermetic
+    prompt: "Handle a raised tool exception."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_raises, name: srv__lookup, input: {key: "boom"}}
+        - text: "The tool failed, so I will report the lookup failure."
+    mcp:
+      results:
+        - raises: "backend exploded"
+    expect:
+      done_reason: end_turn
+      answer_contains: ["lookup failure"]
+      tool_result_contains: ["tool execution raised"]
+      tool_result_error_count: 1
+      max_iterations: 2
+
+  - id: hermetic_validation_error_recovery
+    tier: hermetic
+    prompt: "Correct invalid tool arguments."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_bad, name: srv__lookup, input: {key: 7}}
+        - tool_calls:
+            - {id: call_good, name: srv__lookup, input: {key: "seven"}}
+        - text: "The corrected lookup returned seven."
+    mcp:
+      tools:
+        - name: srv__lookup
+          input_schema:
+            type: object
+            properties: {key: {type: string}}
+            required: [key]
+      results:
+        - content: "value=seven"
+          is_error: false
+    expect:
+      done_reason: end_turn
+      answer_contains: ["seven"]
+      tool_result_contains: ["invalid arguments", "value=seven"]
+      mcp_call_count: 1
+      max_iterations: 3
+
+  - id: hermetic_repeated_call_stall
+    tier: hermetic
+    prompt: "Avoid re-running identical calls."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_1, name: srv__lookup, input: {key: "same"}}
+        - tool_calls:
+            - {id: call_2, name: srv__lookup, input: {key: "same"}}
+        - text: "I will stop repeating the same lookup."
+    mcp:
+      results:
+        - content: "same=result"
+          is_error: false
+    expect:
+      done_reason: end_turn
+      answer_contains: ["stop repeating"]
+      tool_result_contains: ["already called this tool"]
+      tool_result_error_count: 1
+      mcp_call_count: 1
+      max_iterations: 3
+
+  - id: hermetic_distinct_args_not_stall
+    tier: hermetic
+    prompt: "Distinct arguments should both run."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_1, name: srv__lookup, input: {key: "one"}}
+        - tool_calls:
+            - {id: call_2, name: srv__lookup, input: {key: "two"}}
+        - text: "Both distinct lookups completed."
+    mcp:
+      results:
+        - content: "one=1"
+          is_error: false
+        - content: "two=2"
+          is_error: false
+    expect:
+      done_reason: end_turn
+      answer_contains: ["Both distinct"]
+      tool_result_not_contains: ["already called this tool"]
+      mcp_call_count: 2
+      max_iterations: 3
+
+  - id: hermetic_consecutive_failure_nudge
+    tier: hermetic
+    prompt: "Three failing calls should trigger a nudge."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_1, name: srv__lookup, input: {key: "a"}}
+        - tool_calls:
+            - {id: call_2, name: srv__lookup, input: {key: "b"}}
+        - tool_calls:
+            - {id: call_3, name: srv__lookup, input: {key: "c"}}
+        - text: "After the failures, I will stop and explain."
+    mcp:
+      results:
+        - content: "failure a"
+          is_error: true
+        - content: "failure b"
+          is_error: true
+        - content: "failure c"
+          is_error: true
+    expect:
+      done_reason: end_turn
+      answer_contains: ["stop and explain"]
+      tool_result_contains: ["Multiple tool calls in a row have failed"]
+      tool_result_error_count: 3
+      max_iterations: 4
+
+  - id: hermetic_no_progress_abort
+    tier: hermetic
+    prompt: "Abort after repeated tool failures."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_1, name: srv__lookup, input: {key: "a"}}
+        - tool_calls:
+            - {id: call_2, name: srv__lookup, input: {key: "b"}}
+        - tool_calls:
+            - {id: call_3, name: srv__lookup, input: {key: "c"}}
+    mcp:
+      results:
+        - content: "failure a"
+          is_error: true
+        - content: "failure b"
+          is_error: true
+        - content: "failure c"
+          is_error: true
+    run:
+      abort_after_consecutive_tool_failures: 3
+      max_iterations: 10
+    expect:
+      done_reason: no_progress
+      answer_contains: []
+      tool_result_contains: ["Multiple tool calls in a row have failed"]
+      tool_result_error_count: 3
+      max_iterations: 3
+
+  - id: hermetic_truncation
+    tier: hermetic
+    prompt: "Produce a truncated response."
+    llm:
+      script:
+        - text: "Partial answer"
+          stop_reason: max_tokens
+    expect:
+      done_reason: truncated
+      answer_contains: ["Partial"]
+      max_iterations: 1
+
+  - id: hermetic_budget_exceeded_after_tool_request
+    tier: hermetic
+    prompt: "Trip token budget after a tool request."
+    llm:
+      script:
+        - text: "partial before budget"
+          tool_calls:
+            - {id: call_1, name: srv__lookup, input: {key: "x"}}
+          usage: {total_tokens: 50}
+    run:
+      max_run_tokens: 30
+      max_iterations: 10
+    expect:
+      done_reason: budget_exceeded
+      answer_contains: ["partial before budget"]
+      tool_called: ["srv__lookup"]
+      tool_result_contains: ["token budget was exceeded"]
+      mcp_call_count: 0
+      max_iterations: 1
+
+  - id: hermetic_budget_exceeded_final_answer
+    tier: hermetic
+    prompt: "Trip token budget on a final answer."
+    llm:
+      script:
+        - text: "final partial over budget"
+          usage: {total_tokens: 45}
+    run:
+      max_run_tokens: 40
+    expect:
+      done_reason: budget_exceeded
+      answer_contains: ["final partial"]
+      tool_call_count: 0
+      max_iterations: 1
+
+  - id: hermetic_deadline_exceeded_during_llm
+    tier: hermetic
+    prompt: "Trip wall-clock during the model call."
+    llm:
+      delay: 0.05
+      script:
+        - text: "late answer should not stream"
+    run:
+      max_run_seconds: 0.01
+      max_iterations: 10
+    expect:
+      done_reason: deadline_exceeded
+      answer_exact: ""
+      llm_calls: 1
+      max_iterations: 1
+
+  - id: hermetic_deadline_exceeded_after_slow_tool
+    tier: hermetic
+    prompt: "Trip wall-clock during a slow tool."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_1, name: srv__lookup, input: {key: "slow"}}
+        - text: "should not be called"
+    mcp:
+      results:
+        - content: "slow result"
+          is_error: false
+          delay: 0.05
+    run:
+      max_run_seconds: 0.01
+      tool_timeout_seconds: 1.0
+      max_iterations: 10
+    expect:
+      done_reason: deadline_exceeded
+      llm_calls: 1
+      tool_result_contains: ["run deadline was exceeded"]
+      max_iterations: 1
+
+  - id: hermetic_max_iterations_wrapup
+    tier: hermetic
+    prompt: "Use one tool, then wrap up on the final iteration."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_1, name: srv__lookup, input: {key: "x"}}
+        - text: "Best effort answer from gathered context."
+    run:
+      max_iterations: 2
+      system: "You are concise."
+    mcp:
+      results:
+        - content: "x=context"
+          is_error: false
+    expect:
+      done_reason: max_iterations
+      answer_contains: ["Best effort"]
+      tools_seen_none_on_calls: [2]
+      system_contains_on_calls:
+        - call: 2
+          substring: "final step"
+
+  - id: hermetic_empty_response
+    tier: hermetic
+    prompt: "Model returns empty."
+    llm:
+      script:
+        - stop_reason: empty
+          content: []
+    expect:
+      done_reason: empty
+      answer_exact: ""
+      max_iterations: 1
+
+  - id: hermetic_empty_retry
+    tier: hermetic
+    prompt: "Retry one empty response."
+    llm:
+      script:
+        - stop_reason: empty
+          content: []
+        - text: "Recovered after empty response."
+    run:
+      max_retries: 1
+      retry_base_delay: 0.0
+    expect:
+      done_reason: end_turn
+      answer_contains: ["Recovered"]
+      llm_calls: 2
+      max_iterations: 1
+
+  - id: hermetic_transient_retry
+    tier: hermetic
+    prompt: "Retry a transient model failure."
+    llm:
+      script:
+        - raises: transient
+          message: "rate limited"
+        - text: "Recovered after retry."
+    run:
+      max_retries: 1
+      retry_base_delay: 0.0
+    expect:
+      done_reason: end_turn
+      answer_contains: ["Recovered"]
+      llm_calls: 2
+      error_event_count: 0
+      max_iterations: 1
+
+  - id: hermetic_nontransient_llm_error
+    tier: hermetic
+    prompt: "Non-transient model failure."
+    llm:
+      script:
+        - raises: error
+          message: "bad request"
+    run:
+      max_retries: 1
+      retry_base_delay: 0.0
+    expect:
+      done_reason: llm_error
+      error_event_contains: ["bad request"]
+      llm_calls: 1
+      max_iterations: 1
+
+  - id: hermetic_tool_result_clipping
+    tier: hermetic
+    prompt: "Clip oversized tool output."
+    llm:
+      script:
+        - tool_calls:
+            - {id: call_1, name: srv__lookup, input: {key: "big"}}
+        - text: "Summarized the clipped output."
+    mcp:
+      results:
+        - content_repeat: {text: "x", count: 500}
+          is_error: false
+    run:
+      tool_result_max_chars: 25
+    expect:
+      done_reason: end_turn
+      answer_contains: ["Summarized"]
+      tool_result_contains: ["truncated"]
+      max_tool_result_chars: 120
+      max_iterations: 2
+
+  - id: hermetic_turnrunner_orchestration_fallback
+    tier: hermetic
+    mode: turn_runner
+    prompt: "Exercise route-level orchestration fallback."
+    llm:
+      script:
+        - text: "Fallback route answered with the default model."
+    mcp:
+      tools:
+        - name: srv__lookup
+          input_schema: {}
+    orchestration:
+      fallback_used: true
+      fallback_reason: "scripted fallback"
+      selected_model_id: default
+      selected_tools: ["srv__lookup"]
+      generated_system_prompt: "Use the fallback system prompt."
+      thinking_level: low
+    expect:
+      done_reason: end_turn
+      answer_contains: ["Fallback route"]
+      selected_thinking_level: low
+      system_contains_on_calls:
+        - call: 1
+          substring: "fallback system prompt"
+
+  - id: live_no_tool_smoke
+    tier: live
+    prompt: "Answer in one sentence: what is 2 + 2?"
+    expect:
+      done_reason: end_turn
+      answer_contains: ["4"]
+      tool_call_count: 0
+      max_iterations: 2

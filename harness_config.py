@@ -124,6 +124,42 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Bounded & safe runs (agent loop) ----------------------------------
+    # Independent stop conditions layered on top of max_loop_iterations: a
+    # cumulative token ceiling, a wall-clock ceiling, and an abort threshold
+    # for a tool-failure cascade. Each ends the run with its own done_reason
+    # and the partial answer -- never silently. Off by default (0 = disabled)
+    # so upgrading the harness doesn't change behavior until an operator
+    # opts in; the loop's own parameter defaults also disable, so direct
+    # callers (smoke tests) are unaffected either way.
+    max_run_tokens: int = Field(
+        default=0,
+        description=(
+            "Hard ceiling on cumulative total_tokens for one run; ends the run "
+            "budget_exceeded with the partial answer. <=0 disables. Inert against "
+            "a provider/model that reports all-zero usage -- no token estimator "
+            "yet (planned for Phase 3); the wall-clock cap is the reliable bound "
+            "until then."
+        ),
+    )
+    max_run_seconds: float = Field(
+        default=0,
+        description=(
+            "Hard wall-clock ceiling on one run, measured from the first "
+            "iteration and enforced during LLM/tool calls; ends the run "
+            "deadline_exceeded with the partial answer. <=0 disables."
+        ),
+    )
+    abort_after_consecutive_tool_failures: int = Field(
+        default=0,
+        description=(
+            "Abort the run no_progress after this many tool-call failures in a "
+            "row (a success resets the count). Should be greater than the "
+            "fixed at-3 consecutive-failure nudge so the model gets a chance to "
+            "recover first. <=0 disables."
+        ),
+    )
+
     # Harness paths. All runtime config lives under config/ by convention.
     mcp_config_path: Path = Field(default=Path("config/mcp_config.yaml"))
     max_loop_iterations: int = Field(default=10) # was 25, find a good balance

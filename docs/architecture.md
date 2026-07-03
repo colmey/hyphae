@@ -78,6 +78,8 @@ manager.
 - **`google-genai`** for the LLM (not the deprecated `google-generativeai`).
 - **Pydantic + pydantic-settings** for config and request/response schemas.
 - **PyYAML** for the MCP config file and the models registry.
+- **`jsonschema`** to validate tool-call arguments against each tool's
+  declared `input_schema` at the dispatch seam (Phase 1 bounded runs).
 - **`asgi-lifespan`** (test-only) for running FastAPI lifespan in
   in-process httpx tests.
 
@@ -408,11 +410,16 @@ discriminators for JSON serialization at the API boundary:
 | `DoneEvent`                    | `reason, iterations, total_tokens, input_tokens, output_tokens, thinking_tokens` | Loop finished |
 | `ErrorEvent`                   | `message`                                    | Unrecoverable internal failure            |
 
-`DoneEvent.reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty", "truncated"}`.
+`DoneEvent.reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty", "truncated",
+"budget_exceeded", "deadline_exceeded", "no_progress"}`.
 `"truncated"` = stopped on `max_tokens` mid-answer. `"max_iterations"` = the run
 hit the iteration cap; the loop forces a best-effort final answer on that last
 step (see the final-iteration wrap-up below), so this reason now ships *with* an
-answer rather than fragments.
+answer rather than fragments. The last three are the **bounded-run guards**
+(Settings-driven, off by default — see below): `"budget_exceeded"` = cumulative
+token cap hit, `"deadline_exceeded"` = wall-clock cap hit, `"no_progress"` = the
+consecutive-tool-failure abort threshold hit. All three carry whatever partial
+answer had already accrued — a guard never silently drops what was produced.
 
 **Important distinction**: tool execution failures do **not** emit
 `ErrorEvent`. They become `ToolResultEvent(is_error=True)` so the model
@@ -437,6 +444,9 @@ async def run_agent(
     max_retries: int = 0,
     retry_base_delay: float = 0.5,
     tool_result_max_chars: int | None = None,
+    max_run_tokens: int | None = None,
+    max_run_seconds: float | None = None,
+    abort_after_consecutive_tool_failures: int | None = None,
     thinking_level: str | None = None,
 ) -> AsyncIterator[Event]:
     ...
@@ -466,8 +476,23 @@ inspects it. `None` (the default) leaves the model's own default. The route
 supplies the orchestrator's chosen level here; see *Thinking level* under
 the Orchestration Layer.
 
+**The bounded-run guard params** (`max_run_tokens`, `max_run_seconds`,
+`abort_after_consecutive_tool_failures`) follow the same default-disabled
+pattern as the reliability params: `None`/`<=0` disables each dimension, so
+direct callers are unaffected. The `/chat` and `/v1` routes opt in via the
+corresponding `Settings` fields, themselves `0` (disabled) by default — an
+operator sets them explicitly. See *Bounded & safe runs* below.
+
 Per-iteration algorithm:
 
+0. **Bounded-run guard check**, before spending another LLM call: if
+   `max_run_seconds` has elapsed since just before iteration 1, yield
+   `DoneEvent("deadline_exceeded")` and stop; if cumulative
+   `Usage.total_tokens` has reached `max_run_tokens`, yield
+   `DoneEvent("budget_exceeded")` and stop. Both report the answer text
+   already accrued. The wall-clock budget also wraps in-flight LLM/tool calls
+   and retry sleeps by using the smaller of the per-call timeout and remaining
+   run time.
 1. `await llm.complete(session.messages, tools=tools or None, system=...)`,
    wrapped in a per-attempt `asyncio.timeout` and bounded retry (transient
    429/5xx/timeout/reset, plus one more try on an empty response). If it
@@ -478,7 +503,11 @@ Per-iteration algorithm:
 3. Yield a `UsageEvent` for this iteration's tokens.
 4. If `store` was provided, `await store.save(session)`.
 5. Yield a `TextEvent` for each non-empty text block.
-6. Collect `ToolUseBlock`s. If none → yield `DoneEvent("end_turn")` and stop,
+6. Collect `ToolUseBlock`s. If the just-reported usage crossed
+   `max_run_tokens`, yield `DoneEvent("budget_exceeded")` after streaming any
+   text. If the assistant requested tools, first emit and persist synthetic
+   skipped tool results so provider tool-call/tool-result pairing remains
+   valid. If there are no tool calls → yield `DoneEvent("end_turn")` and stop,
    unless the response stopped on `max_tokens` (truncated mid-answer →
    `DoneEvent("truncated")`) or this is the forced final iteration (→
    `DoneEvent("max_iterations")`, see below).
@@ -488,14 +517,29 @@ Per-iteration algorithm:
      already executed this run, skip `mcp.call_tool` and return a synthetic
      `is_error=True` result telling the model the result won't change — this
      breaks the fixation loops that otherwise burn the iteration budget.
-   - Otherwise `await mcp.call_tool(name, input)`, wrapped in `asyncio.timeout`.
-     Any failure — including a timeout — becomes `is_error=True`, not
-     loop-terminating, so the model can react. The flattened result is clipped
-     to `tool_result_max_chars` before it enters history (one large output
-     can't flood context for the rest of the run).
+   - **Argument validation:** otherwise, validate `input` against the tool's
+     declared `input_schema` (via `jsonschema`). A failure short-circuits to
+     an `is_error=True` result naming the bad/missing field and the expected
+     shape — `mcp.call_tool` is never reached. A missing/malformed schema is
+     treated as permissive (nothing to check against).
+   - Otherwise `await mcp.call_tool(name, input)`, wrapped in `asyncio.timeout`
+     using the smaller of `tool_timeout_seconds` and remaining run time. A
+     per-tool timeout becomes `is_error=True`, not loop-terminating, so the
+     model can react. If the run deadline expires, the loop emits/persists
+     synthetic skipped results for the current and remaining tool calls, then
+     ends `DoneEvent("deadline_exceeded")`. The flattened result is clipped to
+     `tool_result_max_chars` before it enters history (one large output can't
+     flood context for the rest of the run).
    - **Consecutive-failure nudge:** after several `is_error` results in a row, a
      one-line steering note is appended (once) to the crossing result, telling
      the model to re-read the errors and reconsider.
+   - **No-progress abort:** if `abort_after_consecutive_tool_failures` is set
+     and the consecutive-failure count reaches it, any remaining tool calls in
+     the same assistant batch receive synthetic skipped results, the complete
+     result batch is saved, and the run ends `DoneEvent("no_progress")`
+     immediately — the nudge (fixed at 3) gets the model a chance to recover
+     first; the abort (set higher, e.g. 5) stops a cascade it doesn't recover
+     from.
    - Yield `ToolResultEvent`.
    - Build a `ToolResultBlock(tool_use_id, name, content, is_error)`.
 8. `session.append_tool_results(results)` and save again.
@@ -503,6 +547,41 @@ Per-iteration algorithm:
    loop withholds tools and appends a wrap-up note to the per-call system prompt
    so the model produces a best-effort final answer instead of dying
    mid-investigation; the run reports `DoneEvent("max_iterations")`.
+
+### Bounded & safe runs (Phase 1)
+
+Three **independent stop conditions**, layered on top of `max_iterations`,
+each with its own `done_reason` and the partial answer accrued so far —
+never a silent truncation:
+
+| Guard | Settings field | Checked | `done_reason` |
+|---|---|---|---|
+| Token budget | `max_run_tokens` | Before each iteration and immediately after each reported `Usage.total_tokens` update | `budget_exceeded` |
+| Wall clock | `max_run_seconds` | Before each iteration and around in-flight LLM/tool calls/retry sleeps | `deadline_exceeded` |
+| No-progress abort | `abort_after_consecutive_tool_failures` | After each tool result, against the consecutive-failure counter | `no_progress` |
+
+All three default to `0` (disabled) in `Settings`, matching the repo's
+established pattern for new safety knobs (e.g. `trace_enabled`) — installing
+the harness doesn't change behavior until an operator opts in.
+
+**Token cap caveat:** it is inert against a provider/model that reports
+all-zero `Usage` (no token estimator exists yet — planned for Phase 3's
+context-assembly work). Until then, `max_run_seconds` is the reliable bound
+for a misbehaving model burning real (if individually bounded) LLM/tool
+calls.
+
+**Tool-argument validation** lives at the same dispatch seam (see step 7
+above) but is always on — it isn't a stop condition, it's a per-call check
+that turns a would-be opaque MCP error into a teaching `is_error` result
+before the call ever reaches the server. A validation failure counts toward
+the consecutive-failure counter like any other tool error, so a model stuck
+sending malformed args still trips the no-progress abort if one is
+configured.
+
+If any bounded-run guard trips after an assistant has requested tools, the loop
+emits and persists compact synthetic `is_error=True` results for skipped tool
+calls before `DoneEvent`. That keeps provider histories well-formed for a later
+turn: every assistant tool call still has a matching tool result.
 
 The loop-intelligence behaviors (stall check, final-iteration wrap-up, and the
 consecutive-failure nudge) are **always on** — pure

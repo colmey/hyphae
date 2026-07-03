@@ -73,13 +73,19 @@ The customer database contains tables including customers, orders, payments.
 - The body is the final human-readable answer (all `TextEvent.text` joined).
 - `X-Session-Id` is the session this turn ran in — pass it back on the next
   request to continue the conversation.
-- `X-Done-Reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty", "truncated"}`.
+- `X-Done-Reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty", "truncated",
+  "budget_exceeded", "deadline_exceeded", "no_progress"}`.
   `"truncated"` means the model stopped on `max_tokens` mid-answer (the body is
   clipped). `"max_iterations"` means the run hit the iteration cap; the loop
   withholds tools on that last step and asks the model to wrap up, so the body
   carries a best-effort final answer rather than mid-investigation fragments. A
   tool that exceeds `TOOL_TIMEOUT_SECONDS` does not end the run — the model sees
-  the error and reacts.
+  the error and reacts. `"budget_exceeded"`/`"deadline_exceeded"` mean the run hit
+  `MAX_RUN_TOKENS`/`MAX_RUN_SECONDS` (both disabled by default); `"no_progress"`
+  means `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` consecutive tool-call failures
+  ended the run early. All three carry whatever answer text had already been
+  produced. See [configuration.md](configuration.md) and architecture.md's
+  *Bounded & safe runs* section.
 
 Routing and token-usage detail (which model handled the request, how many
 tokens it spent) is recorded in the per-request server logs, not the response.
@@ -201,7 +207,8 @@ Content-Type: application/json
 ```
 
 `finish_reason` maps from the loop's done reason: `end_turn → stop`;
-`truncated`/`max_tokens`/`max_iterations → length`.
+`truncated`/`max_tokens`/`max_iterations`/`budget_exceeded`/`deadline_exceeded → length`;
+`no_progress → stop`; anything unmapped falls back to `stop`.
 
 **Response (200) — stream** (`stream: true`, OpenWebUI's default): a
 `text/event-stream` of `chat.completion.chunk` frames, terminated by

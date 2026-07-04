@@ -60,10 +60,14 @@ async def _resolve_routing(
     mcp: MCPManager,
     default_llm: LLMClient,
     history: list | None,
-) -> tuple[LLMClient, list[dict], str | None, str | None, OrchestrationInfo | None]:
+) -> tuple[LLMClient, list[dict], str | None, str | None, OrchestrationInfo | None, Any]:
     """Decide model, tools, thinking level, and system prompt for one request.
 
-    Returns (llm_client, tools_for_llm, system_prompt, thinking_level, info).
+    Returns (llm_client, tools_for_llm, system_prompt, thinking_level, info,
+    model_entry). `model_entry` is the selected model's registry entry (its
+    `context_window` / `max_tokens` feed the loop's context budget) or None in
+    legacy mode / when the registry can't supply one — callers fall back to
+    Settings defaults.
 
     Legacy mode (no orchestrator/registry): default LLM, full tool inventory,
     `system_override`, no thinking level. Orchestrated mode: `orchestrator.decide()`
@@ -73,7 +77,7 @@ async def _resolve_routing(
     still selects tools and the system prompt.
     """
     if orchestrator is None or registry is None:
-        return default_llm, mcp.get_tools_for_llm(), system_override, None, None
+        return default_llm, mcp.get_tools_for_llm(), system_override, None, None, None
 
     decision = await orchestrator.decide(prompt, preferences=preferences, history=history)
     result = decision.result
@@ -84,6 +88,14 @@ async def _resolve_routing(
     # get_or_default still guards against a sanitized id we lost track of.
     chosen_id = model_id if (model_id and model_id in registry.model_ids) else result.selected_model_id
     resolved_id, llm = registry.get_or_default(chosen_id)
+
+    # The selected model's config entry feeds the loop's context budget.
+    # Duck-typed/best-effort: fake registries (tests) may not expose
+    # get_entry, and a missing entry just means Settings defaults apply.
+    try:
+        model_entry = registry.get_entry(resolved_id)
+    except Exception:  # noqa: BLE001
+        model_entry = None
 
     # Filter against the live inventory so a disabled server can't slip a tool through.
     selected = set(result.selected_tools)
@@ -98,7 +110,7 @@ async def _resolve_routing(
         fallback_used=decision.fallback_used,
         thinking_level=result.thinking_level,
     )
-    return llm, tools_for_llm, system_prompt, result.thinking_level, info
+    return llm, tools_for_llm, system_prompt, result.thinking_level, info, model_entry
 
 
 async def _turn_events(
@@ -131,7 +143,7 @@ async def _turn_events(
     run_id = uuid.uuid4().hex
     rlog = run_logger(logger, run_id)
 
-    selected_llm, selected_tools, system_prompt, thinking_level, orch_info = await _resolve_routing(
+    selected_llm, selected_tools, system_prompt, thinking_level, orch_info, model_entry = await _resolve_routing(
         prompt=prompt,
         system_override=system_override,
         preferences=preferences,
@@ -153,6 +165,17 @@ async def _turn_events(
     else:
         rlog.info("chat: legacy mode (orchestration disabled), tools=%d", len(selected_tools))
 
+    # Context budget inputs for the loop: the selected model's entry wins,
+    # Settings defaults fill in (legacy mode, or entries without the fields).
+    context_window = (
+        getattr(model_entry, "context_window", None)
+        or settings.context_default_window_tokens
+    )
+    max_output_tokens = (
+        getattr(model_entry, "max_tokens", None)
+        or settings.llm_max_tokens
+    )
+
     # Distinct sessions are already isolated; the guard rejects a second
     # concurrent request on the SAME session (409) instead of interleaving.
     try:
@@ -165,6 +188,7 @@ async def _turn_events(
                 store=store,
                 system=system_prompt,
                 max_iterations=settings.max_loop_iterations,
+                max_tokens=max_output_tokens,
                 tools=selected_tools,
                 llm_timeout_seconds=settings.llm_timeout_seconds,
                 tool_timeout_seconds=settings.tool_timeout_seconds,
@@ -175,6 +199,11 @@ async def _turn_events(
                 max_run_seconds=settings.max_run_seconds,
                 abort_after_consecutive_tool_failures=settings.abort_after_consecutive_tool_failures,
                 thinking_level=thinking_level,
+                context_strategy=settings.context_strategy,
+                context_window=context_window,
+                context_safety_margin_tokens=settings.context_safety_margin_tokens,
+                context_recent_messages=settings.context_recent_messages,
+                context_summary_max_tokens=settings.context_summary_max_tokens,
                 tracer=tracer,
                 run_id=run_id,
             ):

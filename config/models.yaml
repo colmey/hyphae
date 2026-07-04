@@ -8,14 +8,19 @@
 # from_entry), so any provider supported by llm/client.py works here.
 #
 # Per-entry fields:
-#   provider     (required)  one of: gemini, anthropic, openai
-#   model        (required)  provider-specific model identifier
-#   description  (required)  human/LLM-readable summary of strengths
-#   max_tokens   (optional)  per-model output cap; falls back to Settings
-#   default      (optional)  exactly one entry may be marked default: true.
-#                            Used as the fallback when orchestration fails
-#                            and as the orchestrator's own model unless
-#                            overridden by Settings.orchestrator_model_id.
+#   provider        (required)  one of: gemini, anthropic, openai
+#   model           (required)  provider-specific model identifier
+#   description     (required)  human/LLM-readable summary of strengths
+#   max_tokens      (optional)  per-model output cap; falls back to Settings
+#   context_window  (optional)  total context window in tokens; used by the
+#                               agent loop's context budget (window - max
+#                               output - safety margin). Falls back to
+#                               Settings.context_default_window_tokens.
+#                               Set it accurately for small local models.
+#   default         (optional)  exactly one entry may be marked default: true.
+#                               Used as the fallback when orchestration fails
+#                               and as the orchestrator's own model unless
+#                               overridden by Settings.orchestrator_model_id.
 
 models:
   # gemini-flash:
@@ -50,6 +55,7 @@ models:
     model: gpt-oss-20b
     description: >
       GPT-OSS-20B is a powerful general-purpose model offering a balance between performance and cost.
-      It excels at complex reasoning, code generation, and tool-calling. Suitable for a wide range of LLM tasks, 
+      It excels at complex reasoning, code generation, and tool-calling. Suitable for a wide range of LLM tasks,
       from natural language understanding to advanced problem solving.
+    context_window: 131072
     default: true

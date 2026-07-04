@@ -136,10 +136,10 @@ class Settings(BaseSettings):
         default=0,
         description=(
             "Hard ceiling on cumulative total_tokens for one run; ends the run "
-            "budget_exceeded with the partial answer. <=0 disables. Inert against "
-            "a provider/model that reports all-zero usage -- no token estimator "
-            "yet (planned for Phase 3); the wall-clock cap is the reliable bound "
-            "until then."
+            "budget_exceeded with the partial answer. <=0 disables. When a "
+            "provider reports absent/all-zero usage, the local token estimator "
+            "(agent/context.py) fills in, so the cap works against local "
+            "OpenAI-compatible servers too."
         ),
     )
     max_run_seconds: float = Field(
@@ -158,6 +158,50 @@ class Settings(BaseSettings):
             "fixed at-3 consecutive-failure nudge so the model gets a chance to "
             "recover first. <=0 disables."
         ),
+    )
+
+    # --- Context assembly (agent loop) -------------------------------------
+    # The loop assembles the outgoing message view per LLM call via
+    # agent/context.py against an explicit budget: context_window (per-model
+    # in models.yaml, else the default below) - max output tokens - safety
+    # margin. "naive" is behavior-preserving (pass-through; over budget only
+    # logs); "compaction" summarizes the middle of an over-budget history
+    # while keeping the first user message and the recent tail verbatim.
+    # Compaction shapes the outgoing view only -- session history is never
+    # rewritten -- and any failure degrades to pass-through with a warning.
+    context_strategy: str = Field(
+        default="naive",
+        description=(
+            "Context assembly strategy: 'naive' (pass-through + budget warning) "
+            "or 'compaction' (summarize over-budget middle history). Unknown "
+            "values degrade to 'naive' with a warning."
+        ),
+    )
+    context_default_window_tokens: int = Field(
+        default=32768,
+        description=(
+            "Assumed context window (tokens) for models whose models.yaml entry "
+            "has no context_window, and for legacy/no-orchestrator mode."
+        ),
+    )
+    context_safety_margin_tokens: int = Field(
+        default=1024,
+        description=(
+            "Headroom subtracted from the context window (with max output "
+            "tokens) when computing the input budget; absorbs estimator error."
+        ),
+    )
+    context_recent_messages: int = Field(
+        default=6,
+        description=(
+            "Recent protocol-safe units (a user turn, a no-tool assistant turn, "
+            "or an assistant tool call plus its results) kept verbatim under "
+            "compaction. Shrinks automatically if the tail alone overflows."
+        ),
+    )
+    context_summary_max_tokens: int = Field(
+        default=512,
+        description="Output cap for the one-call compaction summarizer.",
     )
 
     # Harness paths. All runtime config lives under config/ by convention.

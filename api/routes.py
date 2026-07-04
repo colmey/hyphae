@@ -52,6 +52,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _prompt_from_body(request: Request) -> str:
+    """Read the native plain-text prompt body, rejecting empty requests."""
+    prompt = (await request.body()).decode("utf-8").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="empty body; send the prompt as plain text")
+    return prompt
+
+
+async def _session_from_header(request: Request, store: SessionStore):
+    """Resolve or create the native session named by X-Session-Id."""
+    session_id = request.headers.get("X-Session-Id")
+    if not session_id:
+        return await store.create()
+    try:
+        return await store.get(session_id)
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(
     mcp: MCPManager = Depends(get_mcp),
@@ -75,20 +94,10 @@ async def chat(
     store: SessionStore = Depends(get_store),
     runner: TurnRunner = Depends(get_turn_runner),
 ) -> PlainTextResponse:
-    prompt = (await request.body()).decode("utf-8").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="empty body; send the prompt as plain text")
-
     # Resolve the session before routing so a follow-up turn is routed with the
     # conversation in view. The new prompt is appended later, inside the runner.
-    session_id = request.headers.get("X-Session-Id")
-    if session_id:
-        try:
-            session = await store.get(session_id)
-        except SessionNotFoundError:
-            raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
-    else:
-        session = await store.create()
+    prompt = await _prompt_from_body(request)
+    session = await _session_from_header(request, store)
 
     # Dumb-pipe contract: no system override, model hint, or tool prefs on the wire.
     answer, done_reason, _usage = await runner.run(prompt=prompt, session=session)
@@ -121,21 +130,11 @@ async def chat_stream(
     streamed (a tool call must be fully assembled before it runs), but each
     `tool_call`/`tool_result` is emitted the instant the loop reaches it.
     """
-    prompt = (await request.body()).decode("utf-8").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="empty body; send the prompt as plain text")
-
     # Resolve the session up front (mirrors /chat) so the X-Session-Id response
     # header is known before the stream opens. The new prompt is appended inside
     # _turn_events, under the same-session guard.
-    session_id = request.headers.get("X-Session-Id")
-    if session_id:
-        try:
-            session = await store.get(session_id)
-        except SessionNotFoundError:
-            raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
-    else:
-        session = await store.create()
+    prompt = await _prompt_from_body(request)
+    session = await _session_from_header(request, store)
 
     run_id = uuid.uuid4().hex
 

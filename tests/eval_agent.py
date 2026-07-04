@@ -272,6 +272,11 @@ def _run_kwargs(case: dict[str, Any]) -> dict[str, Any]:
         "max_run_seconds",
         "abort_after_consecutive_tool_failures",
         "thinking_level",
+        "context_strategy",
+        "context_window",
+        "context_safety_margin_tokens",
+        "context_recent_messages",
+        "context_summary_max_tokens",
     }
     return {k: v for k, v in run_cfg.items() if k in allowed}
 
@@ -296,6 +301,18 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
             abort_after_consecutive_tool_failures=(
                 case.get("run") or {}
             ).get("abort_after_consecutive_tool_failures", 0),
+            llm_max_tokens=(case.get("run") or {}).get("max_tokens", 4096),
+            context_strategy=(case.get("run") or {}).get("context_strategy", "naive"),
+            context_default_window_tokens=(
+                case.get("run") or {}
+            ).get("context_default_window_tokens", 32768),
+            context_safety_margin_tokens=(
+                case.get("run") or {}
+            ).get("context_safety_margin_tokens", 1024),
+            context_recent_messages=(case.get("run") or {}).get("context_recent_messages", 6),
+            context_summary_max_tokens=(
+                case.get("run") or {}
+            ).get("context_summary_max_tokens", 512),
         )
         orch_cfg = case.get("orchestration") or {}
         runner = TurnRunner(

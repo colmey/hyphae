@@ -33,9 +33,14 @@ same file works for local dev, containers, and CI.
 | `LLM_MAX_RETRIES`              | `3`                           | Retries on transient LLM failures (429/5xx/timeout/reset) and empty responses (`0` disables) |
 | `LLM_RETRY_BASE_DELAY`         | `0.5`                         | Base seconds for jittered exponential backoff between LLM retries |
 | `TOOL_RESULT_MAX_CHARS`        | `20000`                       | Clip threshold for a single flattened tool result before it enters session history (`<= 0` disables) |
-| `MAX_RUN_TOKENS`               | `0`                           | Hard ceiling on cumulative `total_tokens` for one run; ends the run `budget_exceeded` (`<= 0` disables). Inert against a provider that reports all-zero usage — no token estimator yet (Phase 3) |
+| `MAX_RUN_TOKENS`               | `0`                           | Hard ceiling on cumulative `total_tokens` for one run; ends the run `budget_exceeded` (`<= 0` disables). When a provider reports absent/all-zero usage, the local token estimator (`agent/context.py`) fills in, so the cap works against local OpenAI-compatible servers too |
 | `MAX_RUN_SECONDS`              | `0`                           | Hard wall-clock ceiling on one run, from just before the first iteration; enforced before and during LLM/tool calls; ends the run `deadline_exceeded` (`<= 0` disables) |
 | `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` | `0`                   | Abort the run `no_progress` after this many tool-call failures in a row (a success resets the count); `<= 0` disables. Should exceed the fixed at-3 nudge so the model gets a chance to recover first |
+| `CONTEXT_STRATEGY`             | `naive`                       | How the agent loop shapes the outgoing message view per LLM call: `naive` (pass-through; over budget only logs a warning) or `compaction` (summarize the over-budget middle of the history, keep the task header + recent tail verbatim). Unknown values degrade to `naive` with a warning. The view is per-call only — session history is never rewritten |
+| `CONTEXT_DEFAULT_WINDOW_TOKENS` | `32768`                      | Assumed context window for models whose `models.yaml` entry has no `context_window`, and for legacy/no-orchestrator mode. Budget = window − max output tokens − safety margin |
+| `CONTEXT_SAFETY_MARGIN_TOKENS` | `1024`                        | Headroom subtracted when computing the input budget; absorbs token-estimator error |
+| `CONTEXT_RECENT_MESSAGES`      | `6`                           | Recent protocol-safe units (a user turn, a no-tool assistant turn, or an assistant tool call plus its results) kept verbatim under compaction; shrinks automatically if the tail alone overflows |
+| `CONTEXT_SUMMARY_MAX_TOKENS`   | `512`                         | Output cap for the one-call compaction summarizer |
 | `SESSION_TTL_SECONDS`          | `3600`                        | Idle TTL before an in-memory session is evicted (`<= 0` disables) |
 | `SESSION_MAX_COUNT`            | `1000`                        | Max sessions retained in memory; oldest-updated evicted first (`<= 0` disables) |
 | `LOG_LEVEL`                    | `INFO`                        | Python logging level (DEBUG opens per-request orchestrator detail) |
@@ -128,6 +133,11 @@ Both models are **active** — the orchestrator routes between them (cheap
   model. Write for an LLM audience: terse, capability-focused, plain
   English.
 - `max_tokens` is optional; falls back to `Settings.llm_max_tokens`.
+- `context_window` is optional; the model's total context window in tokens,
+  used by the agent loop's context budget (`window − max output − safety
+  margin`). Falls back to `CONTEXT_DEFAULT_WINDOW_TOKENS`. Provider-agnostic
+  (a plain size, no vendor branching) — set it accurately for small local
+  models, where overflow is a hard failure.
 - `default: true` on **exactly one** entry. The default model is used
   by the orchestrator itself (unless `ORCHESTRATOR_MODEL_ID` overrides)
   and is the safe fallback when orchestration fails.

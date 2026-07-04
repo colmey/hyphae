@@ -165,6 +165,8 @@ PyAiHarness/
 │   ├── events.py             # TextEvent / ToolCallEvent / ToolResultEvent /
 │   │                         #   UsageEvent / OrchestrationDecisionEvent /
 │   │                         #   DoneEvent / ErrorEvent
+│   ├── context.py            # assemble_context() seam: token estimator, budget,
+│   │                         #   naive / compaction strategies (view-only)
 │   ├── tracing.py            # Tracer ABC / NoOpTracer / JSONLTracer + run_id log adapter
 │   └── loop.py               # run_agent() - the async-generator reasoning loop
 │
@@ -448,6 +450,11 @@ async def run_agent(
     max_run_seconds: float | None = None,
     abort_after_consecutive_tool_failures: int | None = None,
     thinking_level: str | None = None,
+    context_strategy: str = "naive",
+    context_window: int | None = None,
+    context_safety_margin_tokens: int = 1024,
+    context_recent_messages: int = 6,
+    context_summary_max_tokens: int = 512,
 ) -> AsyncIterator[Event]:
     ...
 ```
@@ -493,14 +500,25 @@ Per-iteration algorithm:
    already accrued. The wall-clock budget also wraps in-flight LLM/tool calls
    and retry sleeps by using the smaller of the per-call timeout and remaining
    run time.
-1. `await llm.complete(session.messages, tools=tools or None, system=...)`,
+1. **Context assembly** (`agent/context.py`, skipped when `context_window`
+   is unset — direct callers get legacy pass-through): build the outgoing
+   message view from session history against the budget
+   `context_window − max_tokens − safety_margin`, using the *effective*
+   system prompt and tools for this call. `naive` passes through (over
+   budget only warns); `compaction` summarizes the over-budget middle (see
+   *Context assembly* below). Any failure degrades to the full history.
+   Then `await llm.complete(<assembled view>, tools=tools or None, system=...)`,
    wrapped in a per-attempt `asyncio.timeout` and bounded retry (transient
    429/5xx/timeout/reset, plus one more try on an empty response). If it
    still raises after retries, yield `ErrorEvent` + `DoneEvent("llm_error")`
    and stop.
 2. `session.append_assistant(response)` immediately — a later crash in
    this iteration still leaves the session consistent.
-3. Yield a `UsageEvent` for this iteration's tokens.
+3. Yield a `UsageEvent` for this iteration's tokens. Provider-reported usage
+   is used as-is; absent/all-zero usage is filled by the local estimator
+   (`estimate_usage_tokens`, chars/4 heuristic over the outgoing view +
+   system + response) so the token cap works against local servers that
+   report zero usage. Never double-counted.
 4. If `store` was provided, `await store.save(session)`.
 5. Yield a `TextEvent` for each non-empty text block.
 6. Collect `ToolUseBlock`s. If the just-reported usage crossed
@@ -564,11 +582,13 @@ All three default to `0` (disabled) in `Settings`, matching the repo's
 established pattern for new safety knobs (e.g. `trace_enabled`) — installing
 the harness doesn't change behavior until an operator opts in.
 
-**Token cap caveat:** it is inert against a provider/model that reports
-all-zero `Usage` (no token estimator exists yet — planned for Phase 3's
-context-assembly work). Until then, `max_run_seconds` is the reliable bound
-for a misbehaving model burning real (if individually bounded) LLM/tool
-calls.
+**Token cap and zero-usage providers:** when a provider reports absent or
+all-zero `Usage` (common on local OpenAI-compatible servers), the loop fills
+in a local estimate from the outgoing messages + system prompt + response
+(`agent/context.py: estimate_usage_tokens`, chars/4 heuristic), so
+`max_run_tokens` still trips. Non-zero provider usage is authoritative and
+never mixed with estimates; a missing `total_tokens` is filled from
+`input + output`.
 
 **Tool-argument validation** lives at the same dispatch seam (see step 7
 above) but is always on — it isn't a stop condition, it's a per-call check
@@ -587,6 +607,59 @@ The loop-intelligence behaviors (stall check, final-iteration wrap-up, and the
 consecutive-failure nudge) are **always on** — pure
 steering with no failure mode that warrants a kill switch, so unlike the
 reliability params they carry no `Settings` toggle.
+
+### Context assembly (Phase 3)
+
+`agent/context.py` is the seam between session history and the outgoing LLM
+request: the loop calls `assemble_context()` per LLM call instead of handing
+`session.messages` to the client raw. The seam enforces an explicit token
+budget — `context_window − max_output_tokens − safety_margin` — using a cheap
+local estimator (chars/4 plus per-message/block overhead; text, tool names,
+JSON-ish args, tool result content, and the tool schemas + effective system
+prompt all count).
+
+Two strategies, selected by `CONTEXT_STRATEGY` (config selects strategies;
+code implements them):
+
+- **`naive`** (default, behavior-preserving): pass-through. Over budget only
+  logs a warning — no message is altered, no request is blocked.
+- **`compaction`** (opt-in): when the estimate exceeds the budget, the view
+  becomes *task header (first user message, verbatim) + one summary message +
+  the last N protocol-safe units (verbatim)*. The middle is summarized by one
+  tool-less LLM call on the same selected client (bounded `max_tokens`, no
+  recursive assembly; the transcript is clipped to roughly the input budget).
+  The summary is a plain user message prefixed `Conversation summary so
+  far:` — no new role or block type.
+
+**View-only, always.** Compaction shapes the *outgoing view* for one call;
+`session.messages` stays the append-only source of truth (mutation only via
+the `append_*` helpers). The view is re-assembled every iteration because
+history grows each turn — which also means an over-budget run under
+`compaction` pays one summarizer call per iteration.
+
+**Protocol safety.** History is grouped into units that are retained or
+summarized atomically — an assistant message carrying `tool_use` blocks
+travels with the tool message(s) answering it — so a tool-use/tool-result
+pair is never split across the boundary and a retained view can never start
+with an orphan tool result. Malformed history degrades to pass-through.
+
+**Budget inputs.** `context_window` comes from the selected model's
+`models.yaml` entry (threaded through `_resolve_routing`), else
+`CONTEXT_DEFAULT_WINDOW_TOKENS`; `max_output_tokens` from the entry's
+`max_tokens`, else `LLM_MAX_TOKENS`. Legacy/no-orchestrator mode uses the
+Settings defaults. Direct `run_agent` callers that pass no `context_window`
+skip assembly entirely (legacy behavior). The final-iteration wrap-up call is
+estimated with the *effective* system prompt and withheld tools it will
+actually use.
+
+**Degrade, never break** (the optional-layer doctrine): a summarizer failure,
+a history too short to compact, a malformed boundary, or any bug in the seam
+falls back to passing the full history with a warning — the context layer
+never kills a request. If even the smallest protocol-safe view (task header +
+summary + one unit) overflows, it is sent anyway and logged.
+
+The module also owns `estimate_usage_tokens()`, the estimator behind the
+token-cap fallback described under *Bounded & safe runs*.
 
 ### Orchestration Layer
 
@@ -611,6 +684,7 @@ class ModelEntry(BaseModel):
     model: str
     description: str       # what the orchestrator LLM sees
     max_tokens: int | None = None
+    context_window: int | None = None  # feeds the loop's context budget
     default: bool = False  # exactly one entry should be default
 
 class ModelsConfig(BaseModel):

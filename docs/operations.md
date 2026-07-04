@@ -146,6 +146,38 @@ reasoning-tag stripper in the core); `/chat/stream` trades token-smooth text for
 a simple core plus live *activity* visibility. The OpenAI `/v1` SSE path is
 unaffected and still chunks text per `TextEvent`.
 
+### Choosing a context strategy (`naive` vs `compaction`)
+
+The agent loop shapes each LLM call's message view through `agent/context.py`
+(see [architecture.md](architecture.md), *Context assembly*). Which strategy
+to run:
+
+- **`naive`** (default) — pass-through, behavior-preserving. Right for
+  large-window cloud models and short conversations. Over budget it only
+  warns (`context over budget under 'naive'`), so watch the logs.
+- **`compaction`** — opt in (`CONTEXT_STRATEGY=compaction`) when runs are
+  long/tool-heavy on a small-window model (the local-Qwen/gpt-oss case).
+  Over-budget history is summarized once per LLM call by the same selected
+  model.
+
+What compaction **preserves**: the system prompt (never in history), the
+first user message verbatim (the task header), the last
+`CONTEXT_RECENT_MESSAGES` protocol-safe units verbatim, tool-use/tool-result
+pairing (never split), and — via the summary — decisions, constraints, facts
+learned, failed approaches, and open questions.
+
+What it does **not** preserve: verbatim middle-of-conversation text, full
+tool outputs already superseded, and provider-specific `provider_metadata` on
+summarized (dropped) messages. The summary is only as good as the selected
+model's summarization; raise `CONTEXT_SUMMARY_MAX_TOKENS` if it's dropping
+detail.
+
+Failure behavior: any compaction failure (summarizer error/empty, malformed
+history, history too short) logs a warning and sends the full history —
+requests are never failed by the context layer. Costs: one extra LLM call per
+over-budget iteration. Session history is never rewritten; continuing a
+session sees the original messages.
+
 ### Adding new loop strategies
 
 Drop a new file in `agent/` (e.g. `planner_loop.py`) with its own
@@ -323,7 +355,8 @@ check if you need one.
 | `done_reason: "truncated"`                    | Model hit `LLM_MAX_TOKENS` mid-answer; `response` is clipped. Raise `LLM_MAX_TOKENS` or the model's per-entry `max_tokens`. |
 | `tool_result` with `is_error` "timed out"     | A tool exceeded `TOOL_TIMEOUT_SECONDS`. The MCP server is slow/hung; the loop continues and the model sees the error. |
 | `tool_result` with `is_error` "invalid arguments for field ..." | The model's tool call failed `jsonschema` validation against the tool's `input_schema`; `mcp.call_tool` was never reached. The model sees the offending field + expected shape and can retry. |
-| `done_reason: "budget_exceeded"`              | Run hit `MAX_RUN_TOKENS`. Disabled (`0`) by default; raise or disable the cap. Inert if the provider reports all-zero usage. |
+| `done_reason: "budget_exceeded"`              | Run hit `MAX_RUN_TOKENS`. Disabled (`0`) by default; raise or disable the cap. Works even when the provider reports all-zero usage — the local estimator fills in. |
+| `context over budget under 'naive'` warnings  | The estimated request exceeds `context_window − max output − margin`. Set the model's `context_window` accurately in `models.yaml`, and consider `CONTEXT_STRATEGY=compaction` for long tool-heavy runs. |
 | `done_reason: "deadline_exceeded"`            | Run hit `MAX_RUN_SECONDS`, including while an LLM/tool call or retry sleep was in flight. Disabled (`0`) by default; raise or disable the cap, or investigate why the run is slow (retries, a slow provider). |
 | `done_reason: "no_progress"`                  | `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` consecutive tool-call failures (including validation failures). Disabled (`0`) by default. Review the failing tool/args in the logs — the consecutive-failure nudge already tried to steer the model before the abort fired. |
 | 404 on `/chat`                                | The `X-Session-Id` header names a session that doesn't exist (e.g. evicted by TTL/max-size, or after a restart wiped state)|
@@ -347,7 +380,8 @@ are run via `./runscript.sh tests/<file>`.
 | `smoke_test_agent.py`             | Full agent loop via Python API (no HTTP)                        |
 | `smoke_test_reliability.py`       | Loop hardening with scripted fakes (no network): LLM retry/backoff, non-transient fast-fail, empty-response retry, truncation reason, tool timeout, tool-result clip |
 | `smoke_test_loop_intelligence.py` | Loop steering with scripted fakes (no network): final-iteration wrap-up, stall detection, consecutive-failure nudge |
-| `smoke_test_bounded_runs.py`      | Phase 1 bounded & safe runs with scripted fakes (no network): token cap, in-flight wall-clock cap, final-answer cap edges, zero-usage-inert-against-token-cap, tool-argument validation, no-progress abort + counter reset, mid-batch abort shape, `/v1` finish_reason mapping for the new reasons |
+| `smoke_test_bounded_runs.py`      | Phase 1 bounded & safe runs with scripted fakes (no network): token cap, in-flight wall-clock cap, final-answer cap edges, zero-usage-trips-cap-via-estimator, tool-argument validation, no-progress abort + counter reset, mid-batch abort shape, `/v1` finish_reason mapping for the new reasons |
+| `smoke_test_context_assembly.py`  | Phase 3 context assembly with scripted fakes (no network): token estimator sanity, budget math, `naive` pass-through, compaction invariants (task header + recent tail verbatim, summary inserted, no orphaned tool pairs, session untouched), summarizer-failure degrade, estimated-usage token-cap fallback |
 | `smoke_test_orchestrator.py`      | Orchestrator decisions: model selection, tool filtering, system prompt generation, thinking level (parsing + live), history block. Asserts `fallback_used=false`. |
 | `smoke_test_http.py`              | Full HTTP surface in-process (lifespan, plain-text `/chat`, session header, 400/404) |
 | `smoke_test_openai_api.py`        | OpenAI-compatible `/v1`: `/v1/models` shape, non-stream `chat.completion`, SSE chunk deltas + `[DONE]`, error JSON. Hermetic (scripted fake LLM, no backend). |
@@ -441,9 +475,11 @@ extension path described above.
   by default) additionally bound *total* run cost/duration across all
   iterations; the wall-clock budget is also applied to in-flight LLM/tool calls
   and retry sleeps. See [configuration.md](configuration.md) and the *Bounded &
-  safe runs* section of [architecture.md](architecture.md). The token cap is
-  inert against a provider that reports all-zero usage (no token estimator
-  yet — Phase 3), so the wall-clock cap is the reliable bound until then.
+  safe runs* section of [architecture.md](architecture.md). The token cap
+  works even against a provider that reports all-zero usage — the local
+  token estimator (`agent/context.py`) fills in from the outgoing messages
+  and response. Estimates are heuristic (chars/4), so treat the cap as a
+  guard rail, not billing-grade accounting, on such servers.
 - **No parallel tool execution.** Sequential is safer; switch when you
   need it.
 - **No token/cost tracking aggregated across requests.** Per-request

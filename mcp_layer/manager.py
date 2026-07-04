@@ -36,8 +36,8 @@ class MCPManager:
     def __init__(self, mcp_config: MCPConfig) -> None:
         self._config = mcp_config
         self._clients: dict[str, MCPClient] = {}
-        # Map of namespaced tool name -> (server_name, raw_tool_name)
-        self._tool_index: dict[str, tuple[str, str]] = {}
+        # Map of namespaced tool name -> (server_name, raw Tool)
+        self._tool_index: dict[str, tuple[str, Tool]] = {}
 
     # ----- lifecycle -----
 
@@ -71,7 +71,7 @@ class MCPManager:
             self._clients[name] = client
             for tool in client.tools:
                 namespaced = f"{name}{NAMESPACE_SEP}{tool.name}"
-                self._tool_index[namespaced] = (name, tool.name)
+                self._tool_index[namespaced] = (name, tool)
 
         logger.info(
             "MCP startup complete: %d/%d servers connected, %d tools available",
@@ -97,13 +97,10 @@ class MCPManager:
 
     def list_tools(self) -> list[tuple[str, Tool]]:
         """Return [(namespaced_name, Tool), ...] for every available tool."""
-        out: list[tuple[str, Tool]] = []
-        for namespaced, (server_name, raw_name) in self._tool_index.items():
-            client = self._clients[server_name]
-            tool = next((t for t in client.tools if t.name == raw_name), None)
-            if tool is not None:
-                out.append((namespaced, tool))
-        return out
+        return [
+            (namespaced, tool)
+            for namespaced, (_server_name, tool) in self._tool_index.items()
+        ]
 
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
         """Return tools in a generic schema shape.
@@ -129,11 +126,11 @@ class MCPManager:
                 content=f"unknown tool: {namespaced_name!r}",
                 is_error=True,
             )
-        server_name, raw_name = self._tool_index[namespaced_name]
+        server_name, tool = self._tool_index[namespaced_name]
         client = self._clients.get(server_name)
         if client is None:
             return ToolCallResult(
                 content=f"server {server_name!r} is not connected",
                 is_error=True,
             )
-        return await client.call_tool(raw_name, arguments)
+        return await client.call_tool(tool.name, arguments)

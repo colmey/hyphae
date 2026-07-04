@@ -8,7 +8,9 @@ MCPManager. Both of those subsystems are unaware of each other; the loop
 is the bridge.
 
 Algorithm (one iteration):
-  1. Ask the LLM to complete given the current session history + MCP tools.
+  1. Assemble the outgoing message view from session history (agent/context.py:
+     budget check; pass-through under "naive", view-only compaction under
+     "compaction") and ask the LLM to complete given that view + MCP tools.
   2. Append the assistant response to the session.
   3. Stream out the model's text blocks as TextEvents.
   4. If no tool_use blocks: yield DoneEvent(end_turn) and stop.
@@ -63,9 +65,10 @@ from typing import Any, AsyncIterator, Callable
 import jsonschema
 
 from llm.client import LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock, Usage
+from llm.schemas import AssistantMessage, Message, TextBlock, ToolResultBlock, ToolUseBlock, Usage
 from mcp_layer import MCPManager
 
+from .context import ContextBudget, assemble_context, clip_content, estimate_usage_tokens
 from .events import (
     DoneEvent,
     ErrorEvent,
@@ -173,19 +176,6 @@ def _with_wrapup(system: str | None) -> str:
     if system:
         return f"{system}\n\n{_FINAL_ITERATION_WRAPUP}"
     return _FINAL_ITERATION_WRAPUP
-
-
-def _clip_tool_content(content: str, max_chars: int | None) -> str:
-    """Bound a flattened tool result so one large output can't flood context.
-
-    The clipped text re-enters session history and is re-sent to the model on
-    every later iteration, so the cap protects both the context window and the
-    model's attention. A marker records how much was dropped.
-    """
-    if not max_chars or max_chars <= 0 or len(content) <= max_chars:
-        return content
-    omitted = len(content) - max_chars
-    return f"{content[:max_chars]}\n…[truncated, {omitted} chars omitted]"
 
 
 async def _complete_with_retry(
@@ -307,6 +297,11 @@ async def run_agent(
     max_run_seconds: float | None = None,
     abort_after_consecutive_tool_failures: int | None = None,
     thinking_level: str | None = None,
+    context_strategy: str = "naive",
+    context_window: int | None = None,
+    context_safety_margin_tokens: int = 1024,
+    context_recent_messages: int = 6,
+    context_summary_max_tokens: int = 512,
     tracer: Tracer | None = None,
     run_id: str | None = None,
 ) -> AsyncIterator[Event]:
@@ -344,8 +339,10 @@ async def run_agent(
              clipping.
       max_run_tokens: hard ceiling on cumulative Usage.total_tokens for this
              run. On trip, exits done_reason="budget_exceeded" with the
-             partial answer. None (or <=0) disables. Inert when the provider
-             reports all-zero usage -- there is no token estimator (yet).
+             partial answer. None (or <=0) disables. When the provider
+             reports absent/all-zero usage, a local estimate (from the
+             outgoing messages + response) fills in, so the cap works
+             against local servers too.
       max_run_seconds: hard wall-clock ceiling on this run, measured from
              just before the first iteration. On trip, exits
              done_reason="deadline_exceeded" with the partial answer. None
@@ -360,6 +357,22 @@ async def run_agent(
              to llm.complete() on every iteration of this run. None leaves the
              model default. The orchestrator-aware route supplies this from its
              routing decision.
+      context_strategy: how agent/context.py shapes the outgoing message view
+             per LLM call: "naive" (pass-through; over budget only warns) or
+             "compaction" (summarize the over-budget middle, keep the task
+             header + recent tail verbatim). The view is per-call only —
+             session.messages is never rewritten.
+      context_window: total context window (tokens) for the budget
+             (window − max_tokens − safety margin). None (or <=0) disables
+             context assembly entirely — the legacy pass-through. The route
+             supplies the per-model value (or the Settings default); direct
+             callers get legacy behavior.
+      context_safety_margin_tokens: headroom subtracted when computing the
+             input budget; absorbs estimator error.
+      context_recent_messages: recent protocol-safe units kept verbatim under
+             compaction.
+      context_summary_max_tokens: output cap for the compaction summarizer's
+             single LLM call.
       tracer: optional Tracer; when set, every yielded event is also serialized
              to it as a trace record (tagged with run_id, a monotonic step
              index, an ISO timestamp). None disables tracing with zero hot-path
@@ -510,12 +523,44 @@ async def run_agent(
                      iteration, len(session.messages),
                      len(effective_tools) if effective_tools else 0, is_final_iteration)
 
+        # ----- context assembly (view-only; session is never rewritten) -----
+        # Re-assembled per LLM call because the history grows every iteration.
+        # Uses the *effective* system/tools so the estimate matches the request
+        # (the final-iteration wrap-up changes both). Bounded by the per-attempt
+        # LLM timeout since compaction may make a summarizer call. Any failure
+        # here degrades to the full history: the context layer never kills a run.
+        messages_for_llm: list[Message] = session.messages
+        if context_window and context_window > 0:
+            try:
+                assembly = assemble_context(
+                    session.messages,
+                    budget=ContextBudget(
+                        context_window=context_window,
+                        max_output_tokens=max_tokens or 0,
+                        safety_margin=context_safety_margin_tokens,
+                    ),
+                    strategy=context_strategy,
+                    system=effective_system,
+                    tools=effective_tools or None,
+                    llm=llm,
+                    recent_messages=context_recent_messages,
+                    summary_max_tokens=context_summary_max_tokens,
+                )
+                assembly_timeout = _effective_timeout(llm_timeout_seconds)
+                if assembly_timeout and assembly_timeout > 0:
+                    async with asyncio.timeout(assembly_timeout):
+                        messages_for_llm = (await assembly).messages
+                else:
+                    messages_for_llm = (await assembly).messages
+            except Exception:  # noqa: BLE001
+                logger.warning("context assembly failed; sending full history", exc_info=True)
+
         # ----- LLM call (with per-attempt timeout + bounded retry) -----
         llm_started = time.perf_counter()
         try:
             response = await _complete_with_retry(
                 llm,
-                messages=session.messages,
+                messages=messages_for_llm,
                 tools=effective_tools or None,
                 system=effective_system,
                 max_tokens=max_tokens,
@@ -546,7 +591,15 @@ async def run_agent(
         # what the model said.
         session.append_assistant(response)
 
-        usage = response.usage or Usage()
+        # Provider usage when reported; a local estimate (outgoing view +
+        # system + response) when absent/all-zero, so the token cap works
+        # against local servers that report zero usage. Never double-counted.
+        usage = estimate_usage_tokens(
+            response.usage,
+            messages=messages_for_llm,
+            system=effective_system,
+            response=response,
+        )
         cumulative = cumulative + usage
         yield await _emit(UsageEvent(
             input_tokens=usage.input_tokens,
@@ -714,7 +767,7 @@ async def run_agent(
             # Bound the result so one large output can't flood context for the
             # rest of the run. Clip once, before both the event and the block,
             # so streamed and stored content stay identical.
-            content = _clip_tool_content(content, tool_result_max_chars)
+            content = clip_content(content, tool_result_max_chars)
 
             # ----- consecutive-failure nudge -----
             # Track failures in a row across the whole run; when the model starts

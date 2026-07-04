@@ -12,8 +12,11 @@ run_agent directly.
   2. Wall-clock cap        - a slow fake LLM call pushes elapsed time past
                              max_run_seconds -> done "deadline_exceeded"
                              before a second LLM call.
-  3. Zero usage never trips the token cap - responses with the default
-                             (all-zero) Usage never reach budget_exceeded.
+  3. Zero usage now trips the token cap via the local estimator (Phase 3):
+                             with max_run_tokens set, an all-zero Usage is
+                             estimated from the outgoing messages + response
+                             and can reach budget_exceeded; without a cap the
+                             estimate changes nothing.
   4. Tool-argument validation - an invalid call (wrong type for a required
                              field) never reaches mcp.call_tool and comes
                              back as an is_error result naming the field; a
@@ -255,12 +258,19 @@ async def main() -> None:
     check(len(tool_results(events)) == 1 and tool_results(events)[0].is_error,
           "slow tool got a synthetic error result")
 
-    # 3. Zero usage never trips the token cap
+    # 3. Zero usage trips the token cap via the local estimator (Phase 3)
+    llm = ScriptedLLM([text_response("an estimated answer long enough to count as tokens")])
+    mcp = ScriptedMCP([], schema=_QTOOL_SCHEMA)
+    events = await collect("zero usage trips token cap via estimator", llm, mcp,
+                           max_run_tokens=5, max_iterations=10)
+    check(done_reason(events) == "budget_exceeded",
+          "all-zero usage trips budget_exceeded via the estimator")
+
+    # 3b. Without a cap, the estimate changes nothing about the run
     llm = ScriptedLLM([text_response("hi")])
     mcp = ScriptedMCP([], schema=_QTOOL_SCHEMA)
-    events = await collect("zero usage inert against token cap", llm, mcp,
-                           max_run_tokens=10, max_iterations=10)
-    check(done_reason(events) == "end_turn", "all-zero usage never trips budget_exceeded")
+    events = await collect("zero usage without a cap", llm, mcp, max_iterations=10)
+    check(done_reason(events) == "end_turn", "no cap set -> zero usage run ends normally")
 
     # 4. Tool-argument validation
     llm = ScriptedLLM([

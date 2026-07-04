@@ -77,6 +77,13 @@ class ModelEntry(BaseModel):
         default=None,
         description="Per-model output cap. Falls back to Settings.llm_max_tokens when None.",
     )
+    context_window: int | None = Field(
+        default=None,
+        description="Total context window in tokens, used for the agent loop's "
+                    "context budget. Falls back to "
+                    "Settings.context_default_window_tokens when None. "
+                    "Provider-agnostic: a plain size, no vendor branching.",
+    )
     default: bool = Field(
         default=False,
         description="At most one entry should be marked default. Used as the "

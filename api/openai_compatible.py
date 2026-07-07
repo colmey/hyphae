@@ -1,24 +1,6 @@
 # api/openai_compatible.py
 
-"""
-OpenAI-compatible inbound adapter.
-
-A thin translator that lets OpenWebUI / LibreChat (and any OpenAI client) talk to
-the harness by pointing `base_url` at `/v1`. It owns only wire-format translation:
-OpenAI JSON in -> internal Message list -> the shared core (the `TurnRunner`
-seam in api/turn.py) -> an OpenAI `chat.completion` object, or an SSE stream of
-`chat.completion.chunk` frames. No orchestration or loop logic lives here --
-both invariants are preserved by routing every turn through the one core.
-
-Stateless by design: each request seeds a fresh ephemeral Session from
-`messages[]` (the client re-feeds history), so there is no server-side
-conversation state and the same-session 409 guard never fires.
-
-Endpoints:
-  POST /v1/chat/completions  -- non-stream JSON, or SSE when `stream: true`
-  GET  /v1/models            -- the routable registry (the default model when
-                                orchestration is off)
-"""
+"""OpenAI-compatible /v1 adapter over the shared TurnRunner core."""
 
 from __future__ import annotations
 
@@ -30,9 +12,11 @@ import uuid
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sse_starlette.sse import EventSourceResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from agent import (
     DoneEvent,
@@ -49,17 +33,13 @@ from .dependencies import (
     get_settings_obj,
     get_store,
     get_turn_runner,
+    require_api_key,
 )
 from .turn import TurnRunner
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-
-# ---------------------------------------------------------------------------
-# Request shape. Tolerant by design: unknown fields (temperature, top_p, ...)
-# are ignored rather than rejected, matching how OpenAI clients probe servers.
-# ---------------------------------------------------------------------------
 
 class _ChatMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -74,7 +54,7 @@ class _ChatCompletionRequest(BaseModel):
     stream: bool = False
 
 
-# Internal done_reason -> OpenAI finish_reason. Anything unmapped is a clean stop.
+# Internal done_reason -> OpenAI finish_reason.
 _FINISH_REASONS = {
     "end_turn": "stop",
     "truncated": "length",
@@ -109,24 +89,13 @@ def _text_of(content: Any) -> str:
     return str(content)
 
 
-# ---------------------------------------------------------------------------
-# Tool-call presentation: outbound render <-> inbound strip.
-#
-# Chat UIs (OpenWebUI/LibreChat) only render `delta.content`, so the harness's
-# server-side tool steps are surfaced by folding each completed call into a
-# collapsible <details> block in the streamed content (`_tool_details`). The same
-# blocks are stripped back out of assistant history on the inbound path
-# (`_strip_tool_blocks`) so they never re-enter the agent's context when a
-# stateless client re-feeds prior turns. The 🔧 summary marker is the seam.
-# ---------------------------------------------------------------------------
+# Tool-call presentation for UIs that only render `delta.content`. Rendered
+# blocks are stripped from replayed assistant history on the next request.
 
 _TOOL_SUMMARY_MARK = "🔧 "
 _TOOL_RESULT_MAX = 2000
 
-# One rendered block: <details><summary>🔧 …</summary> … </details>. Keyed on the
-# marker so a model-authored <details> is never touched; non-greedy to the first
-# close (blocks never nest, and embedded results have their closing tag defanged
-# so a result containing "</details>" can't end the block early).
+# Keyed on the marker so model-authored <details> blocks are left alone.
 _TOOL_BLOCK_RE = re.compile(
     r"\n*<details>\s*<summary>" + _TOOL_SUMMARY_MARK + r".*?</details>\n*",
     re.DOTALL,
@@ -136,9 +105,7 @@ _TOOL_BLOCK_RE = re.compile(
 def _tool_details(event: ToolResultEvent, args: Any) -> str:
     """Render one completed tool call as a self-contained collapsible block.
 
-    Opened and closed in a single delta so a UI's progressive markdown render
-    never sees an unbalanced tag. `args` come from the matching ToolCallEvent
-    (the result event doesn't carry them); None omits the args fence.
+    A single delta avoids exposing unbalanced markdown to progressive renderers.
     """
     icon = "❌" if event.is_error else "✅"
     ms = f" · {event.latency_ms:.0f} ms" if event.latency_ms is not None else ""
@@ -148,9 +115,7 @@ def _tool_details(event: ToolResultEvent, args: Any) -> str:
     result = event.content
     if len(result) > _TOOL_RESULT_MAX:
         result = result[:_TOOL_RESULT_MAX] + "\n…[truncated]"
-    # Defang a closing tag inside the result so it can't end the block early --
-    # visually or for the inbound strip regex (zero-width space breaks the tag,
-    # stays invisible). open-websearch results can carry raw HTML.
+    # Defang embedded HTML so tool output cannot close the presentation block.
     result = result.replace("</details>", "<\u200b/details>")
     out.append(f"\n```\n{result}\n```\n\n</details>\n\n")
     return "".join(out)
@@ -164,11 +129,8 @@ def _strip_tool_blocks(text: str) -> str:
 def _prepare(messages: list[_ChatMessage]) -> tuple[str | None, list[tuple[str, str]], str | None]:
     """Map OpenAI `messages[]` to (system_override, history, prompt).
 
-    `system` messages are concatenated into the system override. The final user
-    message is the turn to run (`prompt`); every other user/assistant message
-    becomes history seeded into the ephemeral session. Tool-call presentation
-    blocks are stripped from assistant turns so the UI clutter never re-enters the
-    agent's context. `prompt` is None when no user message is present.
+    The final user message is the active prompt; earlier user/assistant turns
+    seed an ephemeral session. Rendered tool blocks are removed from history.
     """
     systems = [t for m in messages if m.role == "system" and (t := _text_of(m.content))]
     system_override = "\n\n".join(systems) if systems else None
@@ -201,6 +163,16 @@ def _error_response(message: str, *, status: int = 400, err_type: str = "invalid
         status_code=status,
         content={"error": {"message": message, "type": err_type, "param": None, "code": None}},
     )
+
+
+async def openai_auth_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Reshape a /v1 401 into the OpenAI error envelope; delegate everything else.
+
+    Registered app-wide but scoped to /v1 401s, leaving native /chat untouched.
+    """
+    if exc.status_code == 401 and request.url.path.startswith("/v1"):
+        return _error_response(exc.detail, status=401, err_type="invalid_request_error")
+    return await http_exception_handler(request, exc)
 
 
 def _default_model(settings, registry: Optional[LLMRegistry]) -> str:
@@ -243,15 +215,14 @@ def _chunk(cid: str, created: int, model: str, delta: dict, finish_reason: str |
 
 async def _stream(model: str, runner: TurnRunner, turn: dict) -> AsyncIterator[dict]:
     """SSE generator: one role frame, a content delta per TextEvent, a final
-    frame carrying finish_reason, then the `[DONE]` sentinel. Each TextEvent is
-    mapped explicitly (never dataclasses.asdict -- provider_metadata holds bytes).
+    frame carrying finish_reason, then the `[DONE]` sentinel.
     """
     cid = _completion_id()
     created = int(time.time())
     yield {"data": json.dumps(_chunk(cid, created, model, {"role": "assistant"}, None))}
 
     done_reason = "end_turn"
-    pending_args: dict[str, Any] = {}  # tool_use_id -> input; set on call, used on result
+    pending_args: dict[str, Any] = {}  # tool_use_id -> input
     try:
         async for event in runner.events(**turn):
             if isinstance(event, TextEvent):
@@ -272,7 +243,7 @@ async def _stream(model: str, runner: TurnRunner, turn: dict) -> AsyncIterator[d
     yield {"data": "[DONE]"}
 
 
-@router.post("/v1/chat/completions")
+@router.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_completions(
     request: Request,
     store: SessionStore = Depends(get_store),
@@ -299,7 +270,7 @@ async def chat_completions(
 
     reported_model = req.model or _default_model(settings, registry)
 
-    # Fresh ephemeral session per request; the client owns the history.
+    # Fresh ephemeral session per request; the client owns durable history.
     session = await store.create()
     for role, text in history:
         if role == "user":
@@ -307,8 +278,7 @@ async def chat_completions(
         else:
             session.append_assistant(AssistantMessage(content=[TextBlock(text=text)]))
 
-    # Only per-request primitives cross the seam; the runner carries the
-    # singletons. `model` is a hint -- the orchestrator still picks tools/system.
+    # `model` is a routing hint; the runner owns singleton dependencies.
     turn = dict(
         prompt=prompt,
         session=session,
@@ -328,7 +298,7 @@ async def chat_completions(
     return JSONResponse(_completion_body(answer, reported_model, usage, done_reason))
 
 
-@router.get("/v1/models")
+@router.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models(
     settings = Depends(get_settings_obj),
     registry: Optional[LLMRegistry] = Depends(get_registry),

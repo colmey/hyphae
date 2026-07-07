@@ -30,4 +30,23 @@ mcpServers:
     transport: streamable-http
     url: ${OPEN_WEBSEARCH_URL}
     disabled: false
-    disabled_tools: []
+    disabled_tools:
+     - fetchJuejinArticle
+     - fetchCsdnArticle
+     - fetchLinuxDoArticle
+
+# Tool-dispatch policy: what may EXECUTE (enforcement at dispatch), distinct from
+# what the model SEES (orchestrator selection + per-server disabled_tools above).
+#   mode: allow_all  -> every tool runs (default; omit this block for the same effect)
+#         allow_list -> only tools whose namespaced name matches an `allow` pattern
+#                       run; anything else is denied at dispatch with a teaching
+#                       result the model can adapt to (deny != run failure).
+# Patterns are fnmatch globs over `{server}__{tool}` names. An allow_list with an
+# empty `allow` fails loudly at startup (it would silently deny everything).
+tool_policy:
+  mode: allow_all
+  allow: []
+  # Example allow-list (uncomment to enforce):
+  # mode: allow_list
+  # allow:
+  #   - "open-websearch__*"

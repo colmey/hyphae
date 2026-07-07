@@ -1,18 +1,5 @@
 # llm/providers/gemini.py
-"""
-Gemini provider: an LLMClient backed by the google-genai SDK.
-
-This module owns every Gemini-specific concern -- request shaping, response
-parsing, transient-error classification, and the google-genai imports
-themselves. It is imported lazily by the provider registry in `llm/client.py`
-so the LLM layer's abstraction never pulls in the google SDK.
-
-Manual function calling: automatic function calling is disabled so the agent
-loop stays the orchestrator (see CLAUDE.md).
-
-Structured output (response_schema): wired to GenerateContentConfig.
-response_schema + response_mime_type="application/json".
-"""
+"""Gemini LLMClient backed by the google-genai SDK."""
 
 from __future__ import annotations
 
@@ -39,16 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def _canonical_stop_reason(finish_reason: Any) -> str | None:
-    """Normalize a Gemini FinishReason into the harness's canonical vocabulary.
-
-    Gemini's FinishReason is a str-enum whose str() is verbose
-    ("FinishReason.MAX_TOKENS"). The agent loop reads stop_reason to detect
-    truncation, so we map to the canonical tokens documented on
-    AssistantMessage: "end_turn" (natural stop), "max_tokens" (truncation),
-    and the provider's lowercased name for everything else (safety, recitation,
-    ...). None passes through. The no-candidates case is handled separately as
-    "empty".
-    """
+    """Normalize a Gemini FinishReason into the harness vocabulary."""
     if finish_reason is None:
         return None
     name = getattr(finish_reason, "name", None) or str(finish_reason)
@@ -63,8 +41,7 @@ class GeminiLLMClient(LLMClient):
     """LLMClient implementation backed by the google-genai SDK."""
 
     def __init__(self, api_key: str, model: str, default_max_tokens: int = 4096) -> None:
-        # google-genai picks up GEMINI_API_KEY automatically, but we pass
-        # explicitly so we fail fast if the bootstrap script didn't run.
+        # Pass explicitly so bootstrap/config failures surface early.
         self._client = genai.Client(api_key=api_key)
         self._model = model
         self._default_max_tokens = default_max_tokens
@@ -81,23 +58,16 @@ class GeminiLLMClient(LLMClient):
         contents = self._to_genai_contents(messages)
         genai_tools = self._to_genai_tools(tools) if tools else None
 
-        # Build config kwargs incrementally so structured-output mode is
-        # easy to opt into without disturbing the normal path.
         config_kwargs: dict[str, Any] = {
             "max_output_tokens": max_tokens or self._default_max_tokens,
             "tools": genai_tools,
-            # We orchestrate tool calls ourselves in the agent loop.
             "automatic_function_calling": genai_types.AutomaticFunctionCallingConfig(
                 disable=True,
             ),
             "system_instruction": system,
         }
 
-        # Thinking budget. Gemini 3 exposes a native thinking_level
-        # ("LOW"/"MEDIUM"/"HIGH"); we map our lowercase tier onto it. None
-        # leaves the model default untouched (legacy path, orchestrator's own
-        # call). An unrecognized value is logged and skipped rather than
-        # failing the request.
+        # Invalid thinking_level is skipped rather than failing the request.
         if thinking_level is not None:
             try:
                 config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
@@ -108,9 +78,7 @@ class GeminiLLMClient(LLMClient):
                     "ignoring unrecognized thinking_level %r", thinking_level
                 )
 
-        # Structured output. Tools and structured output are typically
-        # mutually exclusive in provider SDKs -- the orchestrator never
-        # passes both, but be defensive.
+        # Structured output and tools are typically mutually exclusive.
         if response_schema is not None:
             if genai_tools:
                 logger.warning(
@@ -139,8 +107,6 @@ class GeminiLLMClient(LLMClient):
 
         return self._from_genai_response(response)
 
-    # HTTP statuses worth retrying: request timeout, rate limit, and the
-    # transient 5xx family.
     _RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
     def is_transient_error(self, exc: BaseException) -> bool:
@@ -153,21 +119,15 @@ class GeminiLLMClient(LLMClient):
             return exc.code in self._RETRYABLE_STATUS
         return False
 
-    # ----- request translation -----
-
     def _to_genai_contents(self, messages: list[Message]) -> list[genai_types.Content]:
         """Translate internal Message list to Gemini's Content list.
 
-        Gemini roles are "user" and "model". Tool results are sent as "user"
-        Content with function_response parts. Internal Role.SYSTEM messages
-        are NOT included here -- the agent passes system text via the
-        `system` argument, which we map to system_instruction.
+        Tool results are user-role function_response parts. System text is
+        passed through `system_instruction`, not message history.
         """
         out: list[genai_types.Content] = []
         for msg in messages:
             if msg.role == Role.SYSTEM:
-                # System messages should be passed via the `system` param.
-                # If one shows up here, log and skip rather than crashing.
                 logger.warning("system message in history was ignored; use the system= param")
                 continue
 
@@ -176,17 +136,13 @@ class GeminiLLMClient(LLMClient):
                 if isinstance(block, TextBlock):
                     if block.text:
                         part_kwargs: dict[str, Any] = {"text": block.text}
-                        # Gemini 3+ recommends round-tripping thought
-                        # signatures on every Part type; required for
-                        # function_call parts (see ToolUseBlock branch).
+                        # Gemini 3+ uses thought signatures for turn continuity.
                         sig = block.provider_metadata.get("thought_signature")
                         if sig is not None:
                             part_kwargs["thought_signature"] = sig
                         parts.append(genai_types.Part(**part_kwargs))
                 elif isinstance(block, ToolUseBlock):
-                    # Gemini 3+ requires the original thought_signature to be
-                    # echoed back here, or the model returns 400. We stashed
-                    # it in provider_metadata on parse.
+                    # Echo the original thought_signature or Gemini may return 400.
                     part_kwargs: dict[str, Any] = {
                         "function_call": genai_types.FunctionCall(
                             name=block.name,
@@ -198,10 +154,7 @@ class GeminiLLMClient(LLMClient):
                         part_kwargs["thought_signature"] = sig
                     parts.append(genai_types.Part(**part_kwargs))
                 elif isinstance(block, ToolResultBlock):
-                    # Gemini's function_response carries a name (matching the
-                    # original function_call) and a response dict. We surface
-                    # tool content under "content" and error state under
-                    # "error" so the model can see both.
+                    # Keep both tool content and error state visible to Gemini.
                     response_payload: dict[str, Any] = {"content": block.content}
                     if block.is_error:
                         response_payload["error"] = True
@@ -217,26 +170,17 @@ class GeminiLLMClient(LLMClient):
             if not parts:
                 continue
 
-            # Map roles: USER -> "user", ASSISTANT -> "model", TOOL -> "user"
-            # (Gemini sends function_responses as user-role content).
             gemini_role = "model" if msg.role == Role.ASSISTANT else "user"
             out.append(genai_types.Content(role=gemini_role, parts=parts))
 
         return out
 
     def _to_genai_tools(self, tools: list[dict[str, Any]]) -> list[genai_types.Tool]:
-        """Translate the generic tool list into a single Gemini Tool object.
-
-        Gemini accepts a list of Tool objects, each containing a list of
-        function declarations. We put all our function declarations into one
-        Tool for simplicity.
-        """
+        """Translate generic tools into one Gemini Tool object."""
         declarations = [
             genai_types.FunctionDeclaration(
                 name=t["name"],
                 description=t.get("description", ""),
-                # MCP gives us a JSON Schema dict in input_schema; Gemini's
-                # parameters_json_schema accepts that directly. No reshape.
                 parameters_json_schema=t.get("input_schema") or {
                     "type": "object",
                     "properties": {},
@@ -245,8 +189,6 @@ class GeminiLLMClient(LLMClient):
             for t in tools
         ]
         return [genai_types.Tool(function_declarations=declarations)]
-
-    # ----- response translation -----
 
     def _from_genai_response(self, response: Any) -> AssistantMessage:
         """Convert a google-genai GenerateContentResponse into AssistantMessage."""
@@ -265,27 +207,20 @@ class GeminiLLMClient(LLMClient):
         parts = getattr(content, "parts", None) if content else None
 
         for part in parts or []:
-            # Gemini 3+ may attach a thought_signature to any Part. Capture
-            # it so we can round-trip it back on the next turn (required for
-            # function_call parts; recommended for text parts).
+            # Preserve thought_signature for the next Gemini turn.
             signature = getattr(part, "thought_signature", None)
             metadata: dict[str, Any] = {}
             if signature is not None:
                 metadata["thought_signature"] = signature
 
-            # Text part
             text = getattr(part, "text", None)
             if text:
                 blocks.append(TextBlock(text=text, provider_metadata=metadata))
                 continue
 
-            # Function call part
             function_call = getattr(part, "function_call", None)
             if function_call is not None:
-                # Gemini doesn't provide a call ID, so we mint one. The name
-                # is preserved separately on the ToolUseBlock, and the agent
-                # loop will echo it back on the matching ToolResultBlock so
-                # the function_response round-trip works.
+                # Gemini omits call IDs; mint one for the internal protocol.
                 call_id = f"call_{uuid.uuid4().hex[:12]}"
                 blocks.append(
                     ToolUseBlock(
@@ -297,8 +232,6 @@ class GeminiLLMClient(LLMClient):
                 )
                 continue
 
-            # Other part types (thought signatures, executable code, etc.)
-            # are not handled in v1. Log and skip.
             logger.debug("unhandled gemini part type: %r", part)
 
         return AssistantMessage(

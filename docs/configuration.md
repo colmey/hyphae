@@ -45,7 +45,8 @@ same file works for local dev, containers, and CI.
 | `SESSION_MAX_COUNT`            | `1000`                        | Max sessions retained in memory; oldest-updated evicted first (`<= 0` disables) |
 | `LOG_LEVEL`                    | `INFO`                        | Python logging level (DEBUG opens per-request orchestrator detail) |
 | `TRACE_ENABLED`                | `false`                       | Serialize the loop's event stream to a JSONL trace (one record per event, tagged with `run_id` + step + timestamp + latency). Off = `tracer=None`, zero hot-path cost |
-| `TRACE_PATH`                   | `traces/harness.jsonl`        | Append-only JSONL trace file; parent dirs are created. Captures full prompts/args/results — treat as sensitive (no auth yet) |
+| `TRACE_PATH`                   | `traces/harness.jsonl`        | Append-only JSONL trace file; parent dirs are created. Captures full prompts/args/results — treat as sensitive and guard at the filesystem level (the trace file is not covered by `HARNESS_API_KEY`) |
+| `HARNESS_API_KEY`              | `""`                          | Optional API key gating `/chat`, `/chat/stream`, `/v1/*` (`/health` stays open). Empty = auth off (single-operator dev default); set = 401 without a valid key. Accepts `X-API-Key: <key>` or `Authorization: Bearer <key>`; compared constant-time |
 | `ORCHESTRATION_ENABLED`        | `true`                        | Master toggle for the orchestration layer          |
 | `MODELS_CONFIG_PATH`           | `config/models.yaml`          | Path to the model registry YAML                    |
 | `ORCHESTRATOR_PROMPT_PATH`     | `config/orchestrator_prompt.md` | Path to orchestrator's system prompt             |
@@ -74,6 +75,11 @@ mcpServers:
   #   args: ["mcp-server-github"]
   #   env:
   #     GITHUB_TOKEN: ${GITHUB_TOKEN}
+
+# Optional top-level block: dispatch-time tool policy (what may EXECUTE).
+tool_policy:
+  mode: allow_all        # allow_all (default) | allow_list
+  allow: []              # fnmatch patterns over {server}__{tool}, e.g. ["web-search__*"]
 ```
 
 **Schema notes:**
@@ -85,7 +91,18 @@ mcpServers:
   validates its own required fields.
 - `disabled: true` skips the server entirely at startup.
 - `disabled_tools: [...]` hides specific tools from the LLM (defense in
-  depth: filtered at list time and at call time).
+  depth: filtered at list time and at call time). This is a **visibility**
+  control (what the model sees) — separate from `tool_policy` below.
+- `tool_policy` (optional, top-level) is the **enforcement** control (what
+  actually runs), checked at dispatch after argument validation and before the
+  MCP call. `mode: allow_all` (default; or omit the block) runs every tool.
+  `mode: allow_list` runs only tools whose namespaced name matches an `allow`
+  fnmatch pattern; anything else is denied with a teaching `is_error` result the
+  model can adapt to (a denial is feedback, not a run failure, and repeated
+  denials trip the no-progress abort). An `allow_list` with an empty `allow`
+  **fails loudly at startup** — it would otherwise silently deny every tool.
+  Visibility (orchestrator selection + `disabled_tools`) and enforcement
+  (`tool_policy`) are deliberately distinct layers.
 - String values support `${ENV_VAR}` interpolation; missing vars raise
   immediately rather than producing empty strings.
 - Server names cannot contain `__` (reserved for tool namespacing) and

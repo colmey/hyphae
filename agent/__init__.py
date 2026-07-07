@@ -18,6 +18,7 @@ from .events import (
     UsageEvent,
 )
 from .loop import run_agent
+from .tool_policy import PolicyDecision, ToolPolicy, Verdict, build_tool_policy
 from .session import (
     InMemorySessionStore,
     Session,
@@ -36,6 +37,7 @@ __all__ = [
     "JSONLTracer",
     "NoOpTracer",
     "OrchestrationDecisionEvent",
+    "PolicyDecision",
     "Session",
     "SessionBusyError",
     "SessionGuard",
@@ -43,9 +45,12 @@ __all__ = [
     "SessionStore",
     "TextEvent",
     "ToolCallEvent",
+    "ToolPolicy",
     "ToolResultEvent",
     "Tracer",
     "UsageEvent",
+    "Verdict",
+    "build_tool_policy",
     "build_tracer",
     "run_agent",
     "run_logger",

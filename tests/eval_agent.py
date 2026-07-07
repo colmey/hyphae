@@ -323,6 +323,7 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
             settings=settings,
             orchestrator=ScriptedOrchestrator(orch_cfg),
             registry=ScriptedRegistry(llm, model_ids=["default"]),
+            policy=None,
             tracer=None,
         )
         async for event in runner.events(

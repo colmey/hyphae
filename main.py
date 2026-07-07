@@ -1,32 +1,6 @@
 # main.py
 
-"""
-FastAPI entry point for the AI harness.
-
-Run with:
-    ./runscript.sh -m uvicorn main:app --host 0.0.0.0 --port 8000
-
-The bootstrap script must populate os.environ BEFORE importing this module
-(or anything from the harness). Once env vars are set, lifespan() builds:
-
-    1. Settings        (via get_settings())
-    2. LLMClient       (via build_llm_client(settings)) -- default/fallback
-    3. MCPConfig       (load_mcp_config from YAML)
-    4. MCPManager      (started in parallel)
-    5. SessionStore    (in-memory, bounded by TTL + max-size)
-    6. SessionGuard    (reject-if-busy guard for same-session concurrency)
-    7. LLMRegistry     (when orchestration_enabled and models.yaml loads)
-    8. Orchestrator    (when LLMRegistry was built)
-
-All are stashed on app.state for the duration of the process.
-Orchestration is optional: if models.yaml is missing or unparseable, the
-harness logs a warning and runs without it (routes fall back to the default
-LLM and the full MCP tool inventory).
-
-On shutdown, MCP connections are closed cleanly. The session store, LLM
-clients, and orchestrator don't need explicit teardown today; if a future
-provider's client holds resources, add it here.
-"""
+"""FastAPI entry point and lifespan wiring for the harness."""
 
 from __future__ import annotations
 
@@ -38,8 +12,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from agent import InMemorySessionStore, SessionGuard, build_tracer
+from agent import InMemorySessionStore, SessionGuard, build_tool_policy, build_tracer
 from api import router
+from api.openai_compatible import openai_auth_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from harness_config import get_settings, load_mcp_config
 from llm import build_llm_client
 from mcp_layer import MCPManager
@@ -56,9 +32,7 @@ logger = logging.getLogger(__name__)
 def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | None, Orchestrator | None]:
     """Attempt to construct (LLMRegistry, Orchestrator). Returns (None, None) on any failure.
 
-    Orchestration is optional and must never block harness startup. Any
-    error -- missing file, schema violation, bad model_id override -- is
-    logged and degrades the harness to legacy (no-orchestration) mode.
+    Orchestration is optional; load/build errors degrade to no-orchestration mode.
     """
     if not settings.orchestration_enabled:
         logger.info("orchestration disabled by Settings.orchestration_enabled=False")
@@ -94,9 +68,7 @@ def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | N
 
     registry = LLMRegistry(models_config, settings)
 
-    # Eagerly construct the orchestrator's own client so a bad
-    # orchestrator_model_id setting is caught at startup instead of on the
-    # first request.
+    # Catch a bad orchestrator_model_id at startup instead of first request.
     orch_model_id = settings.orchestrator_model_id or registry.default_id()
     try:
         registry.get(orch_model_id)
@@ -126,12 +98,7 @@ def _log_ready_summary(
     mcp: MCPManager,
     registry: LLMRegistry | None,
 ) -> None:
-    """Emit a single consolidated status line at the end of startup.
-
-    The individual lifecycle steps already log their own INFO lines; this
-    one pulls the headline facts into one greppable place so operators
-    can confirm "the harness came up correctly" without scrolling.
-    """
+    """Emit one greppable startup summary."""
     if registry is not None:
         orch_part = f"orchestration=on (models={len(registry.model_ids)})"
     else:
@@ -150,10 +117,8 @@ def _log_ready_summary(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup/shutdown lifecycle. See module docstring for the bootstrap contract."""
-    # Settings + LLM client. Both will raise loudly if bootstrap didn't run
-    # (missing API key, unknown provider). That's the right behavior — the
-    # app should not start up half-broken.
+    """Startup/shutdown lifecycle."""
+    # Settings and default LLM fail loud if bootstrap/config is broken.
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level,
@@ -164,31 +129,24 @@ async def lifespan(app: FastAPI):
 
     llm = build_llm_client(settings)
 
-    # MCP. Graceful degradation: a bad server is logged but doesn't kill startup.
     mcp_config = load_mcp_config(settings.mcp_config_path)
     mcp = MCPManager(mcp_config)
     await mcp.startup()
 
-    # Session store. In-memory and bounded (TTL + max-size) so it can't grow
-    # without limit under concurrent load. Swap to a durable backend later by
-    # changing this one line. The guard rejects a second concurrent request on
-    # the same session_id (distinct sessions are already isolated).
+    # Dispatch policy is what may run; orchestration is only what the model sees.
+    policy = build_tool_policy(mcp_config.tool_policy)
+
+    # The guard rejects concurrent requests for the same session_id.
     store = InMemorySessionStore(
         ttl_seconds=settings.session_ttl_seconds,
         max_count=settings.session_max_count,
     )
     guard = SessionGuard()
 
-    # Orchestration. Built only when configured AND files load successfully.
-    # When the registry/orchestrator are None, api/routes.py falls back to
-    # the default LLM + all tools -- the pre-orchestrator behavior.
     registry, orchestrator = _try_build_orchestration(settings, mcp)
 
-    # Run tracer. Optional and best-effort: None when disabled or unbuildable,
-    # so the loop's hot path is untouched and a bad sink never blocks startup.
     tracer = build_tracer(enabled=settings.trace_enabled, path=settings.trace_path)
 
-    # Publish to app.state for the dependency providers in api/.
     app.state.settings = settings
     app.state.llm = llm
     app.state.mcp = mcp
@@ -196,9 +154,9 @@ async def lifespan(app: FastAPI):
     app.state.guard = guard
     app.state.registry = registry
     app.state.orchestrator = orchestrator
+    app.state.policy = policy
     app.state.tracer = tracer
 
-    # One consolidated ready line at the end of startup.
     _log_ready_summary(
         settings=settings,
         mcp=mcp,
@@ -221,3 +179,5 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(router)
+# Reshape /v1 401s into the OpenAI error envelope (native /chat 401s pass through).
+app.add_exception_handler(StarletteHTTPException, openai_auth_exception_handler)

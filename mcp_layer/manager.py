@@ -1,20 +1,6 @@
 # mcp_layer/manager.py
 
-"""
-MCP manager: holds all configured server clients and exposes a unified tool API.
-
-Lifecycle (driven by FastAPI's lifespan in main.py later):
-    manager = MCPManager(mcp_config)
-    await manager.startup()    # connects to all enabled servers in parallel
-    ...
-    await manager.shutdown()   # closes all sessions
-
-Tool namespacing:
-    Each tool is exposed externally (to the LLM and to call_tool callers) as
-    "{server_name}__{tool_name}". This prevents collisions when two servers
-    define a tool with the same name. The separator is "__" -- server names
-    containing "__" are rejected in config validation.
-"""
+"""Aggregate MCP clients and expose namespaced tools."""
 
 from __future__ import annotations
 
@@ -36,17 +22,12 @@ class MCPManager:
     def __init__(self, mcp_config: MCPConfig) -> None:
         self._config = mcp_config
         self._clients: dict[str, MCPClient] = {}
-        # Map of namespaced tool name -> (server_name, raw Tool)
         self._tool_index: dict[str, tuple[str, Tool]] = {}
-
-    # ----- lifecycle -----
 
     async def startup(self) -> None:
         """Connect to every enabled server in parallel.
 
-        Failures on individual servers are logged but do not abort startup;
-        the harness can still operate with a degraded tool set. Adjust later
-        if you want strict-mode startup.
+        Individual server failures are logged but do not abort startup.
         """
         enabled = self._config.enabled_servers()
         if not enabled:
@@ -62,7 +43,6 @@ class MCPManager:
         for (name, client), result in zip(clients.items(), results):
             if isinstance(result, Exception):
                 logger.error("failed to connect to %r: %s", name, result)
-                # Best-effort cleanup in case partial state was left behind.
                 try:
                     await client.close()
                 except Exception:
@@ -89,8 +69,6 @@ class MCPManager:
         self._clients.clear()
         self._tool_index.clear()
 
-    # ----- tool inspection -----
-
     @property
     def connected_servers(self) -> list[str]:
         return list(self._clients.keys())
@@ -103,11 +81,7 @@ class MCPManager:
         ]
 
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
-        """Return tools in a generic schema shape.
-
-        Adapting to a specific LLM provider's tool format (Anthropic, Gemini,
-        OpenAI) happens in the LLM client. We keep this provider-agnostic.
-        """
+        """Return tools in the provider-agnostic schema shape."""
         return [
             {
                 "name": namespaced,
@@ -116,8 +90,6 @@ class MCPManager:
             }
             for namespaced, tool in self.list_tools()
         ]
-
-    # ----- tool execution -----
 
     async def call_tool(self, namespaced_name: str, arguments: dict[str, Any]) -> ToolCallResult:
         """Route a namespaced tool call to the appropriate server."""

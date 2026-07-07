@@ -1,35 +1,10 @@
 # llm/providers/openai.py
-"""
-OpenAI-compatible provider: an LLMClient backed by the official `openai` SDK
-(AsyncOpenAI).
+"""OpenAI-compatible LLMClient backed by the official `openai` SDK.
 
-Because the SDK targets the OpenAI wire protocol, this one client serves real
-OpenAI *and* any OpenAI-compatible server (notably a local Ollama instance) by
-pointing `base_url` at the alternate endpoint -- e.g.
-`http://localhost:11434/v1`. The provider name in the registry is `openai`; the
-endpoint is selected via Settings.openai_base_url (empty = real OpenAI).
-
-This module owns every OpenAI-specific concern -- request shaping, response
-parsing, transient-error classification, and the `openai` import itself. It is
-imported lazily by the provider registry in `llm/client.py` so the LLM layer's
-abstraction never pulls in the SDK.
-
-Manual function calling: tool calls are returned to the agent loop as
-ToolUseBlocks; we never let the SDK execute tools (the loop is the orchestrator,
-per CLAUDE.md).
-
-Ollama / reasoning-model notes:
-  - Tool calling only works with tools-capable models (llama3.1, qwen2.5/3, ...).
-    A model without tool support simply never emits tool_calls.
-  - response_schema is wired (response_format) but only best-effort against
-    Ollama; the agent loop never sends it.
-  - thinking_level has no OpenAI-compatible-for-Ollama equivalent, so it is
-    ignored (the LLMClient contract permits this).
-  - Reasoning models (e.g. qwen3) surface chain-of-thought either inline in
-    message.content as a leading <think>...</think> block or in a separate
-    reasoning field. We strip a leading <think> block from content and ignore
-    any separate reasoning field, so reasoning never pollutes the TextBlock or
-    the replayed history.
+The same provider serves real OpenAI and local OpenAI-compatible servers via
+`base_url`. Tool calls are returned to the agent loop; the SDK never executes
+them. Leading `<think>...</think>` blocks are stripped from reasoning models so
+chain-of-thought is not replayed as assistant content.
 """
 
 from __future__ import annotations
@@ -52,21 +27,12 @@ from llm.schemas import (
 
 logger = logging.getLogger(__name__)
 
-# Matches a single leading <think>...</think> block (and trailing whitespace),
-# the way Qwen3 and similar reasoning models inline chain-of-thought when an
-# OpenAI-compatible server doesn't split it into a separate field.
+# Some OpenAI-compatible reasoning models inline a leading thought block.
 _THINK_BLOCK = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 
 
 def _canonical_stop_reason(finish_reason: Any) -> str | None:
-    """Normalize an OpenAI finish_reason into the harness's canonical vocabulary.
-
-    OpenAI emits "stop", "tool_calls", "length", "content_filter", etc. The
-    agent loop reads stop_reason to detect truncation, so we map to the tokens
-    documented on AssistantMessage: "end_turn" (natural stop or a tool call) and
-    "max_tokens" (truncation). Anything else passes through lowercased. None
-    passes through. The no-choices case is handled separately as "empty".
-    """
+    """Normalize an OpenAI finish_reason into the harness vocabulary."""
     if finish_reason is None:
         return None
     name = str(finish_reason)
@@ -94,12 +60,9 @@ class OpenAILLMClient(LLMClient):
         default_max_tokens: int = 4096,
         base_url: str | None = None,
     ) -> None:
-        # Lazy import so importing the LLM layer never drags in the SDK.
         from openai import AsyncOpenAI
 
-        # base_url=None lets the SDK target real OpenAI; a value (e.g. Ollama's
-        # /v1) points it at an OpenAI-compatible server. The SDK requires a
-        # non-empty api_key string even when the server ignores it.
+        # The SDK requires a non-empty api_key even for local servers.
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
         self._model = model
         self._default_max_tokens = default_max_tokens
@@ -123,12 +86,9 @@ class OpenAILLMClient(LLMClient):
         }
         if oai_tools:
             request["tools"] = oai_tools
-            # We orchestrate tool calls ourselves in the agent loop; "auto"
-            # lets the model decide whether to call, never forces it.
             request["tool_choice"] = "auto"
 
-        # Structured output. Tools and structured output are typically mutually
-        # exclusive; the orchestrator never passes both, but be defensive.
+        # Structured output and tools are typically mutually exclusive.
         if response_schema is not None:
             if oai_tools:
                 logger.warning(
@@ -139,7 +99,6 @@ class OpenAILLMClient(LLMClient):
                 request.pop("tool_choice", None)
             request["response_format"] = self._response_format(response_schema)
 
-        # thinking_level has no OpenAI-compatible-for-Ollama mapping; ignore it.
         if thinking_level is not None:
             logger.debug("ignoring thinking_level=%r (unsupported)", thinking_level)
 
@@ -152,15 +111,12 @@ class OpenAILLMClient(LLMClient):
         response = await self._client.chat.completions.create(**request)
         return self._from_openai_response(response)
 
-    # HTTP statuses worth retrying: request timeout, rate limit, and the
-    # transient 5xx family.
     _RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
     def is_transient_error(self, exc: BaseException) -> bool:
         """Retry rate limits, transient 5xx, and timeouts/connection resets."""
         if isinstance(exc, (TimeoutError, ConnectionError)):
             return True
-        # Lazy import so error classification doesn't force the SDK at module load.
         try:
             from openai import (
                 APIConnectionError,
@@ -176,16 +132,13 @@ class OpenAILLMClient(LLMClient):
             return getattr(exc, "status_code", None) in self._RETRYABLE_STATUS
         return False
 
-    # ----- request translation -----
-
     def _to_openai_messages(
         self, messages: list[Message], system: str | None
     ) -> list[dict[str, Any]]:
         """Translate internal Message list to OpenAI's chat message list.
 
-        The `system` argument becomes a leading system-role message. Internal
-        Role.SYSTEM messages in history are logged and skipped (system text is
-        passed via the `system` param, mirroring the Gemini client).
+        System text is passed through the `system` arg; Role.SYSTEM history is
+        ignored so providers share one convention.
         """
         out: list[dict[str, Any]] = []
         if system:
@@ -199,8 +152,6 @@ class OpenAILLMClient(LLMClient):
                 continue
 
             if msg.role == Role.TOOL:
-                # Each tool result becomes its own tool-role message keyed by
-                # the originating tool_call id.
                 for block in msg.content:
                     if isinstance(block, ToolResultBlock):
                         out.append({
@@ -228,7 +179,6 @@ class OpenAILLMClient(LLMClient):
                         })
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
-                    # content must be present; null is valid when only tools.
                     "content": "".join(text_parts) or None,
                 }
                 if tool_calls:
@@ -236,7 +186,6 @@ class OpenAILLMClient(LLMClient):
                 out.append(assistant_msg)
                 continue
 
-            # USER (and any other) role: flatten text blocks.
             text_parts = [
                 block.text
                 for block in msg.content
@@ -247,11 +196,7 @@ class OpenAILLMClient(LLMClient):
         return out
 
     def _to_openai_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Translate the generic tool list into OpenAI function-tool dicts.
-
-        MCP gives a JSON Schema dict in input_schema; OpenAI's function
-        `parameters` accepts that directly, so no reshape is needed.
-        """
+        """Translate generic tools into OpenAI function-tool dicts."""
         return [
             {
                 "type": "function",
@@ -268,12 +213,7 @@ class OpenAILLMClient(LLMClient):
         ]
 
     def _response_format(self, response_schema: type) -> dict[str, Any]:
-        """Build a response_format for structured output.
-
-        Prefer a json_schema (strict OpenAI mode) derived from the Pydantic
-        model; fall back to plain json_object if the schema can't be produced
-        (e.g. against a server that only supports json_object).
-        """
+        """Build a response_format for structured output."""
         try:
             schema = response_schema.model_json_schema()  # type: ignore[attr-defined]
             return {
@@ -285,8 +225,6 @@ class OpenAILLMClient(LLMClient):
             }
         except Exception:  # pragma: no cover - non-Pydantic or unsupported
             return {"type": "json_object"}
-
-    # ----- response translation -----
 
     def _from_openai_response(self, response: Any) -> AssistantMessage:
         """Convert an openai ChatCompletion into AssistantMessage."""
@@ -303,12 +241,10 @@ class OpenAILLMClient(LLMClient):
         finish_reason = getattr(choice, "finish_reason", None)
         message = getattr(choice, "message", None)
 
-        # Text content (strip a leading <think>...</think> reasoning block).
         content = _strip_reasoning(getattr(message, "content", None))
         if content:
             blocks.append(TextBlock(text=content))
 
-        # Tool calls. OpenAI supplies a real id, so no synthetic minting.
         for tc in getattr(message, "tool_calls", None) or []:
             fn = getattr(tc, "function", None)
             raw_args = getattr(fn, "arguments", None) if fn else None
@@ -333,12 +269,7 @@ class OpenAILLMClient(LLMClient):
         )
 
     def _usage_from_response(self, response: Any) -> Usage:
-        """Map openai usage onto our provider-agnostic Usage.
-
-        OpenAI-compatible servers report prompt/completion/total tokens; there
-        are no separate thinking/cached fields in the basic shape, so those
-        stay 0.
-        """
+        """Map OpenAI usage onto our provider-agnostic Usage."""
         u = getattr(response, "usage", None)
         if u is None:
             return Usage()

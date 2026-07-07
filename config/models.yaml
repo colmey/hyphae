@@ -59,3 +59,58 @@ models:
       from natural language understanding to advanced problem solving.
     context_window: 131072
     default: true
+
+  glm-4.7-flash:
+    provider: openai
+    model: glm-4.7-flash
+    description: >
+      GLM-4.7-Flash, a 30B-A3B mixture-of-experts model tuned for general agentic
+      reasoning. A strong, well-rounded choice for complex multi-step reasoning,
+      planning, and tool-calling across mixed workloads. Prefer it when the task needs
+      solid reasoning but is not specifically coding-focused.
+    context_window: 65536
+    max_tokens: 16384
+
+  qwen3.6-35b-a3b:
+    provider: openai
+    model: qwen3.6-35b-a3b
+    description: >
+      Qwen3.6-35B-A3B, a mixture-of-experts reasoning model specialized for agentic
+      coding. A heavy, deliberate reasoner that emits extended thinking before
+      answering. Select for complex code generation, multi-step engineering tasks, and
+      demanding tool-driven workflows.
+    context_window: 65536
+    max_tokens: 16384
+
+  qwen3.5-9b:
+    provider: openai
+    model: qwen3.5-9b
+    description: >
+      Qwen3.5-9B, a compact dense reasoning model with hybrid attention and a very long
+      (200K token) context window; multimodal-capable architecture, currently wired
+      text-only. Fast and efficient. Prefer for long-context tasks, document analysis,
+      and lighter reasoning where a large model is unnecessary.
+    context_window: 204800
+    max_tokens: 32768
+
+  ornith-1.0-9b:
+    provider: openai
+    model: ornith-1.0-9b
+    description: >
+      Ornith-1.0-9B, a Qwen3.5-9B fine-tune specialized for agentic coding, with a very
+      long (200K token) context window and always-on step-by-step reasoning. Prefer for
+      coding and tool-use tasks that need a fast, small model with a large context
+      window.
+    context_window: 204800
+    max_tokens: 32768
+
+  ornith-1.0-35b:
+    provider: openai
+    model: ornith-1.0-35b
+    description: >
+      Ornith-1.0-35B, a mixture-of-experts agentic-coding model and direct peer to
+      qwen3.6-35b-a3b, with an extremely long (256K token) context window and always-on
+      reasoning. Select for large-context, complex agentic coding and multi-step
+      engineering workflows.
+    context_window: 262144
+    max_tokens: 32768

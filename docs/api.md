@@ -1,16 +1,34 @@
 # PyAiHarness — HTTP API
 
-The full request/response contract for the endpoints. Native surfaces —
-`GET /health`, the plain-text `POST /chat`, and the live event feed
-`POST /chat/stream` — plus an OpenAI-compatible adapter
-(`POST /v1/chat/completions`, `GET /v1/models`) so tools like OpenWebUI and
-LibreChat connect natively. All of them are thin shells over one shared core
+Request/response contracts for the native routes and the OpenAI-compatible
+adapter. All chat surfaces drive the same shared turn core
 (`api/turn.py::_turn_events`).
 
 > See also: [README.md](README.md) (overview + quick start),
 > [architecture.md](architecture.md) (how the route is wired,
 > [the "Bouncer" rationale](architecture.md#design-decisions)),
 > [configuration.md](configuration.md) (env vars and config files).
+
+## Authentication
+
+Optional and off by default. When `HARNESS_API_KEY` is **unset**, every route is
+open (single-operator dev default). When it is **set**, the chat routes —
+`POST /chat`, `POST /chat/stream`, `POST /v1/chat/completions`, `GET /v1/models` —
+require the key and return **401** without it. `GET /health` is **always open**.
+
+Present the key either way:
+
+- `X-API-Key: <key>`, or
+- `Authorization: Bearer <key>` (what OpenWebUI/LibreChat send on an OpenAI
+  connection — set the key in that connection's config).
+
+The comparison is constant-time and stays at the route layer.
+
+```bash
+# with a key configured:
+curl -sS -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $HARNESS_API_KEY" --data 'what is 2+2?'
+```
 
 ## `GET /health`
 
@@ -32,11 +50,9 @@ during startup. `available_model_ids` lists the model IDs from
 
 ## `POST /chat`
 
-**Plain text in, plain text out.** The request body **is** the prompt and
-the response body **is** the answer. There is no JSON wire schema — this is a
-deliberate dumb-pipe contract that any client (curl, a script, a custom
-adapter) can drive with no serialization. Session continuation and the result
-metadata travel as headers. For OpenAI-client tooling, use the
+**Plain text in, plain text out.** The request body **is** the prompt and the
+response body **is** the answer. Session continuation and result metadata travel
+as headers. For OpenAI-client tooling, use the
 [`/v1/chat/completions`](#post-v1chatcompletions) adapter instead.
 
 **Request:**
@@ -53,9 +69,8 @@ List the tables in the customer database.
 - `X-Session-Id` (optional request header) continues an existing session. If
   omitted, a new session is created; if provided but unknown, returns **404**.
 - There are no per-call `system`, `max_iterations`, or tool-preference knobs on
-  this endpoint. The orchestrator picks the model, the tool subset, and the
-  system prompt; the iteration cap comes from `settings.max_loop_iterations`. A
-  per-call system prompt is available on the
+  this endpoint. The orchestrator picks model/tools/system; the iteration cap
+  comes from settings. A per-call system prompt is available on the
   [`/v1/chat/completions`](#post-v1chatcompletions) endpoint (as a
   `role: "system"` message).
 
@@ -75,17 +90,12 @@ The customer database contains tables including customers, orders, payments.
   request to continue the conversation.
 - `X-Done-Reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty", "truncated",
   "budget_exceeded", "deadline_exceeded", "no_progress"}`.
-  `"truncated"` means the model stopped on `max_tokens` mid-answer (the body is
-  clipped). `"max_iterations"` means the run hit the iteration cap; the loop
-  withholds tools on that last step and asks the model to wrap up, so the body
-  carries a best-effort final answer rather than mid-investigation fragments. A
-  tool that exceeds `TOOL_TIMEOUT_SECONDS` does not end the run — the model sees
-  the error and reacts. `"budget_exceeded"`/`"deadline_exceeded"` mean the run hit
-  `MAX_RUN_TOKENS`/`MAX_RUN_SECONDS` (both disabled by default); `"no_progress"`
-  means `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` consecutive tool-call failures
-  ended the run early. All three carry whatever answer text had already been
-  produced. See [configuration.md](configuration.md) and architecture.md's
-  *Bounded & safe runs* section.
+  `"truncated"` means the model stopped on `max_tokens` mid-answer. `"max_iterations"`
+  means the loop hit its iteration cap and forced a best-effort wrap-up.
+  `"budget_exceeded"`, `"deadline_exceeded"`, and `"no_progress"` are optional
+  guard exits; they include answer text already produced. See
+  [configuration.md](configuration.md) and architecture.md's *Bounded & safe runs*
+  section.
 
 Routing and token-usage detail (which model handled the request, how many
 tokens it spent) is recorded in the per-request server logs, not the response.
@@ -115,11 +125,9 @@ request completes.
 
 ## `POST /chat/stream`
 
-The **live activity feed**: same turn as `/chat`, but streamed as the loop's
-typed events instead of one collected answer. Use it to show *what the agent is
-doing* — tool calls and results appear the instant the loop reaches them, then
-the answer text follows. Clients that only want the final answer should use
-`/chat` (or `/v1`) instead.
+The **live activity feed**: same turn as `/chat`, streamed as typed loop events
+instead of one collected answer. Tool calls/results appear as the loop reaches
+them; clients that only want the final answer should use `/chat` or `/v1`.
 
 Same dumb-pipe contract as `/chat`: the request body **is** the prompt;
 `X-Session-Id` (optional) continues a session; an empty body returns **400**, an
@@ -141,29 +149,20 @@ data: {"type":"text","text":"SpaceX launched ..."}
 data: {"type":"done","reason":"end_turn","iterations":2,"total_tokens":1875}
 ```
 
-Event `type`s: `text`, `tool_call`, `tool_result`, `usage`, `done`, `error`
-(payload fields mirror `agent/events.py`, serialized by the same bytes-safe
-mapping the tracer uses). A failure mid-turn — including the same-session 409 or
-an LLM error — is delivered as a terminal `{"type":"error","message":...}` frame
-rather than an HTTP status, since the SSE response is already open.
+Event `type`s: `text`, `tool_call`, `tool_result`, `usage`, `done`, `error`.
+A failure mid-turn is delivered as a terminal error frame because the SSE
+response is already open.
 
 **Text is not token-streamed:** assistant text arrives as one `text` event per
-loop iteration, not token-by-token. This endpoint streams *activity*, not tokens
-— the harness has no provider-level token streaming by design (it would push
-per-provider stream plumbing and reasoning-tag stripping into the core). It is
-the seam any live-update consumer plugs into: a dashboard, a voice assistant, or
-an OpenWebUI pipe that renders tool events as status updates.
+loop iteration. This endpoint streams activity, not provider tokens.
 
 ## `POST /v1/chat/completions`
 
-An **OpenAI-compatible** adapter (`api/openai_compatible.py`) so any OpenAI client —
-OpenWebUI, LibreChat, the `openai` SDK — drives the harness by pointing its
-base URL at `/v1`. It is a thin wire-format translator over the same shared core
-as `/chat`; no orchestration or loop logic is duplicated.
+An **OpenAI-compatible** adapter for OpenWebUI, LibreChat, and the `openai` SDK.
+Point the client's base URL at `/v1`.
 
-**Stateless.** Each request seeds a fresh ephemeral session from the `messages`
-array (the client re-feeds the full history every turn), so there is no
-server-side session and the same-session 409 guard never applies.
+**Stateless.** Each request seeds an ephemeral session from `messages`; the
+client owns durable history, so same-session 409 never applies.
 
 **Request** (standard OpenAI body; unknown fields like `temperature`, `top_p`
 are tolerated and ignored):
@@ -226,24 +225,18 @@ data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":
 data: [DONE]
 ```
 
-**Tool-call visibility (stream only).** Because OpenAI clients render only
-`delta.content`, the harness folds each completed server-side tool call into a
-collapsible `<details>` block emitted as a `delta.content` chunk (tool name,
-arguments, result, and `✅`/`❌` + latency). UIs like OpenWebUI render it as an
-expandable "tool" section inline with the answer. These blocks are part of the
-assistant message, so a stateless client re-feeds them on the next turn — the
-adapter strips them back out of assistant history on the inbound path
-(`_strip_tool_blocks`) so they never re-enter the agent's context. The
-non-stream JSON response carries plain text only (no blocks).
+**Tool-call visibility (stream only).** OpenAI clients render only
+`delta.content`, so completed server-side tool calls are folded into collapsible
+`<details>` blocks. The adapter strips those blocks from replayed assistant
+history so they never re-enter agent context. Non-stream JSON carries plain text
+only.
 
 ```json
 {"error": {"message": "'messages' must be a non-empty array", "type": "invalid_request_error", "param": null, "code": null}}
 ```
 
-Bad input (malformed JSON, empty/`user`-less `messages`) returns **400**; an
-unexpected internal failure returns **500** with `type: "server_error"`. In
-streaming mode the connection is already open, so an error is emitted as a final
-SSE `error` frame before `[DONE]` rather than an HTTP status.
+Bad input returns **400**; unexpected internal failure returns **500** with
+`type: "server_error"`. Streaming errors are emitted as SSE error frames.
 
 ## `GET /v1/models`
 
@@ -267,7 +260,8 @@ the single default model when orchestration is off.
 In OpenWebUI, add an **OpenAI API** connection:
 
 - **API Base URL:** `http://<host>:8000/v1`
-- **API Key:** any non-empty value (the harness does not authenticate `/v1`).
+- **API Key:** if `HARNESS_API_KEY` is set, use that value (OpenWebUI sends it as
+  `Authorization: Bearer`); if auth is off, any non-empty placeholder works.
 
 OpenWebUI calls `GET /v1/models` to populate its model dropdown and
 `POST /v1/chat/completions` (with `stream: true`) for chat. LibreChat connects

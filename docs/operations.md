@@ -219,9 +219,11 @@ Events map to JSON **explicitly** (never `dataclasses.asdict`) and the JSONL
 writer base64-encodes any stray `bytes` (e.g. a provider's `thought_signature`)
 so the serializer can't crash. **Sensitivity:** the trace captures full prompt
 text, tool args, and tool results by default — appropriate for the single-
-operator dev harness, but treat the file as sensitive since there is no auth on
-`/chat` yet (roadmap #8). A metadata-only mode (names + usage + latency, bodies
-omitted) is the natural next toggle once the harness is multi-tenant.
+operator dev harness, but treat the file as sensitive. The harness endpoints can
+now be gated with `HARNESS_API_KEY`, but the trace **file** is not covered by
+that — guard it at the filesystem level. A metadata-only mode (names + usage +
+latency, bodies omitted) is the natural next toggle once the harness is
+multi-tenant.
 
 For per-request orchestration visibility without a trace, set `LOG_LEVEL=DEBUG`
 — the route emits the orchestrator's full generated system prompt and selected
@@ -465,7 +467,17 @@ extension path described above.
   `stream: true` returns an SSE stream of `chat.completion.chunk` frames. The
   native `/chat` endpoint is still non-streaming (the loop is ready for it; see
   "Streaming" above for the one-route extension).
-- **No authentication.** `/chat` and `/v1` are wide open.
+- **Optional API-key auth.** Set `HARNESS_API_KEY` to require a key on `/chat`,
+  `/chat/stream`, and `/v1/*` (via `X-API-Key` or `Authorization: Bearer`);
+  `/health` stays open. Unset = auth off (dev default), the pre-existing wide-open
+  behavior. Enforced at the route layer only — see
+  [api.md](api.md#authentication). No per-user/multi-tenant policy, rate limiting,
+  or trace-file protection is included.
+- **Optional tool-dispatch policy.** `tool_policy` in `mcp_config.yaml`
+  (`allow_all` default, or `allow_list` with patterns) gates which tools may
+  *execute* at dispatch; a denied call never reaches MCP and comes back as a
+  teaching `is_error` result. Distinct from `disabled_tools` (which controls tool
+  *visibility*). See [configuration.md](configuration.md).
 - **Per-call timeouts, plus optional overall token/wall-clock caps.** Each
   `llm.complete()` attempt is bounded by `LLM_TIMEOUT_SECONDS` and each
   `mcp.call_tool()` by `TOOL_TIMEOUT_SECONDS`, so a single hung call can't

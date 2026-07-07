@@ -15,11 +15,12 @@ and fall back to legacy behavior; see api/routes.py.
 
 from __future__ import annotations
 
+import secrets
 from typing import Optional
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
-from agent import SessionGuard, SessionStore, Tracer
+from agent import SessionGuard, SessionStore, ToolPolicy, Tracer
 from llm.client import LLMClient
 from mcp_layer import MCPManager
 from orchestrator import LLMRegistry, Orchestrator
@@ -62,10 +63,56 @@ def get_tracer(request: Request) -> Optional[Tracer]:
     return getattr(request.app.state, "tracer", None)
 
 
+def get_policy(request: Request) -> Optional[ToolPolicy]:
+    """Return the tool policy, or None when none is configured.
+
+    getattr-with-default so hand-wired smoke tests that don't set app.state.policy
+    still route (the loop treats None as allow-all).
+    """
+    return getattr(request.app.state, "policy", None)
+
+
+def _presented_api_key(request: Request) -> Optional[str]:
+    """Extract the caller's API key from either accepted header form.
+
+    `X-API-Key: <key>` takes precedence; otherwise `Authorization: Bearer <key>`
+    (the form OpenWebUI sends for OpenAI connections). None when neither is present.
+    """
+    xkey = request.headers.get("X-API-Key")
+    if xkey:
+        return xkey
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[len("Bearer "):].strip() or None
+    return None
+
+
+def require_api_key(request: Request) -> None:
+    """Route dependency enforcing the optional API key.
+
+    No-op when `harness_api_key` is unset (single-operator dev default). When set,
+    rejects any request without a matching key (constant-time compare) with 401.
+    Applied only to the chat routes; /health stays open. Auth lives entirely at
+    this route layer -- nothing auth-related crosses into agent/ or llm/.
+    """
+    configured = request.app.state.settings.harness_api_key
+    if not configured:
+        return
+    presented = _presented_api_key(request)
+    # Compare on bytes: Starlette decodes headers as latin-1, so a non-ASCII key is
+    # a non-ASCII str and secrets.compare_digest(str, str) would raise TypeError
+    # (-> 500). Encoding both sides yields a clean 401 and keeps the constant-time
+    # comparison.
+    if presented is None or not secrets.compare_digest(
+        presented.encode("utf-8"), configured.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="invalid or missing API key")
+
+
 def get_turn_runner(request: Request) -> TurnRunner:
     """Assemble the TurnRunner seam from the published app.state singletons.
 
-    Renderers depend on this one object instead of wiring eight, and it is the
+    Renderers depend on this one object instead of wiring nine, and it is the
     single place a future out-of-process adapter would swap for an HTTP-backed
     runner. The TurnRunner is a cheap value object, so building it per request
     (rather than stashing one on app.state) keeps lifespan and the hand-wired
@@ -79,5 +126,6 @@ def get_turn_runner(request: Request) -> TurnRunner:
         settings=get_settings_obj(request),
         orchestrator=get_orchestrator(request),
         registry=get_registry(request),
+        policy=get_policy(request),
         tracer=get_tracer(request),
     )

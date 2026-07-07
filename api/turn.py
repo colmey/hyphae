@@ -1,23 +1,6 @@
 # api/turn.py
 
-"""
-The shared orchestrate->loop core for one user turn.
-
-Every API surface is a thin renderer over this module: `routes.py` (`/chat`
-plain text, `/chat/stream` SSE events) and `openai_compatible.py` (`/v1` JSON
-and SSE) all drive the same `_turn_events` generator and choose how to present
-its events. Keeping the core here -- rather than inside any one route module --
-lets those surfaces be peers over a neutral seam instead of importing each other.
-
-`_turn_events` is the single place orchestration and the agent loop are wired
-together; `_resolve_routing` decides model/tools/system for a turn.
-
-`TurnRunner` is the narrow seam every renderer depends on: it bundles the
-process-wide singletons so a route wires *one* object instead of eight, and
-exposes `events()` (the live event stream) and `run()` (collect to a final
-answer). It is also the extraction seam -- an out-of-process adapter would swap
-only this class's body for an HTTP/SSE client, leaving the renderers unchanged.
-"""
+"""Shared orchestrate-to-loop core used by native and /v1 route renderers."""
 
 from __future__ import annotations
 
@@ -36,6 +19,7 @@ from agent import (
     SessionGuard,
     SessionStore,
     TextEvent,
+    ToolPolicy,
     Tracer,
     run_agent,
     run_logger,
@@ -63,18 +47,8 @@ async def _resolve_routing(
 ) -> tuple[LLMClient, list[dict], str | None, str | None, OrchestrationInfo | None, Any]:
     """Decide model, tools, thinking level, and system prompt for one request.
 
-    Returns (llm_client, tools_for_llm, system_prompt, thinking_level, info,
-    model_entry). `model_entry` is the selected model's registry entry (its
-    `context_window` / `max_tokens` feed the loop's context budget) or None in
-    legacy mode / when the registry can't supply one — callers fall back to
-    Settings defaults.
-
-    Legacy mode (no orchestrator/registry): default LLM, full tool inventory,
-    `system_override`, no thinking level. Orchestrated mode: `orchestrator.decide()`
-    drives the choice, routed with `history` in view; `system_override`, when set,
-    wins over the generated prompt. `model_id`, when it names a registered model,
-    pins that model (the OpenAI adapter's `model` hint) while the orchestrator
-    still selects tools and the system prompt.
+    Returns selected LLM, tools, system prompt, thinking level, orchestration
+    metadata, and selected model entry (when available for context budgeting).
     """
     if orchestrator is None or registry is None:
         return default_llm, mcp.get_tools_for_llm(), system_override, None, None, None
@@ -84,20 +58,17 @@ async def _resolve_routing(
     if decision.fallback_used:
         logger.info("orchestration fallback in effect: %s", decision.fallback_reason)
 
-    # An explicit, valid model hint wins over the orchestrator's pick;
-    # get_or_default still guards against a sanitized id we lost track of.
+    # A valid model hint wins over the orchestrator's model pick.
     chosen_id = model_id if (model_id and model_id in registry.model_ids) else result.selected_model_id
     resolved_id, llm = registry.get_or_default(chosen_id)
 
-    # The selected model's config entry feeds the loop's context budget.
-    # Duck-typed/best-effort: fake registries (tests) may not expose
-    # get_entry, and a missing entry just means Settings defaults apply.
+    # Best effort: fake registries/tests may not expose get_entry.
     try:
         model_entry = registry.get_entry(resolved_id)
     except Exception:  # noqa: BLE001
         model_entry = None
 
-    # Filter against the live inventory so a disabled server can't slip a tool through.
+    # Filter against live inventory so disabled tools cannot slip through.
     selected = set(result.selected_tools)
     tools_for_llm = [t for t in mcp.get_tools_for_llm() if t["name"] in selected]
 
@@ -127,18 +98,13 @@ async def _turn_events(
     settings,
     orchestrator: Optional[Orchestrator],
     registry: Optional[LLMRegistry],
+    policy: Optional[ToolPolicy] = None,
     tracer: Optional[Tracer] = None,
 ) -> AsyncIterator[Event]:
     """Run one user turn end to end, yielding the loop's events as they happen.
 
-    Resolves routing, appends `prompt` to the session under a same-session guard,
-    and drives the agent loop with the orchestrator's selections. This is the one
-    place orchestration and the loop are wired together; callers choose how to
-    render the events (plain text, OpenAI JSON, SSE deltas).
-
-    Mints the per-request `run_id` here (covering both /chat and the /v1 adapter)
-    and threads it into the loop's tracer and into a run-scoped logger so every
-    log line for this turn carries it.
+    Resolves routing, appends the prompt under the same-session guard, and
+    drives the agent loop with the selected model/tools/system.
     """
     run_id = uuid.uuid4().hex
     rlog = run_logger(logger, run_id)
@@ -165,8 +131,7 @@ async def _turn_events(
     else:
         rlog.info("chat: legacy mode (orchestration disabled), tools=%d", len(selected_tools))
 
-    # Context budget inputs for the loop: the selected model's entry wins,
-    # Settings defaults fill in (legacy mode, or entries without the fields).
+    # Selected model entry wins; Settings defaults fill gaps.
     context_window = (
         getattr(model_entry, "context_window", None)
         or settings.context_default_window_tokens
@@ -176,8 +141,7 @@ async def _turn_events(
         or settings.llm_max_tokens
     )
 
-    # Distinct sessions are already isolated; the guard rejects a second
-    # concurrent request on the SAME session (409) instead of interleaving.
+    # Reject same-session concurrency instead of interleaving turns.
     try:
         async with guard.claim(session.session_id):
             session.append_user(prompt)
@@ -204,6 +168,7 @@ async def _turn_events(
                 context_safety_margin_tokens=settings.context_safety_margin_tokens,
                 context_recent_messages=settings.context_recent_messages,
                 context_summary_max_tokens=settings.context_summary_max_tokens,
+                policy=policy,
                 tracer=tracer,
                 run_id=run_id,
             ):
@@ -221,11 +186,7 @@ async def _turn_events(
 
 
 async def _collect(events: AsyncIterator[Event]) -> tuple[str, str, TokenUsage]:
-    """Collect a turn's events into a final answer. Returns (answer, done_reason, usage).
-
-    The non-streaming reduction over an event stream; streaming callers iterate
-    the stream directly.
-    """
+    """Collect a turn's events into (answer, done_reason, usage)."""
     text_parts: list[str] = []
     done_reason = "unknown"
     usage = TokenUsage()
@@ -247,12 +208,7 @@ async def _collect(events: AsyncIterator[Event]) -> tuple[str, str, TokenUsage]:
 class TurnRunner:
     """The seam between an API renderer and the orchestrate->loop core.
 
-    Holds the process-wide singletons (built once in main.py's lifespan, assembled
-    on demand by `get_turn_runner`) so a renderer depends on this one object rather
-    than wiring eight. `events()` yields the loop's typed events for one turn;
-    `run()` reduces them to a final answer. Both take only per-request primitives,
-    which is what makes this the clean extraction point for a future out-of-process
-    adapter: swap the body, keep the renderers.
+    Holds process-wide singletons; methods take only per-request primitives.
     """
 
     llm: LLMClient
@@ -262,6 +218,7 @@ class TurnRunner:
     settings: Any
     orchestrator: Optional[Orchestrator]
     registry: Optional[LLMRegistry]
+    policy: Optional[ToolPolicy]
     tracer: Optional[Tracer]
 
     def events(
@@ -287,6 +244,7 @@ class TurnRunner:
             settings=self.settings,
             orchestrator=self.orchestrator,
             registry=self.registry,
+            policy=self.policy,
             tracer=self.tracer,
         )
 

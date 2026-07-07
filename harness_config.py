@@ -1,43 +1,9 @@
 # harness_config.py
 
-"""
-Configuration loading for the AI harness.
+"""Runtime settings and typed MCP config loading.
 
-Two things live here:
-  1. `Settings`  - runtime/env config (API keys, model, paths) read from os.environ.
-  2. `MCPConfig` - typed parse of mcp_config.yaml.
-
-Secrets convention:
-  Environment variables live in a `.env` file at the project root.
-  `bootstrap.load_secrets()` loads that file into `os.environ` (via
-  python-dotenv) BEFORE any harness code reads settings. Real environment
-  variables already set in the process take precedence over the `.env` file.
-
-  The bootstrap step and the harness run in the same Python process, so
-  import order matters. To avoid accidentally snapshotting an empty env at
-  module load, this file:
-    - never constructs Settings() at module level
-    - exposes `get_settings()` which builds Settings on first call and caches it
-    - exposes `reset_settings()` for tests and for forcing a re-read after
-      bootstrap if needed
-
-  Rule of thumb: nothing in the harness should `from config import settings`
-  (a module-level instance). Always call `get_settings()` from within a
-  function, after bootstrap has run.
-
-Config file layout:
-  All runtime YAML/text config lives under `config/`:
-    config/mcp_config.yaml
-    config/models.yaml
-    config/orchestrator_prompt.md
-
-  These paths can be overridden via the corresponding env vars
-  (MCP_CONFIG_PATH, MODELS_CONFIG_PATH, ORCHESTRATOR_PROMPT_PATH), so
-  custom deployments can point them elsewhere without code changes.
-
-The YAML loader supports `${ENV_VAR}` interpolation in string values so
-secrets can be injected into the MCP config without hardcoding. Missing env
-vars raise a clear error rather than silently producing empty strings.
+Settings are built lazily after bootstrap has loaded `.env`, so modules should
+call `get_settings()` instead of importing a module-level settings object.
 """
 
 from __future__ import annotations
@@ -48,22 +14,12 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# ---------------------------------------------------------------------------
-# Runtime settings (env-driven, backed by a .env file)
-# ---------------------------------------------------------------------------
-
 class Settings(BaseSettings):
-    """Environment-driven settings.
-
-    Reads from os.environ, which `bootstrap.load_secrets()` populates from the
-    project's `.env` file before this is constructed. As a fallback, pydantic-
-    settings also reads `.env` directly (see model_config). Use get_settings()
-    rather than instantiating directly.
-    """
+    """Environment-driven settings; use `get_settings()` in application code."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -71,7 +27,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM provider keys. Only the one matching the configured provider needs to be set.
+    # Only the selected provider's key must be set.
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
     gemini_api_key: str = Field(default="", description="Gemini API key")
     openai_api_key: str = Field(default="", description="OpenAI API key")
@@ -83,20 +39,12 @@ class Settings(BaseSettings):
         ),
     )
 
-    # LLM config. `llm_provider` is a free string validated at build time
-    # against the provider registry (llm.client.supported_providers()); an
-    # unknown value fails loudly in build_llm_client with NotImplementedError.
-    # We keep harness_config free of any `llm` import to preserve layering, so
-    # the Literal-style check lives in the LLM layer, not here.
+    # Provider validation lives in llm.client to keep this layer import-light.
     llm_provider: str = Field(default="gemini", description="LLM provider name")
     llm_model: str = Field(default="gemini-3-flash-preview", description="Model name to use")
     llm_max_tokens: int = Field(default=4096)
 
-    # --- Reliability hardening (agent loop) -------------------------------
-    # These bound long, tool-heavy runs so a transient failure or a hung
-    # server can't kill or stall a request. The agent loop reads these via
-    # the route (run_agent params); direct callers (smoke tests) get the
-    # loop's own defaults instead. <= 0 disables the respective dimension.
+    # Agent-loop timeouts/retries; <= 0 disables the respective bound.
     llm_timeout_seconds: float = Field(
         default=120,
         description="Per-attempt cap on a single llm.complete() call. <=0 disables.",
@@ -124,14 +72,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Bounded & safe runs (agent loop) ----------------------------------
-    # Independent stop conditions layered on top of max_loop_iterations: a
-    # cumulative token ceiling, a wall-clock ceiling, and an abort threshold
-    # for a tool-failure cascade. Each ends the run with its own done_reason
-    # and the partial answer -- never silently. Off by default (0 = disabled)
-    # so upgrading the harness doesn't change behavior until an operator
-    # opts in; the loop's own parameter defaults also disable, so direct
-    # callers (smoke tests) are unaffected either way.
+    # Optional run-level stop conditions. Each exits with an explicit done_reason.
     max_run_tokens: int = Field(
         default=0,
         description=(
@@ -160,15 +101,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Context assembly (agent loop) -------------------------------------
-    # The loop assembles the outgoing message view per LLM call via
-    # agent/context.py against an explicit budget: context_window (per-model
-    # in models.yaml, else the default below) - max output tokens - safety
-    # margin. "naive" is behavior-preserving (pass-through; over budget only
-    # logs); "compaction" summarizes the middle of an over-budget history
-    # while keeping the first user message and the recent tail verbatim.
-    # Compaction shapes the outgoing view only -- session history is never
-    # rewritten -- and any failure degrades to pass-through with a warning.
+    # Context assembly shapes the outgoing view only; session history is unchanged.
     context_strategy: str = Field(
         default="naive",
         description=(
@@ -209,13 +142,16 @@ class Settings(BaseSettings):
     max_loop_iterations: int = Field(default=10) # was 25, find a good balance
     log_level: str = Field(default="INFO")
 
-    # --- Observability (run tracing) --------------------------------------
-    # When enabled, the loop serializes its event stream to a JSONL trace, one
-    # record per event tagged with run_id + step + timestamp (+ latency on LLM/
-    # tool steps). Off by default so the hot path and smoke tests are untouched;
-    # a failing sink degrades silently and never breaks a request. NOTE: the
-    # trace captures full message text, tool args, and tool results — treat the
-    # file as sensitive (there is no auth on the harness yet; roadmap #8).
+    # Optional API-key gate for /chat, /chat/stream, and /v1/*; /health stays open.
+    harness_api_key: str = Field(
+        default="",
+        description=(
+            "Optional API key protecting /chat, /chat/stream, /v1/*. Empty "
+            "disables auth; set enforces it. Accepts X-API-Key or Bearer."
+        ),
+    )
+
+    # JSONL traces include full prompts/tool data; protect the file accordingly.
     trace_enabled: bool = Field(
         default=False,
         description="Persist the loop's event stream as a JSONL trace.",
@@ -225,10 +161,7 @@ class Settings(BaseSettings):
         description="Append-only JSONL trace file. Parent dirs are created.",
     )
 
-    # --- In-memory session store bounds -----------------------------------
-    # Sessions live only in process memory (LibreChat holds the durable
-    # context). These cap memory so the store can't grow without limit under
-    # concurrent load. <= 0 disables the respective dimension.
+    # In-memory session bounds; <= 0 disables the respective dimension.
     session_ttl_seconds: int = Field(
         default=3600,
         description="Idle TTL (seconds) before an in-memory session is evicted.",
@@ -238,11 +171,7 @@ class Settings(BaseSettings):
         description="Max sessions retained in memory; oldest-updated evicted first.",
     )
 
-    # --- Orchestration layer ---------------------------------------------
-    # Master toggle. When false, the route bypasses the orchestrator entirely
-    # and falls back to the legacy behavior: default LLM client, all MCP
-    # tools, request.system used as-is. Useful for dev environments without
-    # models.yaml present.
+    # When off, routes use the default LLM and full tool inventory directly.
     orchestration_enabled: bool = Field(
         default=True,
         description="Master toggle for the orchestration layer.",
@@ -274,11 +203,8 @@ class Settings(BaseSettings):
     def api_key_for_provider(self, provider: str) -> str:
         """Return the API key for a provider, or raise if it's needed but missing.
 
-        Known providers have typed Settings fields; any other provider falls
-        back to the conventional `<PROVIDER>_API_KEY` environment variable, so a
-        newly registered credentialed provider needs no change here. Providers
-        that don't use an API key (e.g. a local Ollama server) simply never call
-        this method from their builder.
+        Unknown providers fall back to `<PROVIDER>_API_KEY`, letting new
+        credentialed providers register without changing Settings.
         """
         typed = {
             "anthropic": self.anthropic_api_key,
@@ -297,18 +223,12 @@ class Settings(BaseSettings):
         return key
 
 
-# Module-level cache. Populated lazily on first get_settings() call so that
-# bootstrap code running earlier in the same process gets its env vars picked up.
+# Lazily populated after bootstrap has loaded environment variables.
 _settings_cache: Settings | None = None
 
 
 def get_settings() -> Settings:
-    """Return the cached Settings instance, building it on first call.
-
-    Call this AFTER your bootstrap script has populated os.environ. If something
-    in the harness needs settings at import time (it shouldn't), that's a bug
-    -- defer the read until a function actually runs.
-    """
+    """Return the cached Settings instance, building it on first call."""
     global _settings_cache
     if _settings_cache is None:
         _settings_cache = Settings()
@@ -321,11 +241,9 @@ def reset_settings() -> None:
     _settings_cache = None
 
 
-# ---------------------------------------------------------------------------
-# MCP config schema
-# ---------------------------------------------------------------------------
-
 class _MCPServerBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     disabled: bool = False
     disabled_tools: list[str] = Field(default_factory=list)
 
@@ -347,20 +265,43 @@ class StdioServer(_MCPServerBase):
     env: dict[str, str] = Field(default_factory=dict)
 
 
-# Discriminated union: Pydantic picks the right model based on `transport`.
+# Pydantic picks the right server model based on `transport`.
 MCPServerConfig = Annotated[
     Union[StreamableHTTPServer, SSEServer, StdioServer],
     Field(discriminator="transport"),
 ]
 
 
+class ToolPolicyConfig(BaseModel):
+    """Dispatch-time policy for what tools may execute."""
+
+    # Typos in security controls must fail loud instead of falling back to allow_all.
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["allow_all", "allow_list"] = "allow_all"
+    allow: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_allow_list(self) -> "ToolPolicyConfig":
+        # An allow_list with no usable patterns would silently deny every tool.
+        if self.mode == "allow_list":
+            if not self.allow:
+                raise ValueError("tool_policy.mode 'allow_list' requires a non-empty 'allow' list")
+            if any(not p.strip() for p in self.allow):
+                raise ValueError("tool_policy.allow patterns must be non-empty strings")
+        return self
+
+
 class MCPConfig(BaseModel):
+    # Catch top-level typos such as `tool_polciy`, which would disable policy.
+    model_config = ConfigDict(extra="forbid")
+
     mcp_servers: dict[str, MCPServerConfig] = Field(alias="mcpServers")
+    tool_policy: ToolPolicyConfig = Field(default_factory=ToolPolicyConfig)
 
     @model_validator(mode="after")
     def _validate_names(self) -> "MCPConfig":
-        # Tool namespacing uses `{server}__{tool}` -- reject server names that
-        # would break that scheme.
+        # Server names are embedded in `{server}__{tool}` namespaced tool IDs.
         for name in self.mcp_servers:
             if "__" in name:
                 raise ValueError(
@@ -376,10 +317,6 @@ class MCPConfig(BaseModel):
         """Return only servers not marked disabled."""
         return {n: s for n, s in self.mcp_servers.items() if not s.disabled}
 
-
-# ---------------------------------------------------------------------------
-# YAML loading with ${ENV_VAR} interpolation
-# ---------------------------------------------------------------------------
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 

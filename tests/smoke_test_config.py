@@ -20,7 +20,46 @@ load_secrets()
 # 2. Now import and use the harness config. These imports happen AFTER
 #    os.environ has been populated, just as in main.py.
 # ---------------------------------------------------------------------------
-from harness_config import get_settings, load_mcp_config
+from pydantic import ValidationError
+
+from harness_config import MCPConfig, ToolPolicyConfig, get_settings, load_mcp_config
+
+
+def _check_fail_loud_on_typos() -> None:
+    """A config typo must raise at load, not silently disable the tool policy."""
+    print("=" * 60)
+    print("Config hardening: unknown fields fail loud")
+    print("=" * 60)
+
+    # Typo in a ToolPolicyConfig field (e.g. `mdoe`) must not drop to allow_all.
+    try:
+        ToolPolicyConfig.model_validate({"mdoe": "allow_list", "allow": ["x__*"]})
+        raise SystemExit("  FAILED: ToolPolicyConfig accepted an unknown field ('mdoe')")
+    except ValidationError:
+        print("  [PASS] ToolPolicyConfig rejects an unknown field ('mdoe')")
+
+    # Typo in the top-level block name (e.g. `tool_polciy`) must not be dropped.
+    try:
+        MCPConfig.model_validate({"mcpServers": {}, "tool_polciy": {"mode": "allow_all"}})
+        raise SystemExit("  FAILED: MCPConfig accepted an unknown top-level key ('tool_polciy')")
+    except ValidationError:
+        print("  [PASS] MCPConfig rejects an unknown top-level key ('tool_polciy')")
+
+    # Typo in a server field (e.g. `disabled_tool`) must not silently re-enable it.
+    try:
+        MCPConfig.model_validate({
+            "mcpServers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "demo",
+                    "disabled_tool": ["dangerous"],
+                }
+            }
+        })
+        raise SystemExit("  FAILED: MCPConfig accepted an unknown server key ('disabled_tool')")
+    except ValidationError:
+        print("  [PASS] MCPConfig rejects an unknown server key ('disabled_tool')")
+    print()
 
 
 def main() -> None:
@@ -63,6 +102,9 @@ def main() -> None:
         print(line)
         if server.disabled_tools:
             print(f"               disabled_tools: {server.disabled_tools}")
+
+    print()
+    _check_fail_loud_on_typos()
 
 
 if __name__ == "__main__":

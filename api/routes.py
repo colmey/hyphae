@@ -1,23 +1,6 @@
 # api/routes.py
 
-"""
-Native HTTP routes for the harness.
-
-Three endpoints:
-  GET  /health       -- liveness + connected MCP server summary
-  POST /chat         -- run the agent loop on a plain-text prompt, return the answer
-  POST /chat/stream  -- the same turn as an SSE feed of the loop's typed events
-
-`/chat` is a plain-text dumb pipe: the request body IS the prompt and the
-response body IS the answer. Session continuation rides on the `X-Session-Id`
-header (echoed back on the response, alongside `X-Done-Reason`). `/chat/stream`
-shares that contract but forwards events live instead of collecting them.
-
-These are thin renderers over the shared orchestrate->loop core in
-`api/turn.py`, reached through the `TurnRunner` seam; the OpenAI-compatible
-`/v1/chat/completions` adapter (`api/openai_compatible.py`) is a peer renderer
-over the same core.
-"""
+"""Native /health, /chat, and /chat/stream routes."""
 
 from __future__ import annotations
 
@@ -44,6 +27,7 @@ from .dependencies import (
     get_settings_obj,
     get_store,
     get_turn_runner,
+    require_api_key,
 )
 from .schemas import HealthResponse
 from .turn import TurnRunner
@@ -88,18 +72,16 @@ async def health(
     )
 
 
-@router.post("/chat", response_class=PlainTextResponse)
+@router.post("/chat", response_class=PlainTextResponse, dependencies=[Depends(require_api_key)])
 async def chat(
     request: Request,
     store: SessionStore = Depends(get_store),
     runner: TurnRunner = Depends(get_turn_runner),
 ) -> PlainTextResponse:
-    # Resolve the session before routing so a follow-up turn is routed with the
-    # conversation in view. The new prompt is appended later, inside the runner.
+    # Resolve before routing so follow-up turns include conversation history.
     prompt = await _prompt_from_body(request)
     session = await _session_from_header(request, store)
 
-    # Dumb-pipe contract: no system override, model hint, or tool prefs on the wire.
     answer, done_reason, _usage = await runner.run(prompt=prompt, session=session)
     return PlainTextResponse(
         answer,
@@ -107,7 +89,7 @@ async def chat(
     )
 
 
-@router.post("/chat/stream")
+@router.post("/chat/stream", dependencies=[Depends(require_api_key)])
 async def chat_stream(
     request: Request,
     store: SessionStore = Depends(get_store),
@@ -115,24 +97,10 @@ async def chat_stream(
 ) -> EventSourceResponse:
     """Native live event stream for one turn — the activity feed.
 
-    Same dumb-pipe contract as `/chat` (plain-text body = prompt, optional
-    `X-Session-Id` continues a session), but instead of collecting the events
-    into one answer it forwards the loop's typed events *as they happen* over
-    SSE: `text`, `tool_call`, `tool_result`, `usage`, `done`, `error`. A client
-    that wants to show "what the agent is doing" (tool calls live, then the
-    answer) reads this; clients that just want the answer keep using `/chat` or
-    `/v1`. The stream ends after the `done` event.
-
-    This is a pure renderer over the shared `_turn_events` core — it adds no
-    orchestration or loop logic. Each frame's `data:` is the JSON event produced
-    by the same bytes-safe `event_record` mapping the tracer uses, so there is a
-    single source of truth for event serialization. Tool calls are *not* token-
-    streamed (a tool call must be fully assembled before it runs), but each
-    `tool_call`/`tool_result` is emitted the instant the loop reaches it.
+    Same plain-text/session contract as `/chat`, but streams typed loop events
+    over SSE. Frames use the same `event_record` mapping as tracing.
     """
-    # Resolve the session up front (mirrors /chat) so the X-Session-Id response
-    # header is known before the stream opens. The new prompt is appended inside
-    # _turn_events, under the same-session guard.
+    # Resolve up front so X-Session-Id is known before the stream opens.
     prompt = await _prompt_from_body(request)
     session = await _session_from_header(request, store)
 
@@ -145,9 +113,7 @@ async def chat_stream(
                 step += 1
                 yield {"data": json.dumps(event_record(event, run_id=run_id, step=step))}
         except HTTPException as exc:
-            # The same-session 409 surfaces here (the guard claim is the first
-            # thing the runner does). The SSE response is already 200, so we
-            # report it as a terminal error frame rather than an HTTP status.
+            # The stream is already 200, so send guard failures as error frames.
             yield {"data": json.dumps({"type": "error", "message": str(exc.detail)})}
         except Exception as exc:  # noqa: BLE001 - stream is open; surface, don't crash.
             logger.exception("error during /chat/stream")

@@ -42,6 +42,7 @@ from .events import (
     ErrorEvent,
     Event,
     OrchestrationDecisionEvent,
+    ReasoningEvent,
     TextEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -181,6 +182,8 @@ def event_record(event: Event, *, run_id: str | None, step: int) -> dict:
 
     if isinstance(event, TextEvent):
         rec["text"] = event.text
+    elif isinstance(event, ReasoningEvent):
+        rec["reasoning"] = event.text
     elif isinstance(event, ToolCallEvent):
         rec["tool_use_id"] = event.id
         rec["name"] = event.name

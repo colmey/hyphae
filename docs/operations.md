@@ -32,17 +32,28 @@ If the provider is already registered in `llm/client.py`'s `_PROVIDERS`
    ```yaml
    models:
      # ... existing entries ...
-     gemini-pro-experimental:
-       provider: gemini
-       model: gemini-3-pro-experimental
+     qwen3-local:
+       provider: openai
+       model: qwen3.6-35b-a3b
        description: >
-         Experimental Gemini Pro variant; long-context tasks.
+         Local Qwen3.6 model; strong for agentic coding and deliberate
+         tool-using workflows.
+       context_window: 65536
+       max_tokens: 16384
+       supports_native_tools: true
+       thinking: think-tags
+       sampling:
+         temperature: 0.6
+         top_p: 0.95
+         top_k: 20
    ```
 3. Restart the harness. The orchestrator can now route to it.
 
 The orchestrator's selection criteria are governed entirely by what's in
 the `description` field — write a description that explains when this
-model should win.
+model should win. Capability-profile fields (`supports_native_tools`,
+`thinking`, and `sampling`) describe how the provider should call the served
+model; they do not replace the description used for routing.
 
 ### Adding a new LLM provider
 
@@ -83,10 +94,12 @@ Ollama instance — by pointing it at an alternate endpoint:
    `ollama list` tag, e.g. `qwen3.6-35b-a3b`.
 3. Restart the harness.
 
-Caveats: tool calling only works with tools-capable models; reasoning models
-(e.g. Qwen3) may inline a `<think>…</think>` block, which the client strips from
-the answer; `thinking_level` is ignored for this provider. See
-[configuration.md](configuration.md) for the env vars.
+Caveats: tool calling only works with tools-capable models. Reasoning models
+(e.g. Qwen3) may inline a leading `<think>...</think>` block; declare
+`thinking: think-tags` so the OpenAI-compatible client removes it from visible
+answer text and records it as trace-only reasoning. Endpoints that accept a
+request hint such as `reasoning_effort` should use `thinking: hint-param`.
+See [configuration.md](configuration.md) for the env vars and profile fields.
 
 ### Adding persistence
 
@@ -130,9 +143,11 @@ kind of thin renderer as the `/v1` SSE branch — it iterates the shared
 `_turn_events` generator and serializes each event with the bytes-safe
 `event_record` mapping (the same one the tracer uses; never `dataclasses.asdict`,
 since `provider_metadata` can hold bytes — events don't carry it, but reusing the
-explicit mapping keeps one source of truth). No orchestration or loop logic is
-duplicated; orchestration still runs once inside `_turn_events` before the first
-frame.
+explicit mapping keeps one source of truth). Reasoning extracted from model
+responses is included here as a `reasoning` event because this route is the raw
+debug event stream; `/chat` and `/v1` hide it. No orchestration or loop logic
+is duplicated; orchestration still runs once inside `_turn_events` before the
+first frame.
 
 This is the design seam for *any* live-update consumer: a custom dashboard, a
 voice assistant, or an OpenWebUI **pipe** (a plug-in that lives inside OpenWebUI,
@@ -195,9 +210,10 @@ subsystem. Set `TRACE_ENABLED=true` (and optionally `TRACE_PATH`, default
 
 ```jsonl
 {"run_id":"a1b2…","step":1,"ts":"2026-06-18T…","type":"usage","input_tokens":10,"output_tokens":5,"total_tokens":15,"latency_ms":812.4,"iteration":1}
-{"run_id":"a1b2…","step":2,"ts":"…","type":"tool_call","tool_use_id":"call_1","name":"toolbox__lookup","args":{…}}
-{"run_id":"a1b2…","step":3,"ts":"…","type":"tool_result","name":"toolbox__lookup","is_error":false,"latency_ms":41.0,"content":"…"}
-{"run_id":"a1b2…","step":7,"ts":"…","type":"done","reason":"end_turn","iterations":2,"total_tokens":39}
+{"run_id":"a1b2…","step":2,"ts":"…","type":"reasoning","reasoning":"..."}
+{"run_id":"a1b2…","step":3,"ts":"…","type":"tool_call","tool_use_id":"call_1","name":"toolbox__lookup","args":{…}}
+{"run_id":"a1b2…","step":4,"ts":"…","type":"tool_result","name":"toolbox__lookup","is_error":false,"latency_ms":41.0,"content":"…"}
+{"run_id":"a1b2…","step":8,"ts":"…","type":"done","reason":"end_turn","iterations":2,"total_tokens":39}
 ```
 
 Each record carries the per-request `run_id` (minted in `_turn_events`, so it
@@ -384,10 +400,11 @@ are run via `./runscript.sh tests/<file>`.
 | `smoke_test_loop_intelligence.py` | Loop steering with scripted fakes (no network): final-iteration wrap-up, stall detection, consecutive-failure nudge |
 | `smoke_test_bounded_runs.py`      | Phase 1 bounded & safe runs with scripted fakes (no network): token cap, in-flight wall-clock cap, final-answer cap edges, zero-usage-trips-cap-via-estimator, tool-argument validation, no-progress abort + counter reset, mid-batch abort shape, `/v1` finish_reason mapping for the new reasons |
 | `smoke_test_context_assembly.py`  | Phase 3 context assembly with scripted fakes (no network): token estimator sanity, budget math, `naive` pass-through, compaction invariants (task header + recent tail verbatim, summary inserted, no orphaned tool pairs, session untouched), summarizer-failure degrade, estimated-usage token-cap fallback |
+| `smoke_test_capabilities.py`      | Phase 5 capability profiles with scripted fakes (no network): profile validation, sampling request pass-through, reasoning routing, malformed tool-call args becoming teaching errors, thinking-level request shaping |
 | `smoke_test_orchestrator.py`      | Orchestrator decisions: model selection, tool filtering, system prompt generation, thinking level (parsing + live), history block. Asserts `fallback_used=false`. |
 | `smoke_test_http.py`              | Full HTTP surface in-process (lifespan, plain-text `/chat`, session header, 400/404) |
 | `smoke_test_openai_api.py`        | OpenAI-compatible `/v1`: `/v1/models` shape, non-stream `chat.completion`, SSE chunk deltas + `[DONE]`, error JSON. Hermetic (scripted fake LLM, no backend). |
-| `smoke_test_event_stream.py`      | Native `POST /chat/stream`: live SSE event feed — tool_call/tool_result/text/done in order on a tool turn, text+done on a plain turn, 400 on empty body, X-Session-Id header. Hermetic (scripted fake LLM + one-tool fake MCP, no backend). |
+| `smoke_test_event_stream.py`      | Native `POST /chat/stream`: live SSE event feed — reasoning/tool_call/tool_result/text/done in order on a tool turn, text+done on a plain turn, 400 on empty body, X-Session-Id header. Hermetic (scripted fake LLM + one-tool fake MCP, no backend). |
 | `smoke_test_tracing.py`           | Run tracing via `JSONLTracer`: one record per event, stable `run_id`, increasing step indices, timestamps + `latency_ms` on LLM/tool records, bytes serialize, no-op default path. Hermetic (scripted fake LLM + MCP, no backend). |
 | `smoke_test_concurrency.py`       | Concurrent `/chat`: distinct-session isolation + same-session 409 guard |
 
@@ -465,8 +482,8 @@ extension path described above.
   is the `SessionStore` ABC's job if the use case ever changes.
 - **Streaming is available on `/v1`.** `POST /v1/chat/completions` with
   `stream: true` returns an SSE stream of `chat.completion.chunk` frames. The
-  native `/chat` endpoint is still non-streaming (the loop is ready for it; see
-  "Streaming" above for the one-route extension).
+  native `/chat` endpoint is still non-streaming; use `/chat/stream` for the
+  native live activity feed with tool and reasoning events.
 - **Optional API-key auth.** Set `HARNESS_API_KEY` to require a key on `/chat`,
   `/chat/stream`, and `/v1/*` (via `X-API-Key` or `Authorization: Bearer`);
   `/health` stays open. Unset = auth off (dev default), the pre-existing wide-open
@@ -478,6 +495,18 @@ extension path described above.
   *execute* at dispatch; a denied call never reaches MCP and comes back as a
   teaching `is_error` result. Distinct from `disabled_tools` (which controls tool
   *visibility*). See [configuration.md](configuration.md).
+- **Capability profiles are declarative.** `models.yaml` can declare
+  `supports_native_tools`, `thinking`, and `sampling` per model. Sampling and
+  supported thinking hints are consumed by providers; `supports_native_tools`
+  is validated and visible but the `false` fallback path (prompted tools) is
+  deferred to Phase 6.
+- **Reasoning is trace/debug data, not answer text.** OpenAI-compatible
+  leading `<think>...</think>` content is separated from visible text and
+  emitted as a `reasoning` trace/event record. The raw `/chat/stream` route
+  shows it by design; `/chat`, session replay, and `/v1` payloads do not.
+  Gemini reasoning remains `None` unless the SDK exposes thought content in a
+  detectable form; Gemini `thought_signature` still round-trips through
+  `provider_metadata`.
 - **Per-call timeouts, plus optional overall token/wall-clock caps.** Each
   `llm.complete()` attempt is bounded by `LLM_TIMEOUT_SECONDS` and each
   `mcp.call_tool()` by `TOOL_TIMEOUT_SECONDS`, so a single hung call can't

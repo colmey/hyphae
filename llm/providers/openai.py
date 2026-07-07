@@ -18,6 +18,7 @@ from llm.client import LLMClient
 from llm.schemas import (
     AssistantMessage,
     Message,
+    ModelProfile,
     Role,
     TextBlock,
     ToolResultBlock,
@@ -43,11 +44,15 @@ def _canonical_stop_reason(finish_reason: Any) -> str | None:
     return name.lower()
 
 
-def _strip_reasoning(text: str | None) -> str:
-    """Remove a leading <think>...</think> block from content, if present."""
+def _split_reasoning(text: str | None) -> tuple[str | None, str]:
+    """Return provider-emitted reasoning and visible content separately."""
     if not text:
-        return ""
-    return _THINK_BLOCK.sub("", text, count=1)
+        return None, ""
+    m = _THINK_BLOCK.match(text)
+    if not m:
+        return None, text
+    reasoning = re.sub(r"</?think>", "", m.group(0)).strip() or None
+    return reasoning, text[m.end():]
 
 
 class OpenAILLMClient(LLMClient):
@@ -59,6 +64,7 @@ class OpenAILLMClient(LLMClient):
         model: str,
         default_max_tokens: int = 4096,
         base_url: str | None = None,
+        profile: ModelProfile | None = None,
     ) -> None:
         from openai import AsyncOpenAI
 
@@ -66,6 +72,8 @@ class OpenAILLMClient(LLMClient):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
         self._model = model
         self._default_max_tokens = default_max_tokens
+        self._profile = profile or ModelProfile.default()
+        self._warned_inert_thinking = False
 
     async def complete(
         self,
@@ -84,6 +92,13 @@ class OpenAILLMClient(LLMClient):
             "messages": oai_messages,
             "max_tokens": max_tokens or self._default_max_tokens,
         }
+        p = self._profile
+        if p.temperature is not None:
+            request["temperature"] = p.temperature
+        if p.top_p is not None:
+            request["top_p"] = p.top_p
+        if p.top_k is not None:
+            request["top_k"] = p.top_k
         if oai_tools:
             request["tools"] = oai_tools
             request["tool_choice"] = "auto"
@@ -100,7 +115,16 @@ class OpenAILLMClient(LLMClient):
             request["response_format"] = self._response_format(response_schema)
 
         if thinking_level is not None:
-            logger.debug("ignoring thinking_level=%r (unsupported)", thinking_level)
+            if p.thinking == "hint-param":
+                request["reasoning_effort"] = thinking_level
+            elif p.thinking == "none" and not self._warned_inert_thinking:
+                logger.info(
+                    "thinking_level=%r requested but model %s declares thinking:none; "
+                    "the knob is inert for this model",
+                    thinking_level,
+                    self._model,
+                )
+                self._warned_inert_thinking = True
 
         logger.debug(
             "openai complete: model=%s messages=%d tools=%d schema=%s",
@@ -235,13 +259,14 @@ class OpenAILLMClient(LLMClient):
             return AssistantMessage(
                 content=[], stop_reason="empty", model=self._model,
                 usage=self._usage_from_response(response),
+                reasoning=None,
             )
 
         choice = choices[0]
         finish_reason = getattr(choice, "finish_reason", None)
         message = getattr(choice, "message", None)
 
-        content = _strip_reasoning(getattr(message, "content", None))
+        reasoning, content = _split_reasoning(getattr(message, "content", None))
         if content:
             blocks.append(TextBlock(text=content))
 
@@ -250,14 +275,17 @@ class OpenAILLMClient(LLMClient):
             raw_args = getattr(fn, "arguments", None) if fn else None
             try:
                 args = json.loads(raw_args) if raw_args else {}
+                parse_error = None
             except (json.JSONDecodeError, TypeError):
                 logger.warning("could not parse tool arguments: %r", raw_args)
                 args = {}
+                parse_error = f"arguments were not valid JSON: {raw_args!r}"
             blocks.append(
                 ToolUseBlock(
                     id=getattr(tc, "id", "") or "",
                     name=getattr(fn, "name", "") if fn else "",
                     input=args,
+                    parse_error=parse_error,
                 )
             )
 
@@ -266,6 +294,7 @@ class OpenAILLMClient(LLMClient):
             stop_reason=_canonical_stop_reason(finish_reason),
             model=getattr(response, "model", None) or self._model,
             usage=self._usage_from_response(response),
+            reasoning=reasoning,
         )
 
     def _usage_from_response(self, response: Any) -> Usage:

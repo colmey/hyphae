@@ -15,6 +15,7 @@ from llm.client import LLMClient
 from llm.schemas import (
     AssistantMessage,
     Message,
+    ModelProfile,
     Role,
     TextBlock,
     ToolResultBlock,
@@ -40,11 +41,18 @@ def _canonical_stop_reason(finish_reason: Any) -> str | None:
 class GeminiLLMClient(LLMClient):
     """LLMClient implementation backed by the google-genai SDK."""
 
-    def __init__(self, api_key: str, model: str, default_max_tokens: int = 4096) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        default_max_tokens: int = 4096,
+        profile: ModelProfile | None = None,
+    ) -> None:
         # Pass explicitly so bootstrap/config failures surface early.
         self._client = genai.Client(api_key=api_key)
         self._model = model
         self._default_max_tokens = default_max_tokens
+        self._profile = profile or ModelProfile.default()
 
     async def complete(
         self,
@@ -66,6 +74,13 @@ class GeminiLLMClient(LLMClient):
             ),
             "system_instruction": system,
         }
+        p = self._profile
+        if p.temperature is not None:
+            config_kwargs["temperature"] = p.temperature
+        if p.top_p is not None:
+            config_kwargs["top_p"] = p.top_p
+        if p.top_k is not None:
+            config_kwargs["top_k"] = p.top_k
 
         # Invalid thinking_level is skipped rather than failing the request.
         if thinking_level is not None:
@@ -199,6 +214,7 @@ class GeminiLLMClient(LLMClient):
             return AssistantMessage(
                 content=[], stop_reason="empty", model=self._model,
                 usage=self._usage_from_response(response),
+                reasoning=None,
             )
 
         candidate = candidates[0]

@@ -61,6 +61,9 @@ class ToolUseBlock:
     name: str
     input: dict[str, Any]
     provider_metadata: dict[str, Any] = field(default_factory=dict)
+    # Set by a provider when the model's tool-call arguments were
+    # unparseable; the loop turns this into a teaching is_error result.
+    parse_error: str | None = None
     type: Literal["tool_use"] = "tool_use"
 
 
@@ -109,6 +112,21 @@ class Usage:
         )
 
 
+@dataclass(frozen=True)
+class ModelProfile:
+    """Declared model-interface capabilities, resolved from a models.yaml row."""
+
+    supports_native_tools: bool = True
+    thinking: str = "none"
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+
+    @classmethod
+    def default(cls) -> "ModelProfile":
+        return cls()
+
+
 # ----- messages -----
 
 @dataclass
@@ -153,6 +171,9 @@ class AssistantMessage:
     stop_reason: str | None = None
     model: str | None = None
     usage: Usage | None = None
+    # Provider-extracted chain-of-thought; trace-only, never replayed to the
+    # model or sent on the OpenAI-compatible response wire.
+    reasoning: str | None = None
 
     def text_blocks(self) -> list[TextBlock]:
         return [b for b in self.content if isinstance(b, TextBlock)]

@@ -2,6 +2,7 @@
 from .schemas import (
     AssistantMessage,
     Message,
+    ModelProfile,
     Role,
     TextBlock,
     ToolResultBlock,
@@ -13,6 +14,7 @@ __all__ = [
     "AssistantMessage",
     "LLMClient",
     "Message",
+    "ModelProfile",
     "Role",
     "TextBlock",
     "ToolResultBlock",

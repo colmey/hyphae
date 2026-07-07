@@ -22,6 +22,7 @@ from .events import (
     DoneEvent,
     ErrorEvent,
     Event,
+    ReasoningEvent,
     TextEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -444,6 +445,9 @@ async def run_agent(
         if store is not None:
             await store.save(session)
 
+        if response.reasoning:
+            yield await _emit(ReasoningEvent(text=response.reasoning))
+
         for block in response.content:
             if isinstance(block, TextBlock) and block.text:
                 yield await _emit(TextEvent(text=block.text))
@@ -525,7 +529,13 @@ async def run_agent(
                 seen_calls.add(call_key)
 
                 # Short-circuit bad args before they become opaque MCP errors.
-                validation_error = _validate_tool_args(tool_schemas.get(tu.name), tu.input)
+                if tu.parse_error is not None:
+                    validation_error = (
+                        f"tool call arguments were not valid JSON ({tu.parse_error}); "
+                        "return the arguments as a JSON object matching the tool schema."
+                    )
+                else:
+                    validation_error = _validate_tool_args(tool_schemas.get(tu.name), tu.input)
 
                 # Denied calls never reach MCP and count as model-facing errors.
                 decision = policy.check(tu.name, tu.input) if validation_error is None else None

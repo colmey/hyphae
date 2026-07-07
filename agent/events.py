@@ -28,6 +28,13 @@ class TextEvent:
 
 
 @dataclass
+class ReasoningEvent:
+    """The provider surfaced reasoning text for trace/debug consumers."""
+    text: str
+    type: Literal["reasoning"] = "reasoning"
+
+
+@dataclass
 class ToolCallEvent:
     """The model decided to invoke a tool. Emitted before the call runs."""
     id: str
@@ -104,6 +111,7 @@ class ErrorEvent:
 
 Event = Union[
     TextEvent,
+    ReasoningEvent,
     ToolCallEvent,
     ToolResultEvent,
     UsageEvent,

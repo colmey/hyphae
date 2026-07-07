@@ -13,6 +13,16 @@ from llm.client import supported_providers
 from mcp_layer.manager import NAMESPACE_SEP
 
 
+class SamplingParams(BaseModel):
+    """Optional per-model sampling parameters passed through to providers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=1)
+
+
 class ModelEntry(BaseModel):
     """One model the orchestrator may route to."""
 
@@ -53,6 +63,33 @@ class ModelEntry(BaseModel):
                     "registry-wide fallback and as the orchestrator's own model "
                     "unless overridden by Settings.orchestrator_model_id.",
     )
+    supports_native_tools: bool = Field(
+        default=True,
+        description="Whether the served endpoint supports native tool/function calling. "
+                    "Declared only in Phase 5; prompted-tool fallback is Phase 6.",
+    )
+    thinking: Literal["none", "hint-param", "think-tags"] = Field(
+        default="none",
+        description="How this model exposes a thinking control. 'none': no knob; "
+                    "'hint-param': a request field like reasoning_effort; "
+                    "'think-tags': self-emits <think> inline.",
+    )
+    sampling: SamplingParams | None = Field(
+        default=None,
+        description="Optional per-model sampling passed through to the provider request.",
+    )
+
+    def to_profile(self) -> "ModelProfile":
+        from llm.schemas import ModelProfile
+
+        s = self.sampling
+        return ModelProfile(
+            supports_native_tools=self.supports_native_tools,
+            thinking=self.thinking,
+            temperature=s.temperature if s else None,
+            top_p=s.top_p if s else None,
+            top_k=s.top_k if s else None,
+        )
 
 
 class ModelsConfig(BaseModel):

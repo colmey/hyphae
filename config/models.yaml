@@ -17,6 +17,19 @@
 #                               output - safety margin). Falls back to
 #                               Settings.context_default_window_tokens.
 #                               Set it accurately for small local models.
+#   supports_native_tools
+#                   (optional)  whether the served endpoint supports native
+#                               tool/function calling. Defaults to true.
+#                               Prompted-tool fallback is Phase 6.
+#   thinking        (optional)  one of: none, hint-param, think-tags.
+#                               Defaults to none. Use hint-param for endpoints
+#                               that accept a request knob such as
+#                               reasoning_effort; use think-tags for models
+#                               that self-emit leading <think>...</think>.
+#   sampling        (optional)  per-model provider request sampling:
+#                               temperature (0.0-2.0), top_p (0.0-1.0),
+#                               top_k (>=1). Omit a field to leave the
+#                               provider/server default in force.
 #   default         (optional)  exactly one entry may be marked default: true.
 #                               Used as the fallback when orchestration fails
 #                               and as the orchestrator's own model unless
@@ -49,6 +62,12 @@ models:
   #   description: >
   #     Local Qwen3.6 model served over the OpenAI-compatible endpoint.
   #     Suitable for complex reasoning and tool calling tasks.
+  #   supports_native_tools: true
+  #   thinking: think-tags
+  #   sampling:
+  #     temperature: 0.6
+  #     top_p: 0.95
+  #     top_k: 20
 
   gpt-oss-20b:
     provider: openai

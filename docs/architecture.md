@@ -242,10 +242,16 @@ speaks:
   constructors `user(text)`, `assistant(blocks)`, `tool_results(results)`.
 - Content blocks:
   - `TextBlock(text, provider_metadata)`
-  - `ToolUseBlock(id, name, input, provider_metadata)`
+  - `ToolUseBlock(id, name, input, provider_metadata, parse_error)`
   - `ToolResultBlock(tool_use_id, name, content, is_error)`
-- **`AssistantMessage(content, stop_reason, model)`** with helpers
-  `text_blocks()`, `tool_uses()`, `to_message()`.
+- **`AssistantMessage(content, stop_reason, model, reasoning)`** with helpers
+  `text_blocks()`, `tool_uses()`, `to_message()`. `reasoning` is trace-only
+  data extracted by the provider; it is not replayed through `to_message()`
+  and is not part of user-facing answer text.
+- **`ModelProfile`**: the immutable, provider-agnostic capability profile
+  resolved from one `models.yaml` row. It carries
+  `supports_native_tools`, `thinking`, and optional sampling
+  (`temperature`, `top_p`, `top_k`) across the client build chain as one value.
 
 **Two non-obvious fields** that exist for specific reasons:
 
@@ -259,6 +265,15 @@ speaks:
    the `tool_use_id`, but Gemini's `function_response` requires the
    function name. The agent loop populates it from the matching
    `ToolUseBlock`.
+3. **`parse_error`** on `ToolUseBlock`. Providers set this when the model
+   emitted a tool call whose argument string was not valid JSON. The input
+   remains `{}` for shape compatibility, but the loop turns the parse failure
+   into a teaching `is_error` result instead of silently executing an empty
+   call.
+4. **`reasoning`** on `AssistantMessage`. Provider-extracted thinking lives as
+   a sibling of content, not inside `provider_metadata`. The loop may emit it
+   as a `ReasoningEvent` for trace/debug surfaces, but session replay and
+   OpenAI-compatible responses stay clean.
 
 `llm/client.py` — the abstraction + the provider registry, and **nothing
 SDK-specific** (importing it never pulls in a provider SDK):
@@ -285,10 +300,10 @@ SDK-specific** (importing it never pulls in a provider SDK):
   `settings.llm_provider`. Used by `main.py` to build the legacy/default
   client at startup.
 - **`build_llm_client_from_entry(entry, settings)`** is the multi-model
-  variant. Takes a `ModelEntry` (from `models.yaml`) and pulls the API
-  key by `entry.provider` (not by `settings.llm_provider`), so one
-  process can hold clients for multiple providers simultaneously. Used
-  by `LLMRegistry`.
+  variant. Takes a `ModelEntry` (from `models.yaml`), resolves its
+  `ModelProfile`, and pulls the API key by `entry.provider` (not by
+  `settings.llm_provider`), so one process can hold clients for multiple
+  providers simultaneously. Used by `LLMRegistry`.
 
 **Adding a provider is two steps:** add `llm/providers/<name>.py` implementing
 `LLMClient`, then add one `_PROVIDERS` entry. The loop, orchestrator, session
@@ -301,11 +316,11 @@ for its routing decision; the agent loop does not. Providers without
 native support may ignore the kwarg.
 
 **Thinking level (`thinking_level`).** `"low" | "medium" | "high"` (or
-`None` to leave the model default). The Gemini client maps it to
-`ThinkingConfig(thinking_level=...)`, the model-native deliberation knob;
-an unrecognized value is logged and skipped rather than failing the call.
-The agent loop passes the orchestrator's chosen level through on every
-iteration. Providers without a thinking control may ignore the kwarg.
+`None` to leave the model default). The agent loop passes the orchestrator's
+chosen level through on every iteration. Providers consult the selected
+model's `ModelProfile`: `hint-param` profiles may map it to a request field
+such as `reasoning_effort`, `think-tags` profiles do not add a request knob,
+and `none` profiles log once that the knob is inert.
 
 **Gemini specifics** (isolated in `llm/providers/gemini.py`):
 
@@ -329,6 +344,22 @@ iteration. Providers without a thinking control may ignore the kwarg.
   Schemas you pass as `response_schema` must therefore avoid `extra="forbid"`
   (see `OrchestrationResult` for the reference pattern: lenient at the
   parse boundary, then sanitized in code).
+- **Reasoning extraction is conservative**: Gemini returns `reasoning=None`
+  unless the SDK exposes thought content in a form the provider can identify
+  without guessing. Gemini `thought_signature` still uses `provider_metadata`
+  for round-trip state.
+
+**OpenAI-compatible specifics** (isolated in `llm/providers/openai.py`):
+
+- Per-model sampling from `ModelProfile` is copied into the chat-completions
+  request when present.
+- For `thinking: hint-param`, `thinking_level` is passed as
+  `reasoning_effort`. For `thinking: think-tags`, a leading
+  `<think>...</think>` block is split into `AssistantMessage.reasoning` and
+  removed from visible content. For `thinking: none`, the knob is logged as
+  inert once and omitted from the request.
+- Malformed tool-call argument JSON is surfaced as `ToolUseBlock.parse_error`
+  instead of disappearing into an empty argument object.
 
 ### Agent Layer
 
@@ -376,6 +407,7 @@ discriminators for JSON serialization at the API boundary:
 
 | Event                          | Fields                                       | Emitted when                              |
 |--------------------------------|----------------------------------------------|-------------------------------------------|
+| `ReasoningEvent`               | `text`                                       | Provider extracted trace-only reasoning from a model response |
 | `TextEvent`                    | `text`                                       | Model produced a text block               |
 | `ToolCallEvent`                | `id, name, input`                            | Model decided to call a tool (pre-call)   |
 | `ToolResultEvent`              | `id, name, content, is_error, latency_ms`    | Tool call completed (`latency_ms` = `call_tool` duration; `None` if stall-skipped) |
@@ -462,15 +494,18 @@ Per-iteration algorithm:
    system + response) so the token cap works against local servers that
    report zero usage. Never double-counted.
 4. If `store` was provided, `await store.save(session)`.
-5. Yield a `TextEvent` for each non-empty text block.
-6. Collect tool calls; if no tools were requested, finish with the appropriate
+5. If the response carries `reasoning`, yield a `ReasoningEvent` for trace and
+   raw debug renderers. Reasoning is not appended to session content.
+6. Yield a `TextEvent` for each non-empty text block.
+7. Collect tool calls; if no tools were requested, finish with the appropriate
    done reason (`end_turn`, `truncated`, or `max_iterations`).
-7. For each tool call, sequentially: emit `ToolCallEvent`, run repeat-call
-   detection, validate args, enforce `ToolPolicy`, call MCP with timeout, clip
-   the result, update failure counters, emit `ToolResultEvent`, and build the
-   matching `ToolResultBlock`.
-8. `session.append_tool_results(results)` and save again.
-9. Loop. **Final-iteration wrap-up:** on the last allowed iteration the
+8. For each tool call, sequentially: emit `ToolCallEvent`, run repeat-call
+   detection, convert provider parse errors or schema validation failures into
+   teaching `is_error` results, enforce `ToolPolicy`, call MCP with timeout,
+   clip the result, update failure counters, emit `ToolResultEvent`, and build
+   the matching `ToolResultBlock`.
+9. `session.append_tool_results(results)` and save again.
+10. Loop. **Final-iteration wrap-up:** on the last allowed iteration the
    loop withholds tools and appends a wrap-up note to the per-call system prompt
    so the model produces a best-effort final answer instead of dying
    mid-investigation; the run reports `DoneEvent("max_iterations")`.
@@ -499,13 +534,15 @@ in a local estimate from the outgoing messages + system prompt + response
 never mixed with estimates; a missing `total_tokens` is filled from
 `input + output`.
 
-**Tool-argument validation** lives at the same dispatch seam (see step 7
+**Tool-argument validation** lives at the same dispatch seam (see step 8
 above) but is always on — it isn't a stop condition, it's a per-call check
 that turns a would-be opaque MCP error into a teaching `is_error` result
-before the call ever reaches the server. A validation failure counts toward
-the consecutive-failure counter like any other tool error, so a model stuck
-sending malformed args still trips the no-progress abort if one is
-configured.
+before the call ever reaches the server. Provider parse failures
+(`ToolUseBlock.parse_error`) take the same path, so invalid JSON arguments are
+visible feedback rather than a silent `{}` execution. Validation and parse
+failures count toward the consecutive-failure counter like any other tool
+error, so a model stuck sending malformed args still trips the no-progress
+abort if one is configured.
 
 If any bounded-run guard trips after an assistant has requested tools, the loop
 emits and persists compact synthetic `is_error=True` results for skipped tool
@@ -578,7 +615,12 @@ class ModelEntry(BaseModel):
     description: str       # what the orchestrator LLM sees
     max_tokens: int | None = None
     context_window: int | None = None  # feeds the loop's context budget
+    supports_native_tools: bool = True
+    thinking: Literal["none","hint-param","think-tags"] = "none"
+    sampling: SamplingParams | None = None
     default: bool = False  # exactly one entry should be default
+
+    def to_profile(self) -> ModelProfile: ...
 
 class ModelsConfig(BaseModel):
     models: dict[str, ModelEntry]
@@ -637,8 +679,11 @@ adds fallback metadata for in-process callers.
 5. Returns `OrchestrationDecision(result=..., fallback_used=False)`.
 
 **Thinking level.** The route passes `result.thinking_level` to `run_agent()`,
-which forwards it to every `llm.complete()` call. Gemini maps it to its native
-deliberation control; unsupported providers may ignore it.
+which forwards it to every `llm.complete()` call. The selected client's
+`ModelProfile` decides whether that value becomes a provider request hint
+(`hint-param`), is intentionally inert (`none`), or is represented by
+self-emitted reasoning tags (`think-tags`). The loop never branches on provider
+or model name.
 
 **Context-aware routing.** Continued sessions pass prior messages to the
 orchestrator as a compact text-only tail, so follow-up turns route with enough

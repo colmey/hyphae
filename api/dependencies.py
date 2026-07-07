@@ -28,42 +28,42 @@ from orchestrator import LLMRegistry, Orchestrator
 from .turn import TurnRunner
 
 
-def get_llm(request: Request) -> LLMClient:
+async def get_llm(request: Request) -> LLMClient:
     return request.app.state.llm
 
 
-def get_mcp(request: Request) -> MCPManager:
+async def get_mcp(request: Request) -> MCPManager:
     return request.app.state.mcp
 
 
-def get_store(request: Request) -> SessionStore:
+async def get_store(request: Request) -> SessionStore:
     return request.app.state.store
 
 
-def get_guard(request: Request) -> SessionGuard:
+async def get_guard(request: Request) -> SessionGuard:
     return request.app.state.guard
 
 
-def get_settings_obj(request: Request):
+async def get_settings_obj(request: Request):
     return request.app.state.settings
 
 
-def get_orchestrator(request: Request) -> Optional[Orchestrator]:
+async def get_orchestrator(request: Request) -> Optional[Orchestrator]:
     """Return the orchestrator, or None when orchestration is disabled."""
     return getattr(request.app.state, "orchestrator", None)
 
 
-def get_registry(request: Request) -> Optional[LLMRegistry]:
+async def get_registry(request: Request) -> Optional[LLMRegistry]:
     """Return the LLM registry, or None when orchestration is disabled."""
     return getattr(request.app.state, "registry", None)
 
 
-def get_tracer(request: Request) -> Optional[Tracer]:
+async def get_tracer(request: Request) -> Optional[Tracer]:
     """Return the run tracer, or None when tracing is disabled."""
     return getattr(request.app.state, "tracer", None)
 
 
-def get_policy(request: Request) -> Optional[ToolPolicy]:
+async def get_policy(request: Request) -> Optional[ToolPolicy]:
     """Return the tool policy, or None when none is configured.
 
     getattr-with-default so hand-wired smoke tests that don't set app.state.policy
@@ -87,7 +87,7 @@ def _presented_api_key(request: Request) -> Optional[str]:
     return None
 
 
-def require_api_key(request: Request) -> None:
+async def require_api_key(request: Request) -> None:
     """Route dependency enforcing the optional API key.
 
     No-op when `harness_api_key` is unset (single-operator dev default). When set,
@@ -109,7 +109,7 @@ def require_api_key(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid or missing API key")
 
 
-def get_turn_runner(request: Request) -> TurnRunner:
+async def get_turn_runner(request: Request) -> TurnRunner:
     """Assemble the TurnRunner seam from the published app.state singletons.
 
     Renderers depend on this one object instead of wiring nine, and it is the
@@ -119,13 +119,13 @@ def get_turn_runner(request: Request) -> TurnRunner:
     smoke tests free of an extra field while staying override-friendly.
     """
     return TurnRunner(
-        llm=get_llm(request),
-        mcp=get_mcp(request),
-        store=get_store(request),
-        guard=get_guard(request),
-        settings=get_settings_obj(request),
-        orchestrator=get_orchestrator(request),
-        registry=get_registry(request),
-        policy=get_policy(request),
-        tracer=get_tracer(request),
+        llm=request.app.state.llm,
+        mcp=request.app.state.mcp,
+        store=request.app.state.store,
+        guard=request.app.state.guard,
+        settings=request.app.state.settings,
+        orchestrator=getattr(request.app.state, "orchestrator", None),
+        registry=getattr(request.app.state, "registry", None),
+        policy=getattr(request.app.state, "policy", None),
+        tracer=getattr(request.app.state, "tracer", None),
     )

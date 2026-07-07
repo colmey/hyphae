@@ -129,6 +129,21 @@ models:
       Heavyweight advanced reasoning. Use ONLY for complex logic, zero-shot
       architectural design, advanced mathematics, deep analytical work, or
       highly ambiguous workflows demanding deliberate planning.
+
+  qwen3-local:
+    provider: openai
+    model: qwen3.6-35b-a3b
+    description: >
+      Local Qwen3.6 model served over an OpenAI-compatible endpoint.
+      Strong for agentic coding and deliberate tool-using workflows.
+    context_window: 65536
+    max_tokens: 16384
+    supports_native_tools: true
+    thinking: think-tags
+    sampling:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
 ```
 
 Both models are **active** — the orchestrator routes between them (cheap
@@ -155,11 +170,30 @@ Both models are **active** — the orchestrator routes between them (cheap
   margin`). Falls back to `CONTEXT_DEFAULT_WINDOW_TOKENS`. Provider-agnostic
   (a plain size, no vendor branching) — set it accurately for small local
   models, where overflow is a hard failure.
+- `supports_native_tools` is optional and defaults to `true`. It declares
+  whether the served endpoint supports native tool/function calling. Phase 5
+  validates and carries the flag in the model profile; prompted-tool fallback
+  for `false` entries is intentionally deferred to Phase 6.
+- `thinking` is optional and defaults to `none`. Values:
+  `none` means the provider has no request-time thinking knob,
+  `hint-param` means the provider can pass the orchestrator's
+  `thinking_level` through as a request hint such as `reasoning_effort`,
+  and `think-tags` means the model may self-emit a leading
+  `<think>...</think>` block that the provider extracts as trace-only
+  reasoning.
+- `sampling` is optional. Supported fields are `temperature` (`0.0`-`2.0`),
+  `top_p` (`0.0`-`1.0`), and `top_k` (`>= 1`). Omit the block, or omit an
+  individual field, to leave the provider/server default in force. Sampling is
+  per model entry, not an environment variable.
 - `default: true` on **exactly one** entry. The default model is used
   by the orchestrator itself (unless `ORCHESTRATOR_MODEL_ID` overrides)
   and is the safe fallback when orchestration fails.
 - Model IDs must be `[A-Za-z0-9_.\-]+` (clean keys for logging and
   routing).
+
+Unknown fields, invalid enum values, and out-of-range sampling values fail
+startup during `models.yaml` parsing, with the model id and field path in the
+validation error.
 
 ## Orchestrator Prompt — `config/orchestrator_prompt.md`
 

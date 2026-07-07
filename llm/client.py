@@ -95,17 +95,22 @@ class LLMClient(ABC):
 # the registry contract stable across very different providers.
 
 
-def _build_gemini(*, model: str, max_tokens: int, settings: Any) -> LLMClient:
+def _build_gemini(
+    *, model: str, max_tokens: int, settings: Any, profile: Any = None
+) -> LLMClient:
     from llm.providers.gemini import GeminiLLMClient
 
     return GeminiLLMClient(
         api_key=settings.api_key_for_provider("gemini"),
         model=model,
         default_max_tokens=max_tokens,
+        profile=profile,
     )
 
 
-def _build_openai(*, model: str, max_tokens: int, settings: Any) -> LLMClient:
+def _build_openai(
+    *, model: str, max_tokens: int, settings: Any, profile: Any = None
+) -> LLMClient:
     from llm.providers.openai import OpenAILLMClient
 
     # OpenAI-compatible: base_url empty -> real OpenAI; set it (e.g. Ollama's
@@ -116,6 +121,7 @@ def _build_openai(*, model: str, max_tokens: int, settings: Any) -> LLMClient:
         model=model,
         default_max_tokens=max_tokens,
         base_url=settings.openai_base_url or None,
+        profile=profile,
     )
 
 
@@ -137,7 +143,7 @@ def supported_providers() -> frozenset[str]:
 
 
 def _build_client(
-    provider: str, *, model: str, max_tokens: int, settings: Any
+    provider: str, *, model: str, max_tokens: int, settings: Any, profile: Any = None
 ) -> LLMClient:
     """Dispatch to the registered builder for `provider`.
 
@@ -148,7 +154,7 @@ def _build_client(
         build = _PROVIDERS[provider]
     except KeyError:
         raise NotImplementedError(f"LLM provider {provider!r} is not implemented yet")
-    return build(model=model, max_tokens=max_tokens, settings=settings)
+    return build(model=model, max_tokens=max_tokens, settings=settings, profile=profile)
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +188,11 @@ def build_llm_client_from_entry(entry: Any, settings: Any) -> LLMClient:
     `entry` is duck-typed (must expose `.provider`, `.model`, `.max_tokens`)
     to avoid an import-time dependency on orchestrator.schemas.
     """
+    profile = entry.to_profile()
     return _build_client(
         entry.provider,
         model=entry.model,
         max_tokens=entry.max_tokens or settings.llm_max_tokens,
         settings=settings,
+        profile=profile,
     )

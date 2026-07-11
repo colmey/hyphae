@@ -1,0 +1,62 @@
+"""Tool-call presentation tests for the OpenAI-compatible adapter."""
+
+from __future__ import annotations
+
+from agent import ToolResultEvent
+from api.openai_compatible import _ChatMessage, _prepare, _strip_tool_blocks, _tool_details
+
+
+def _result(
+    content: str,
+    *,
+    name: str = "web__search",
+    is_error: bool = False,
+    latency_ms: float | None = 12.0,
+) -> ToolResultEvent:
+    return ToolResultEvent(
+        id="call_1", name=name, content=content, is_error=is_error, latency_ms=latency_ms
+    )
+
+
+def test_render_then_strip_roundtrips() -> None:
+    block = _tool_details(_result("the answer is 42"), {"q": "meaning"})
+    assert "<details>" in block and "</details>" in block
+    assert "🔧 web__search ✅" in block
+    assert '"q": "meaning"' in block
+    assert "the answer is 42" in block
+    assert _strip_tool_blocks(f"Here is what I found.{block}So, 42.") == (
+        "Here is what I found.So, 42."
+    )
+
+
+def test_error_result_uses_error_icon() -> None:
+    assert "🔧 web__search ❌" in _tool_details(_result("boom", is_error=True), {"q": "x"})
+
+
+def test_strip_preserves_model_authored_details() -> None:
+    authored = "intro\n<details>\n<summary>Notes</summary>\nkeep me\n</details>\nend"
+    assert _strip_tool_blocks(authored) == authored
+
+
+def test_tool_result_cannot_close_details_early() -> None:
+    block = _tool_details(_result("snippet with </details> inside it"), {"q": "html"})
+    assert block.count("</details>") == 1
+    assert "<\u200b/details>" in block
+    assert _strip_tool_blocks(f"before{block}after") == "beforeafter"
+
+
+def test_prepare_strips_assistant_history_but_not_prompt() -> None:
+    block = _tool_details(_result("tool output"), {"q": "y"})
+    messages = [
+        _ChatMessage(role="system", content="be terse"),
+        _ChatMessage(role="user", content="first question"),
+        _ChatMessage(role="assistant", content=f"I checked.{block}Done."),
+        _ChatMessage(role="user", content="follow-up question"),
+    ]
+
+    system_override, history, prompt = _prepare(messages)
+
+    assert system_override == "be terse"
+    assert prompt == "follow-up question"
+    assert [text for role, text in history if role == "assistant"] == ["I checked.Done."]
+    assert all("<details>" not in text for _role, text in history)

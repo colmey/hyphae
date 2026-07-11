@@ -1,5 +1,4 @@
-"""
-Smoke test for the orchestration layer.
+"""Live pytest coverage for the configured orchestration layer.
 
 Verifies:
   1. models.yaml loads and validates.
@@ -22,20 +21,18 @@ default. The earlier version of this test missed that case because its
 structural assertions (model_id in registry, tools in MCP inventory)
 were satisfied by the fallback values too.
 
-Run from the project root (with your bootstrap script populating env):
-    ./runscript.sh smoke_test_orchestrator.py
+Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 """
 
 from __future__ import annotations
 
-from bootstrap import load_secrets
-load_secrets()
-
-import asyncio
+import bootstrap
 import logging
 from types import SimpleNamespace
 
-from harness_config import get_settings, load_mcp_config
+import pytest
+
+from harness_config import get_settings, load_mcp_config, reset_settings
 from llm.schemas import Message, TextBlock
 from mcp_layer import MCPManager
 from orchestrator import (
@@ -52,6 +49,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
 )
+pytestmark = [pytest.mark.live, pytest.mark.model, pytest.mark.mcp, pytest.mark.anyio]
 
 
 def _check_thinking_level_parsing() -> None:
@@ -102,7 +100,9 @@ def _check_history_block(orch: Orchestrator) -> None:
     print("  history block OK (present with history, absent without)\n")
 
 
-async def main() -> None:
+async def test_configured_orchestration_decisions() -> None:
+    bootstrap.load_secrets()
+    reset_settings()
     settings = get_settings()
 
     _check_thinking_level_parsing()
@@ -232,7 +232,3 @@ async def main() -> None:
         print("orchestrator smoke test passed (all decisions made real LLM calls).")
     finally:
         await mcp.shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

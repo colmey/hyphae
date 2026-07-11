@@ -1,7 +1,6 @@
-"""
-Smoke test for the agent-loop intelligence scaffolding.
+"""Hermetic pytest coverage for the agent-loop intelligence scaffolding.
 
-Like smoke_test_reliability.py, this hits no network: it drives run_agent with a
+This hits no network: it drives run_agent with a
 scripted fake LLMClient (a queue of responses, recording the system/tools each
 call received) and a scriptable fake MCP manager. That lets us exercise the
 steering behaviors deterministically:
@@ -16,15 +15,14 @@ steering behaviors deterministically:
   4. Consecutive-failure nudge    - after 3 failures in a row, a steering note
      is appended (once) to the crossing result.
 
-Run from the project root:
-    ./runscript.sh tests/smoke_test_loop_intelligence.py
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
+
+import pytest
 
 from agent import (
     DoneEvent,
@@ -39,6 +37,7 @@ from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
 from mcp_layer.client import ToolCallResult
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s")
+pytestmark = pytest.mark.anyio
 
 
 # ---------------------------------------------------------------------------
@@ -105,14 +104,8 @@ def tool_call_response(args: dict[str, Any] | None = None, *, name: str = "srv__
 # Harness
 # ---------------------------------------------------------------------------
 
-_failures: list[str] = []
-
-
 def check(cond: bool, msg: str) -> None:
-    status = "PASS" if cond else "FAIL"
-    print(f"    [{status}] {msg}")
-    if not cond:
-        _failures.append(msg)
+    assert cond, msg
 
 
 async def collect(label: str, llm: LLMClient, mcp: Any, **kwargs: Any) -> list[Any]:
@@ -141,7 +134,7 @@ def tool_results(events: list[Any]) -> list[ToolResultEvent]:
     return [e for e in events if isinstance(e, ToolResultEvent)]
 
 
-async def main() -> None:
+async def test_final_iteration_wrap_up() -> None:
     # 1. Final-iteration wrap-up
     llm = ScriptedLLM([tool_call_response(), text_response("best-effort answer")])
     mcp = FakeMCP()
@@ -158,7 +151,7 @@ async def main() -> None:
     check(all_text(events) == "best-effort answer", "forced final answer streamed")
     check(mcp.call_count == 1, f"the one tool ran on iteration 1 (got {mcp.call_count})")
 
-    # 2. Stall detection: identical repeat short-circuited
+async def test_identical_repeat_is_short_circuited() -> None:
     llm = ScriptedLLM([
         tool_call_response({"q": "x"}),
         tool_call_response({"q": "x"}),
@@ -174,7 +167,7 @@ async def main() -> None:
     check(not trs[0].is_error, "the first (real) call was a normal result")
     check(done_reason(events) == "end_turn", "loop continued to a final answer")
 
-    # 3. Distinct args are NOT blocked (guards against over-eager dedup)
+async def test_distinct_arguments_are_not_blocked() -> None:
     llm = ScriptedLLM([
         tool_call_response({"q": "x"}),
         tool_call_response({"q": "y"}),
@@ -186,7 +179,7 @@ async def main() -> None:
     check(mcp.call_count == 2, f"both distinct calls executed (got {mcp.call_count})")
     check(not any(_STALL_MESSAGE in t.content for t in trs), "no stall message emitted")
 
-    # 4. Consecutive-failure nudge: 3 errors in a row -> nudge on the 3rd
+async def test_consecutive_failure_nudge() -> None:
     llm = ScriptedLLM([
         tool_call_response({"i": 1}),
         tool_call_response({"i": 2}),
@@ -200,15 +193,3 @@ async def main() -> None:
     check(_FAILURE_NUDGE not in trs[0].content, "no nudge on the 1st failure")
     check(_FAILURE_NUDGE not in trs[1].content, "no nudge on the 2nd failure")
     check(_FAILURE_NUDGE in trs[2].content, "nudge appended on the 3rd consecutive failure")
-
-    print()
-    if _failures:
-        print(f"LOOP-INTELLIGENCE SMOKE TEST FAILED: {len(_failures)} check(s) failed:")
-        for f in _failures:
-            print(f"  - {f}")
-        raise SystemExit(1)
-    print("loop-intelligence smoke test complete: all checks passed.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

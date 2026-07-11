@@ -1,18 +1,14 @@
-"""
-Smoke test for Phase 7 token streaming.
+"""Hermetic pytest coverage for token streaming.
 
-Hermetic by design: scripted LLM clients drive run_agent directly, with no
-network or provider backend. Run from the project root:
-    ./runscript.sh tests/smoke_test_streaming.py
+Scripted LLM clients drive ``run_agent`` directly, with no network or provider
+backend.
 """
 
 from __future__ import annotations
 
-from bootstrap import load_secrets
-load_secrets()
-
-import asyncio
 from typing import Any, AsyncIterator
+
+import pytest
 
 from agent import DoneEvent, ErrorEvent, InMemorySessionStore, TextEvent, ToolCallEvent, run_agent
 from llm.client import LLMClient
@@ -28,6 +24,8 @@ from llm.schemas import (
     Usage,
 )
 from mcp_layer.client import ToolCallResult
+
+pytestmark = pytest.mark.anyio
 
 
 class FakeMCP:
@@ -140,13 +138,6 @@ def done_reason(events: list[Any]) -> str | None:
     return done[-1].reason if done else None
 
 
-def check(cond: bool, msg: str, failures: list[str]) -> None:
-    status = "PASS" if cond else "FAIL"
-    print(f"    [{status}] {msg}")
-    if not cond:
-        failures.append(msg)
-
-
 def run_stripper(pieces: list[str]) -> tuple[str, str | None]:
     stripper = _ReasoningStreamStripper()
     visible = "".join(stripper.feed(piece) for piece in pieces)
@@ -154,38 +145,36 @@ def run_stripper(pieces: list[str]) -> tuple[str, str | None]:
     return visible, stripper.reasoning
 
 
-async def main() -> None:
-    failures: list[str] = []
-
-    print("--- native streaming emits incremental text ---")
+async def test_native_streaming_emits_incremental_text() -> None:
     events = await collect(NativeStreamingLLM())
-    check(text_events(events) == ["Hel", "lo"], "multiple TextEvents emitted without final duplicate", failures)
-    check("".join(text_events(events)) == "Hello", "reassembled text matches final answer", failures)
-    check(done_reason(events) == "end_turn", "native stream completes normally", failures)
+    assert text_events(events) == ["Hel", "lo"]
+    assert "".join(text_events(events)) == "Hello"
+    assert done_reason(events) == "end_turn"
 
-    print("--- ABC fallback streams coarse text ---")
+async def test_complete_fallback_streams_coarse_text() -> None:
     fallback = CompleteOnlyLLM()
     events = await collect(fallback)
-    check(fallback.calls == 1, "fallback called complete() once", failures)
-    check(text_events(events) == ["fallback text"], "fallback emitted one coarse TextEvent", failures)
-    check(done_reason(events) == "end_turn", "fallback completes normally", failures)
+    assert fallback.calls == 1
+    assert text_events(events) == ["fallback text"]
+    assert done_reason(events) == "end_turn"
 
-    print("--- streamed tool call reaches existing dispatch ---")
+async def test_streamed_tool_call_reaches_dispatch() -> None:
     mcp = FakeMCP()
     events = await collect(ToolStreamingLLM(), mcp)
-    check(mcp.call_count == 1, "tool dispatched once", failures)
-    check(any(isinstance(event, ToolCallEvent) for event in events), "ToolCallEvent emitted", failures)
-    check(text_events(events) == ["done"], "follow-up streamed final text emitted once", failures)
-    check(done_reason(events) == "end_turn", "tool stream completes normally", failures)
+    assert mcp.call_count == 1
+    assert any(isinstance(event, ToolCallEvent) for event in events)
+    assert text_events(events) == ["done"]
+    assert done_reason(events) == "end_turn"
 
-    print("--- error after first delta surfaces partials ---")
+async def test_error_after_first_delta_surfaces_partial_text() -> None:
     events = await collect(ErrorAfterDeltaLLM())
-    check(text_events(events) == ["partial"], "partial text survived stream error", failures)
-    check(any(isinstance(event, ErrorEvent) for event in events), "ErrorEvent emitted", failures)
-    check(done_reason(events) == "llm_error", "stream error terminates as llm_error", failures)
+    assert text_events(events) == ["partial"]
+    assert any(isinstance(event, ErrorEvent) for event in events)
+    assert done_reason(events) == "llm_error"
 
-    print("--- reasoning stripper split-boundary cases ---")
-    cases = [
+@pytest.mark.parametrize(
+    ("pieces", "expected_visible", "expected_reasoning", "assert_no_tags"),
+    [
         (["<think>secret</think>Hello"], "Hello", "secret", True),
         (["<thi", "nk>secret</think>Hello"], "Hello", "secret", True),
         (["<think>sec", "ret</thi", "nk>Hello"], "Hello", "secret", True),
@@ -193,21 +182,13 @@ async def main() -> None:
         (["   <think>secret</think>  Hello"], "Hello", "secret", True),
         (["plain"], "plain", None, True),
         (["<think>unfinished"], "<think>unfinished", None, False),
-    ]
-    for pieces, expected_visible, expected_reasoning, assert_no_tags in cases:
-        visible, reasoning = run_stripper(pieces)
-        check(visible == expected_visible, f"visible output for {pieces!r}", failures)
-        check(reasoning == expected_reasoning, f"reasoning output for {pieces!r}", failures)
-        if assert_no_tags:
-            check("<think>" not in visible and "</think>" not in visible, f"no leading tag leak for {pieces!r}", failures)
-
-    if failures:
-        print(f"\nSTREAMING SMOKE TEST FAILED: {len(failures)} check(s) failed:")
-        for failure in failures:
-            print(f"  - {failure}")
-        raise SystemExit(1)
-    print("\nstreaming smoke test complete: all checks passed.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    ],
+)
+def test_reasoning_stripper_boundaries(
+    pieces: list[str], expected_visible: str, expected_reasoning: str | None, assert_no_tags: bool
+) -> None:
+    visible, reasoning = run_stripper(pieces)
+    assert visible == expected_visible
+    assert reasoning == expected_reasoning
+    if assert_no_tags:
+        assert "<think>" not in visible and "</think>" not in visible

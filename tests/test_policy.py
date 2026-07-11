@@ -1,5 +1,4 @@
-"""
-Smoke test for the tool-dispatch policy seam (agent/tool_policy.py + loop wiring).
+"""Hermetic pytest coverage for the tool-dispatch policy seam.
 
 Hermetic: drives run_agent with a scripted fake LLM and a fake MCP manager that
 counts executions, so we can assert a denied tool never reaches MCP while an
@@ -14,15 +13,14 @@ Scenarios:
   3. allow_list allow     - a listed tool still executes.
   4. repeated denies      - a model hammering blocked tools ends no_progress.
 
-Run from the project root:
-    ./runscript.sh tests/smoke_test_policy.py
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
+
+import pytest
 
 from agent import (
     DoneEvent,
@@ -37,6 +35,7 @@ from llm.schemas import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlo
 from mcp_layer.client import ToolCallResult
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s")
+pytestmark = pytest.mark.anyio
 
 
 # --- scripted fakes --------------------------------------------------------
@@ -89,13 +88,8 @@ def text(text_: str) -> AssistantMessage:
 
 # --- harness ---------------------------------------------------------------
 
-_failures: list[str] = []
-
-
 def check(cond: bool, msg: str) -> None:
-    print(f"    [{'PASS' if cond else 'FAIL'}] {msg}")
-    if not cond:
-        _failures.append(msg)
+    assert cond, msg
 
 
 async def collect(label: str, llm: LLMClient, mcp: Any, **kwargs: Any):
@@ -117,7 +111,7 @@ def tool_results(events: list[Any]) -> list[ToolResultEvent]:
     return [e for e in events if isinstance(e, ToolResultEvent)]
 
 
-async def main() -> None:
+async def test_allow_all_default_executes_tool() -> None:
     # 1. allow-all default: allowed tool executes.
     llm = ScriptedLLM([tool_call("srv__allowed", {}), text("done")])
     mcp = CountingMCP()
@@ -126,7 +120,7 @@ async def main() -> None:
     check(done_reason(events) == "end_turn", "run ended normally")
     check(not tool_results(events)[0].is_error, "tool result is not an error")
 
-    # 2. allow_list deny: unlisted tool blocked, never reaches MCP, run continues.
+async def test_allow_list_denies_unlisted_tool_and_persists_error() -> None:
     policy = ToolPolicy(mode="allow_list", allow=["srv__allowed"])
     llm = ScriptedLLM([tool_call("srv__denied", {}), text("adapted")])
     mcp = CountingMCP()
@@ -141,7 +135,7 @@ async def main() -> None:
           "denied call persisted a ToolResultBlock(is_error=True)")
     check(done_reason(events) == "end_turn", "run continued and ended normally")
 
-    # 3. allow_list allow: a listed tool still executes.
+async def test_allow_list_executes_listed_tool() -> None:
     policy = ToolPolicy(mode="allow_list", allow=["srv__allowed"])
     llm = ScriptedLLM([tool_call("srv__allowed", {}), text("done")])
     mcp = CountingMCP()
@@ -149,8 +143,8 @@ async def main() -> None:
     check(mcp.call_count == 1, f"allowed tool executed under allow_list (call_count={mcp.call_count})")
     check(done_reason(events) == "end_turn", "run ended normally")
 
-    # 4. repeated denies terminate no_progress. Distinct args each call so stall
-    #    detection doesn't short-circuit before the policy path is exercised.
+async def test_repeated_denials_terminate_no_progress() -> None:
+    # Distinct args keep stall detection from short-circuiting the policy path.
     policy = ToolPolicy(mode="allow_list", allow=["srv__allowed"])
     llm = ScriptedLLM([tool_call("srv__denied", {"n": i}, call_id=f"c{i}") for i in range(5)])
     mcp = CountingMCP()
@@ -158,13 +152,3 @@ async def main() -> None:
                               policy=policy, abort_after_consecutive_tool_failures=3)
     check(mcp.call_count == 0, f"no denied call ever reached MCP (call_count={mcp.call_count})")
     check(done_reason(events) == "no_progress", "repeated denies ended no_progress")
-
-    print()
-    if _failures:
-        print(f"policy smoke test FAILED: {len(_failures)} check(s) failed.")
-        raise SystemExit(1)
-    print("policy smoke test complete: all checks passed.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

@@ -80,14 +80,14 @@ manager.
 - **PyYAML** for the MCP config file and the models registry.
 - **`jsonschema`** to validate tool-call arguments against each tool's
   declared `input_schema` at the dispatch seam (Phase 1 bounded runs).
-- **`asgi-lifespan`** (test-only) for running FastAPI lifespan in
-  in-process httpx tests.
+- **`pytest` + AnyIO** for hermetic regression discovery and async tests, and
+  **`asgi-lifespan`** for FastAPI lifespan in in-process httpx checks.
 
 ### Runtime conventions
 
 - **Bootstrap is in-process and explicit.** `bootstrap.load_secrets()`
   loads the project's `.env` file into `os.environ` (via `python-dotenv`).
-  Every entry point (`main.py`, `tests/smoke_test_*.py`, any future CLI)
+  Runtime entry points (`main.py` and any future CLI)
   calls `load_secrets()` as its first action.
 - **Config lives in `.env`.** All environment variables are kept in a
   `.env` file at the project root (template: `.env.example`). Real
@@ -134,16 +134,11 @@ PyAiHarness/
 │   ├── models.yaml           # Routable model registry for the orchestrator
 │   └── orchestrator_prompt.md  # Orchestrator's own system prompt
 │
-├── tests/                    # Standalone smoke scripts (NOT pytest)
-│   ├── README.md
-│   ├── smoke_test_config.py        # Step 1: settings + MCP config parsing
-│   ├── smoke_test_mcp.py           # Step 2: MCP connectivity
-│   ├── smoke_test_llm.py           # Step 3: LLM client round-trips
-│   ├── smoke_test_session.py       # Step 4: session store, eviction, guard
-│   ├── smoke_test_agent.py         # Step 5: full agent loop (Python API)
-│   ├── smoke_test_orchestrator.py  # Step 6: orchestration decisions
-│   ├── smoke_test_http.py          # Step 7: full HTTP surface in-process
-│   └── smoke_test_concurrency.py   # Concurrent requests: isolation + 409 guard
+├── tests/                    # Hermetic pytest suite + marked live checks
+│   ├── conftest.py               # Focused shared fakes and fixtures
+│   ├── test_*.py                  # Hermetic regression tests
+│   ├── test_*_live.py             # Explicit configured-backend integrations
+│   └── eval_agent.py              # Separate YAML-driven evaluation runner
 │
 ├── mcp_layer/                # NOT `mcp/` - shadow-free name for the SDK
 │   ├── __init__.py

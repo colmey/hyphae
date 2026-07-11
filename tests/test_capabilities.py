@@ -1,10 +1,6 @@
-"""
-Smoke test for Phase 5 capability profiles and adapter-seam behavior.
+"""Hermetic pytest coverage for capability profiles and adapter seams.
 
-Hermetic by default:
-    ./runscript.sh tests/smoke_test_capabilities.py
-
-This is deliberately not pytest. It exercises the intended Phase 5 interfaces:
+It exercises the intended Phase 5 interfaces:
 
   1. ModelEntry defaults resolve to a default ModelProfile.
   2. Bad capability profile config fails loudly with model id + field.
@@ -15,7 +11,6 @@ This is deliberately not pytest. It exercises the intended Phase 5 interfaces:
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import logging
 import sys
@@ -24,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import yaml
+import pytest
 
 from agent.events import ReasoningEvent, ToolResultEvent
 from agent.loop import run_agent
@@ -38,6 +34,7 @@ from orchestrator.schemas import ModelsConfig
 ROOT = Path(__file__).resolve().parents[1]
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s")
+pytestmark = pytest.mark.anyio
 
 
 def _load_eval_fakes():
@@ -55,14 +52,8 @@ def _load_eval_fakes():
 ScriptedLLM, ScriptedMCP = _load_eval_fakes()
 
 
-_failures: list[str] = []
-
-
 def check(cond: bool, msg: str) -> None:
-    status = "PASS" if cond else "FAIL"
-    print(f"    [{status}] {msg}")
-    if not cond:
-        _failures.append(msg)
+    assert cond, msg
 
 
 def text_of(msg: AssistantMessage) -> str:
@@ -140,7 +131,7 @@ class CapturingScriptedLLM(ScriptedLLM):
         )
 
 
-def scenario_model_config_defaults() -> None:
+def test_model_config_defaults() -> None:
     print("--- model config default profile parse ---")
     raw = yaml.safe_load((ROOT / "config" / "models.yaml").read_text(encoding="utf-8"))
     cfg = ModelsConfig.model_validate(raw)
@@ -150,7 +141,7 @@ def scenario_model_config_defaults() -> None:
     check(profile == ModelProfile.default(), "unprofiled current config keeps default profile")
 
 
-def scenario_bad_profile_errors() -> None:
+def test_bad_profile_errors() -> None:
     print("--- bad profile errors name model id and field ---")
     unknown = {
         "models": {
@@ -189,7 +180,7 @@ def scenario_bad_profile_errors() -> None:
         check(False, "temperature=9 rejected")
 
 
-async def scenario_openai_request_capture() -> None:
+async def test_openai_request_capture() -> None:
     print("--- OpenAI request captures sampling and reasoning_effort ---")
     profile = ModelProfile(
         thinking="hint-param",
@@ -232,7 +223,7 @@ async def scenario_openai_request_capture() -> None:
     )
 
 
-async def scenario_reasoning_routing() -> None:
+async def test_reasoning_routing() -> None:
     print("--- think-tag reasoning routing and trace record ---")
     client = OpenAILLMClient(
         api_key="test-key",
@@ -269,7 +260,7 @@ async def scenario_reasoning_routing() -> None:
     check(record.get("type") == "reasoning" and record.get("reasoning") == "private chain", "trace record carries reasoning")
 
 
-async def scenario_malformed_args_error_signal() -> None:
+async def test_malformed_args_error_signal() -> None:
     print("--- malformed JSON parse_error becomes model-facing is_error ---")
     client = OpenAILLMClient(
         api_key="test-key",
@@ -317,23 +308,3 @@ async def scenario_malformed_args_error_signal() -> None:
         len(second_seen_tool_results) == 1 and second_seen_tool_results[0].is_error,
         "next model turn sees model-facing is_error tool result",
     )
-
-
-async def main() -> None:
-    scenario_model_config_defaults()
-    scenario_bad_profile_errors()
-    await scenario_openai_request_capture()
-    await scenario_reasoning_routing()
-    await scenario_malformed_args_error_signal()
-
-    print()
-    if _failures:
-        print(f"CAPABILITIES SMOKE TEST FAILED: {len(_failures)} check(s) failed:")
-        for failure in _failures:
-            print(f"  - {failure}")
-        raise SystemExit(1)
-    print("CAPABILITIES SMOKE TEST PASSED")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

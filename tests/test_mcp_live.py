@@ -1,21 +1,19 @@
-"""
-Smoke test for step 2 of the build.
+"""Live pytest coverage for configured MCP connectivity.
 
 Connects to all enabled MCP servers, lists their tools, optionally calls one
 tool, then shuts down cleanly. No LLM, no HTTP server.
 
-Run from the project root (with your bootstrap script having populated env):
-    ./runscript.sh smoke_test_mcp.py
-or
-    python smoke_test_mcp.py
+Run explicitly with ``./runscript.sh -m pytest -m "live and mcp"``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
-from harness_config import get_settings, load_mcp_config
+import bootstrap
+import pytest
+
+from harness_config import get_settings, load_mcp_config, reset_settings
 from mcp_layer import MCPManager
 
 
@@ -23,9 +21,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
 )
+pytestmark = [pytest.mark.live, pytest.mark.mcp, pytest.mark.anyio]
 
 
-async def main() -> None:
+async def test_configured_mcp_inventory() -> None:
+    bootstrap.load_secrets()
+    reset_settings()
     settings = get_settings()
     mcp_config = load_mcp_config(settings.mcp_config_path)
 
@@ -72,7 +73,3 @@ async def main() -> None:
     finally:
         await manager.shutdown()
         print("shutdown complete")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

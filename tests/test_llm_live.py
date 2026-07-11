@@ -1,45 +1,34 @@
-"""
-Smoke test for the OpenAI-compatible provider (real OpenAI or a local Ollama
-server reached through its OpenAI-compatible /v1 endpoint).
+"""Live pytest coverage for the configured LLM provider.
 
-Exercises OpenAILLMClient end-to-end in three scenarios, mirroring
-smoke_test_llm.py:
+Exercises the configured provider (currently Gemini) end-to-end through
+build_llm_client(settings) -> the provider registry, in three scenarios:
 
-  1. Tool-less completion — verifies auth, base_url, model name, round-trip.
-  2. Completion with the MCP tool list attached — verifies tool schema
-     translation and that the model can produce a function call (needs a
-     tools-capable model).
-  3. Manual tool-result round-trip — simulates the agent loop: send tools,
-     receive tool_use, execute via MCPManager, send the result back, get a
-     final answer.
+  1. Tool-less completion — verifies auth, model name, and basic round-trip.
+  2. Completion with MCP tool list attached — verifies tool schema
+     translation and that the model can produce a function call.
+  3. Manual tool-result round-trip — simulates what the agent loop will do:
+     send tools, receive tool_use, execute the tool via MCPManager, send the
+     result back, get a final answer.
 
-Configure via environment before running (bootstrap only sets GEMINI_API_KEY):
-    export OPENAI_BASE_URL=http://localhost:11434/v1   # for local Ollama
-    export OPENAI_API_KEY=<key>                         # any non-empty value
-    export OPENAI_MODEL=qwen3.6-35b-a3b                 # an `ollama list` tag
-
-Run from the project root:
-    ./runscript.sh tests/smoke_test_openai.py
+Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 """
 
 from __future__ import annotations
 
-from bootstrap import load_secrets
-load_secrets()
-
-import asyncio
+import bootstrap
 import logging
-import os
 
-from harness_config import get_settings, load_mcp_config
+import pytest
+
+from harness_config import get_settings, load_mcp_config, reset_settings
 from llm import (
     LLMClient,
     Message,
     ToolResultBlock,
     ToolUseBlock,
+    build_llm_client,
 )
 from llm.schemas import TextBlock
-from llm.providers.openai import OpenAILLMClient
 from mcp_layer import MCPManager
 
 
@@ -47,6 +36,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
 )
+pytestmark = [pytest.mark.live, pytest.mark.model, pytest.mark.mcp, pytest.mark.anyio]
 
 
 def _print_response_summary(label: str, msg) -> None:
@@ -83,6 +73,9 @@ async def scenario_2_with_tools(llm: LLMClient, mcp: MCPManager) -> None:
     tools = mcp.get_tools_for_llm()
     print(f"  attached {len(tools)} tools from MCP manager")
 
+    # Pick a prompt that should clearly steer the model toward a tool call.
+    # We don't know exactly which tools your servers expose, but listing
+    # database tables is a common, low-risk capability for a database toolbox.
     response = await llm.complete(
         messages=[Message.user(
             "List the tables available in the customer database. "
@@ -115,6 +108,7 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
         "Use them when needed, then summarize results clearly."
     )
 
+    # Turn 1: model decides to call a tool (hopefully).
     first = await llm.complete(messages=history, tools=tools, system=system)
     _print_response_summary("turn 1", first)
     history.append(first.to_message())
@@ -124,10 +118,12 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
         print("  model did not call a tool; skipping round-trip.")
         return
 
+    # Execute each tool via the MCP manager and build tool_result blocks.
     results: list[ToolResultBlock] = []
     for tu in tool_uses:
         print(f"  executing tool: {tu.name} args={tu.input}")
         result = await mcp.call_tool(tu.name, tu.input)
+        # Truncate noisy output for the smoke test.
         preview = result.content if len(result.content) < 400 else result.content[:397] + "..."
         print(f"    result (is_error={result.is_error}): {preview}")
         results.append(ToolResultBlock(
@@ -138,35 +134,19 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
         ))
     history.append(Message.tool_results(results))
 
+    # Turn 2: model produces a final answer using the tool output.
     second = await llm.complete(messages=history, tools=tools, system=system)
     _print_response_summary("turn 2 (final)", second)
 
 
-async def main() -> None:
+async def test_configured_llm_scenarios() -> None:
+    bootstrap.load_secrets()
+    reset_settings()
     settings = get_settings()
-
-    # Construct the OpenAI-compatible client directly from env so this test
-    # works regardless of settings.llm_provider. OPENAI_MODEL picks the model
-    # (default is a placeholder; set it to a real `ollama list` tag).
-    base_url = settings.openai_base_url or os.environ.get("OPENAI_BASE_URL", "")
-    api_key = settings.openai_api_key or os.environ.get("OPENAI_API_KEY", "")
-    model = os.environ.get("OPENAI_MODEL", "qwen3.6-35b-a3b")
-
-    if not api_key:
-        raise SystemExit(
-            "OPENAI_API_KEY is not set. Set it (any non-empty value for Ollama) "
-            "and OPENAI_BASE_URL before running this test."
-        )
-
-    print(f"using openai-compatible base_url={base_url or '<real OpenAI>'} model={model}")
+    print(f"using provider={settings.llm_provider} model={settings.llm_model}")
     print()
 
-    llm = OpenAILLMClient(
-        api_key=api_key,
-        model=model,
-        default_max_tokens=settings.llm_max_tokens,
-        base_url=base_url or None,
-    )
+    llm = build_llm_client(settings)
     mcp_config = load_mcp_config(settings.mcp_config_path)
     mcp = MCPManager(mcp_config)
     await mcp.startup()
@@ -178,7 +158,3 @@ async def main() -> None:
     finally:
         await mcp.shutdown()
         print("shutdown complete")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

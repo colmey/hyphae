@@ -1,21 +1,17 @@
-"""
-Smoke test for Phase 6 prompted-tool adapter behavior.
+"""Hermetic pytest coverage for prompted-tool adapter behavior.
 
-Hermetic by default:
-    ./runscript.sh tests/smoke_test_prompted_tools.py
-
-This is deliberately not pytest. It exercises the prompted-tool render/parser,
+It exercises the prompted-tool renderer/parser,
 the LLMClient wrapper, factory selection, and the drop-in proof through the
 unchanged agent loop.
 """
 
 from __future__ import annotations
 
-import asyncio
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from agent import (
     DoneEvent,
@@ -52,15 +48,10 @@ TOOL = {
         "required": ["query"],
     },
 }
-
-_failures: list[str] = []
-
+pytestmark = pytest.mark.anyio
 
 def check(cond: bool, msg: str) -> None:
-    status = "PASS" if cond else "FAIL"
-    print(f"    [{status}] {msg}")
-    if not cond:
-        _failures.append(msg)
+    assert cond, msg
 
 
 def text_response(text: str, *, usage: Usage | None = None) -> AssistantMessage:
@@ -123,7 +114,7 @@ def action_text(query: str = "example") -> str:
     )
 
 
-def scenario_render() -> None:
+def test_render() -> None:
     print("--- render prompted tools ---")
     rendered = render_prompted_tools([TOOL])
     check("Available tools:" in rendered, "render includes available tools heading")
@@ -134,7 +125,7 @@ def scenario_render() -> None:
     check(render_prompted_tools([]) == "", "no tools render as empty string")
 
 
-def scenario_parser() -> None:
+def test_parser() -> None:
     print("--- parse prompted actions ---")
     allowed = {"srv__lookup"}
 
@@ -168,7 +159,7 @@ def scenario_parser() -> None:
     check(parsed.error_tool_name == "srv__lookup", "bad-args tool name is preserved")
 
 
-async def scenario_wrapper_basic() -> None:
+async def test_wrapper_basic() -> None:
     print("--- wrapper sends prompted tools, not native tools ---")
     inner = ScriptedLLM([text_response(action_text("gamma"))])
     wrapper = PromptedToolLLMClient(inner, model="wrapped-model")
@@ -188,7 +179,7 @@ async def scenario_wrapper_basic() -> None:
     check(response.reasoning == "kept private", "reasoning metadata preserved")
 
 
-async def scenario_passthroughs() -> None:
+async def test_passthroughs() -> None:
     print("--- wrapper passthrough cases ---")
     schema = dict
     inner = ScriptedLLM([text_response("structured")])
@@ -220,7 +211,7 @@ async def scenario_passthroughs() -> None:
     check(inner.messages_seen[0][-1].role.value == "tool", "tool result history is passed through")
 
 
-async def scenario_repair() -> None:
+async def test_repair() -> None:
     print("--- repair ladder ---")
     inner = ScriptedLLM([
         text_response('```json\n{"tool":"srv__lookup","arguments":}\n```', usage=Usage(total_tokens=2)),
@@ -250,7 +241,7 @@ async def scenario_repair() -> None:
     )
 
 
-async def scenario_semantic_errors() -> None:
+async def test_semantic_errors() -> None:
     print("--- parsed semantic errors become parse_error tool uses ---")
     inner = ScriptedLLM([text_response('{"tool":"srv__lookup","arguments":"bad"}')])
     wrapper = PromptedToolLLMClient(inner)
@@ -261,7 +252,7 @@ async def scenario_semantic_errors() -> None:
     check(tool_uses[0].parse_error is not None, "bad arguments carry parse_error")
 
 
-async def scenario_drop_in_loop() -> None:
+async def test_drop_in_loop() -> None:
     print("--- drop-in proof through run_agent ---")
     inner = ScriptedLLM([
         text_response(action_text("phase6")),
@@ -291,7 +282,7 @@ async def scenario_drop_in_loop() -> None:
     check(inner.tools_seen == [None, None], "inner prose model never saw native tools")
 
 
-async def scenario_factory_selection() -> None:
+async def test_factory_selection() -> None:
     print("--- factory selection by profile ---")
     import llm.client as client_module
 
@@ -334,16 +325,14 @@ async def scenario_factory_selection() -> None:
         client_module._PROVIDERS.update(original)
 
 
-def scenario_orchestrator_guardrail() -> None:
+def test_orchestrator_guardrail(tmp_path: Path) -> None:
     print("--- orchestrator prompted-only guardrail ---")
     from main import _try_build_orchestration
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        models_path = root / "models.yaml"
-        prompt_path = root / "orchestrator_prompt.md"
-        models_path.write_text(
-            """
+    models_path = tmp_path / "models.yaml"
+    prompt_path = tmp_path / "orchestrator_prompt.md"
+    models_path.write_text(
+        """
 models:
   prompted-control:
     provider: openai
@@ -352,40 +341,16 @@ models:
     supports_native_tools: false
     default: true
 """.lstrip(),
-            encoding="utf-8",
-        )
-        prompt_path.write_text("You route requests.", encoding="utf-8")
-        settings = SimpleNamespace(
-            orchestration_enabled=True,
-            models_config_path=str(models_path),
-            orchestrator_prompt_path=str(prompt_path),
-            orchestrator_model_id="",
-            llm_max_tokens=128,
-        )
-        registry, orchestrator = _try_build_orchestration(settings, FakeMCP())
+        encoding="utf-8",
+    )
+    prompt_path.write_text("You route requests.", encoding="utf-8")
+    settings = SimpleNamespace(
+        orchestration_enabled=True,
+        models_config_path=str(models_path),
+        orchestrator_prompt_path=str(prompt_path),
+        orchestrator_model_id="",
+        llm_max_tokens=128,
+    )
+    registry, orchestrator = _try_build_orchestration(settings, FakeMCP())
 
     check(registry is None and orchestrator is None, "prompted-only orchestrator disables orchestration")
-
-
-async def main() -> None:
-    scenario_render()
-    scenario_parser()
-    await scenario_wrapper_basic()
-    await scenario_passthroughs()
-    await scenario_repair()
-    await scenario_semantic_errors()
-    await scenario_drop_in_loop()
-    await scenario_factory_selection()
-    scenario_orchestrator_guardrail()
-
-    print()
-    if _failures:
-        print(f"PROMPTED TOOLS SMOKE TEST FAILED: {len(_failures)} check(s) failed:")
-        for failure in _failures:
-            print(f"  - {failure}")
-        raise SystemExit(1)
-    print("prompted tools smoke test complete: all checks passed.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

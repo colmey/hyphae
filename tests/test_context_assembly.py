@@ -32,16 +32,16 @@ manager drive assemble_context() and run_agent() directly.
                           the estimator when max_run_tokens is low; non-zero
                           provider usage is used as-is (never double-counted).
 
-Run from the project root:
-    ./runscript.sh tests/smoke_test_context_assembly.py
+Run from the project root with ``./runscript.sh -m pytest tests/test_context_assembly.py``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import logging
 from typing import Any
+
+import pytest
 
 from agent import DoneEvent, InMemorySessionStore, TextEvent, run_agent
 from agent.context import (
@@ -193,21 +193,18 @@ def protocol_ok(messages: list[Message]) -> bool:
 # Harness
 # ---------------------------------------------------------------------------
 
-_failures: list[str] = []
+pytestmark = pytest.mark.anyio
 
 
 def check(cond: bool, msg: str) -> None:
-    status = "PASS" if cond else "FAIL"
-    print(f"    [{status}] {msg}")
-    if not cond:
-        _failures.append(msg)
+    assert cond, msg
 
 
 def section(label: str) -> None:
     print(f"--- {label} ---")
 
 
-async def main() -> None:
+def test_token_estimators() -> None:
     # 1. Estimator
     section("estimator")
     check(estimate_text_tokens("") == 0, "empty text estimates 0")
@@ -229,7 +226,7 @@ async def main() -> None:
     check(estimate_tools_tokens([{"name": "srv__tool", "input_schema": {"type": "object"}}]) > 0,
           "tool schemas estimate non-zero")
 
-    # 2. Budget math
+def test_context_budget_math() -> None:
     section("budget math")
     budget = ContextBudget(context_window=1000, max_output_tokens=200, safety_margin=100)
     check(budget.input_budget == 700, "input_budget = window - max_output - margin")
@@ -239,8 +236,10 @@ async def main() -> None:
     est = estimate_message_tokens(history)
     check(est > 700, f"scripted history is over the test budget (est={est})")
 
-    # 3. Usage estimation
+def test_usage_estimation() -> None:
     section("usage estimation")
+    history = over_budget_history()
+    text_msg = Message.user("What is the launch date of the probe?")
     provider = Usage(input_tokens=10, output_tokens=5, total_tokens=15)
     check(estimate_usage_tokens(provider, messages=history) is provider,
           "non-zero provider usage passes through untouched")
@@ -258,8 +257,10 @@ async def main() -> None:
     check(estimate_usage_tokens(None, messages=[text_msg]).total_tokens > 0,
           "missing usage estimated non-zero")
 
-    # 4. naive
+async def test_naive_context_strategy() -> None:
     section("naive strategy")
+    budget = ContextBudget(context_window=1000, max_output_tokens=200, safety_margin=100)
+    history = over_budget_history()
     small = [Message.user("hi")]
     assembled = await assemble_context(small, budget=budget, strategy="naive")
     check(assembled.messages is small, "under budget: pass-through returns the same list")
@@ -275,8 +276,12 @@ async def main() -> None:
     unknown = await assemble_context(small, budget=budget, strategy="wat")
     check(unknown.strategy == "naive", "unknown strategy degrades to naive")
 
-    # 5. compaction
+async def test_compaction_strategy() -> None:
     section("compaction strategy")
+    budget = ContextBudget(context_window=1000, max_output_tokens=200, safety_margin=100)
+    history = over_budget_history()
+    est = estimate_message_tokens(history)
+    small = [Message.user("hi")]
     llm = RecordingLLM([], summary_text="- launch narrowed to 2031\n- landing site pending")
     under = await assemble_context(small, budget=budget, strategy="compaction", llm=llm)
     check(under.messages is small and not under.compacted,
@@ -313,15 +318,18 @@ async def main() -> None:
     check(assembled.estimated_input_tokens < est, "compacted view materially smaller")
     check(history == snapshot, "compaction never mutates the original history")
 
-    # 5b. history too short to compact degrades gracefully
+async def test_too_short_history_degrades_gracefully() -> None:
+    llm = RecordingLLM([])
     short = [Message.user("x" * 4000)]
     degraded = await assemble_context(
         short, budget=ContextBudget(context_window=100), strategy="compaction", llm=llm)
     check(degraded.messages is short and degraded.degraded_reason == "too_short_to_compact",
           "too-short over-budget history passes through with a reason")
 
-    # 6. Summarizer failure degrades to pass-through
+async def test_summarizer_failure_degrades_to_pass_through() -> None:
     section("summarizer failure")
+    budget = ContextBudget(context_window=1000, max_output_tokens=200, safety_margin=100)
+    history = over_budget_history()
     failing = RecordingLLM([], fail_summary=True)
     snapshot = copy.deepcopy(history)
     assembled = await assemble_context(
@@ -350,7 +358,7 @@ async def main() -> None:
     check(len(failing.loop_messages[0]) == len(session.messages) - 1,
           "degraded call sent the full history")
 
-    # 7. Loop integration: compacted view sent, session only grows by appends
+async def test_loop_uses_compacted_view_without_mutating_session_history() -> None:
     section("loop integration (compaction)")
     llm = RecordingLLM([text_response("the probe launches in 2031")])
     store = InMemorySessionStore()
@@ -383,7 +391,7 @@ async def main() -> None:
     answer = "".join(e.text for e in events if isinstance(e, TextEvent))
     check("2031" in answer, "answer text streamed normally")
 
-    # 8. Token-cap fallback via the estimator
+async def test_agent_token_cap_falls_back_to_estimator() -> None:
     section("token cap via estimator")
     llm = RecordingLLM([text_response("a zero-usage answer that is long enough to count")])
     store = InMemorySessionStore()
@@ -400,7 +408,7 @@ async def main() -> None:
           "zero-usage response trips budget_exceeded via the estimator")
     check(done.total_tokens > 0, "DoneEvent carries the estimated (non-zero) tokens")
 
-    # 8b. Non-zero provider usage is authoritative — no double counting
+async def test_nonzero_provider_usage_is_authoritative() -> None:
     llm = RecordingLLM([text_response("answer", usage=Usage(input_tokens=30, output_tokens=10,
                                                             total_tokens=40))])
     store = InMemorySessionStore()
@@ -412,15 +420,3 @@ async def main() -> None:
         events.append(event)
     done = next(e for e in events if isinstance(e, DoneEvent))
     check(done.total_tokens == 40, "provider usage used as-is (no estimate added)")
-
-    print()
-    if _failures:
-        print(f"CONTEXT-ASSEMBLY SMOKE TEST FAILED: {len(_failures)} check(s) failed:")
-        for f in _failures:
-            print(f"  - {f}")
-        raise SystemExit(1)
-    print("context-assembly smoke test complete: all checks passed.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

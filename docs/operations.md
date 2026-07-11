@@ -1,7 +1,7 @@
 # PyAiHarness — Operations & Extending
 
-How to run the harness, read its logs, diagnose failures, run the smoke
-tests, and extend it along its designed seams. Plus the known v1
+How to run the harness, read its logs, diagnose failures, run its tests,
+and extend it along its designed seams. Plus the known v1
 limitations and their extension paths.
 
 > See also: [README.md](README.md) (overview + quick start),
@@ -13,7 +13,7 @@ limitations and their extension paths.
 
 1. [Extending the Harness](#extending-the-harness)
 2. [Operations](#operations)
-3. [Smoke Tests](#smoke-tests)
+3. [Tests](#tests)
 4. [Eval Suite](#eval-suite)
 5. [Known Limitations](#known-limitations)
 
@@ -431,46 +431,35 @@ check if you need one.
 
 ---
 
-## Smoke Tests
+## Tests
 
-Each step of the build has a smoke test that exercises just that layer
-plus everything below it. Run them in order when bringing up a new
-environment or after major changes. All scripts live under `tests/` and
-are run via `./runscript.sh tests/<file>`.
-
-| Test                              | Tests                                                           |
-|-----------------------------------|-----------------------------------------------------------------|
-| `smoke_test_config.py`            | Settings + MCP config YAML parsing (no network)                 |
-| `smoke_test_mcp.py`               | MCP server connectivity, tool discovery (no LLM)                |
-| `smoke_test_llm.py`               | Gemini round-trips: tool-less, with-tools, manual full cycle    |
-| `smoke_test_session.py`           | Session mutation, save/get, isolation, TTL/max-size eviction, `SessionGuard` (no LLM, no MCP) |
-| `smoke_test_agent.py`             | Full agent loop via Python API (no HTTP)                        |
-| `smoke_test_reliability.py`       | Loop hardening with scripted fakes (no network): LLM retry/backoff, non-transient fast-fail, empty-response retry, truncation reason, tool timeout, tool-result clip |
-| `smoke_test_loop_intelligence.py` | Loop steering with scripted fakes (no network): final-iteration wrap-up, stall detection, consecutive-failure nudge |
-| `smoke_test_bounded_runs.py`      | Phase 1 bounded & safe runs with scripted fakes (no network): token cap, in-flight wall-clock cap, final-answer cap edges, zero-usage-trips-cap-via-estimator, tool-argument validation, no-progress abort + counter reset, mid-batch abort shape, `/v1` finish_reason mapping for the new reasons |
-| `smoke_test_context_assembly.py`  | Phase 3 context assembly with scripted fakes (no network): token estimator sanity, budget math, `naive` pass-through, compaction invariants (task header + recent tail verbatim, summary inserted, no orphaned tool pairs, session untouched), summarizer-failure degrade, estimated-usage token-cap fallback |
-| `smoke_test_capabilities.py`      | Phase 5 capability profiles with scripted fakes (no network): profile validation, sampling request pass-through, reasoning routing, malformed tool-call args becoming teaching errors, thinking-level request shaping |
-| `smoke_test_prompted_tools.py`    | Phase 6 prompted-tool adapter with scripted fakes (no network): render/parser, wrapper repair, factory selection, and drop-in proof through `run_agent()` |
-| `smoke_test_streaming.py`         | Phase 7 token streaming with scripted fakes (no network): native incremental deltas, ABC fallback, streamed tool dispatch, partial-stream error handling, and split `<think>` stripping |
-| `smoke_test_orchestrator.py`      | Orchestrator decisions: model selection, tool filtering, system prompt generation, thinking level (parsing + live), history block. Asserts `fallback_used=false`. |
-| `smoke_test_http.py`              | Full HTTP surface in-process (lifespan, plain-text `/chat`, session header, 400/404) |
-| `smoke_test_openai_api.py`        | OpenAI-compatible `/v1`: `/v1/models` shape, non-stream `chat.completion`, SSE chunk deltas + `[DONE]`, error JSON. Hermetic (scripted fake LLM, no backend). |
-| `smoke_test_event_stream.py`      | Native `POST /chat/stream`: live SSE event feed — reasoning/tool_call/tool_result/text/done in order on a tool turn, text+done on a plain turn, 400 on empty body, X-Session-Id header. Hermetic (scripted fake LLM + one-tool fake MCP, no backend). |
-| `smoke_test_tracing.py`           | Run tracing via `JSONLTracer`: one record per event, stable `run_id`, increasing step indices, timestamps + `latency_ms` on LLM/tool records, bytes serialize, no-op default path. Hermetic (scripted fake LLM + MCP, no backend). |
-| `smoke_test_concurrency.py`       | Concurrent `/chat`: distinct-session isolation + same-session 409 guard |
+Pytest is the canonical regression runner. Its default selection is hermetic: tests
+use scripted provider/MCP fakes, temporary configuration, and in-process ASGI wiring,
+so a normal run neither loads developer credentials nor contacts configured services.
 
 ```bash
-# Run them all
-for t in tests/smoke_test_*.py; do
-    echo "=== $t ===" && ./runscript.sh "$t" || break
-done
+./runscript.sh -m pytest
 ```
 
-These scripts are **not pytest** — they're standalone runnables that
-exit non-zero on failure. They're meant to be readable end-to-end as
-documentation of the harness's expected behavior. If we ever need
-fixtures, parameterization, or parallelism, that's the point to move
-to pytest.
+Configured-backend checks live behind an explicit `live` marker and are never part of
+that default signal. Select all live checks, or narrow them by capability:
+
+```bash
+./runscript.sh -m pytest -m live
+./runscript.sh -m pytest -m "live and model"
+./runscript.sh -m pytest -m "live and mcp"
+./runscript.sh -m pytest -m "live and http_server"
+```
+
+Live checks load `.env`/`Settings`, can contact configured MCP and model endpoints,
+and may spend model tokens. The `http_server` marker identifies checks of the fully
+configured FastAPI surface; these currently run the app in-process with its lifespan
+and do not require a separately launched Uvicorn process.
+
+All former smoke coverage is now pytest-native. Configured MCP, model, agent,
+orchestrator, HTTP, concurrency, and OpenAI-provider checks live in focused
+`test_*_live.py` modules with explicit markers. See `tests/README.md` for the
+current organization and focused commands.
 
 ---
 

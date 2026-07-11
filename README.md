@@ -53,8 +53,8 @@ Built on **FastAPI**, the official **`mcp`** Python SDK, and
   `models.yaml` is missing, the orchestrator's LLM call fails, or any
   config is bad, the harness drops back to legacy (default model + all
   tools) behavior. Requests keep working.
-- ✅ **Verified end-to-end** — a layered suite of standalone smoke tests, each
-  building on the one below it.
+- ✅ **Verified end-to-end** — a hermetic pytest regression suite plus explicitly
+  selected live model, MCP, and HTTP integration checks.
 
 ## Quick start
 
@@ -273,7 +273,7 @@ PyAiHarness/
 │   ├── models.yaml
 │   └── orchestrator_prompt.md
 │
-├── tests/                  # Smoke scripts (standalone, not pytest)
+├── tests/                  # Hermetic pytest suite + explicit live checks
 │
 ├── mcp_layer/              # MCP client + manager (renamed to avoid SDK shadow)
 ├── llm/                    # Provider-agnostic schemas + LLMClient ABC + registry
@@ -284,23 +284,24 @@ PyAiHarness/
 └── docs/                   # Reference docs (README router + architecture/api/configuration/operations)
 ```
 
-## Smoke tests
+## Tests
 
-Each layer of the build has its own smoke test. Run in order when
-bringing up a new environment:
+Run every hermetic regression test with one command. This path uses fakes and
+temporary configuration and does not contact configured model or MCP services:
 
 ```bash
-./runscript.sh tests/smoke_test_config.py        # config loading
-./runscript.sh tests/smoke_test_mcp.py           # MCP connectivity
-./runscript.sh tests/smoke_test_llm.py           # LLM round-trips
-./runscript.sh tests/smoke_test_session.py       # session store
-./runscript.sh tests/smoke_test_agent.py         # full agent loop (Python API)
-./runscript.sh tests/smoke_test_orchestrator.py  # orchestration decisions
-./runscript.sh tests/smoke_test_http.py          # full HTTP surface (in-process)
+./runscript.sh -m pytest
 ```
 
-The HTTP smoke test runs the full FastAPI app in-process via
-`httpx + asgi-lifespan` — no separate server needed.
+Configured-backend checks are marked `live` and excluded by default. Opt in when
+credentials and services are available (these checks may spend model tokens):
+
+```bash
+./runscript.sh -m pytest -m live
+```
+
+Configured integrations are native `test_*_live.py` modules. See
+[`tests/README.md`](tests/README.md) for marker selection and focused commands.
 
 ## Extending
 
@@ -348,7 +349,8 @@ point them at `docs/README.md` — it indexes the complete context.
 
 ## Status
 
-**Working prototype.** Layered smoke tests all green. Verified end-to-end
+**Working prototype.** Hermetic regression coverage is collected by pytest. The
+configured-backend suite has been verified end-to-end
 against real MCP servers (streamable-http and SSE), both a hosted Gemini 3
 backend and a local OpenAI-compatible Qwen with multi-step tool chaining, the
 orchestrator routing across model tiers, and concurrent requests (isolation +
@@ -359,15 +361,14 @@ path):
 
 - Sessions are in-memory by design (LibreChat holds durable context); the
   store is bounded by TTL + max-size so it can't grow without limit.
-- Streaming: `/v1/chat/completions` (SSE) and the native `/chat/stream` event
-  feed both stream the loop's events; plain `/chat` stays non-streaming. There
-  is no provider-level *token* streaming by design — `/chat/stream` emits one
-  `text` event per iteration (activity, not tokens).
+- Streaming: `/v1/chat/completions` forwards provider text deltas as token-level
+  SSE, while `/chat/stream` exposes the same core event stream as an activity feed;
+  plain `/chat` stays non-streaming.
 - No authentication on `/chat` or `/v1`. Relatedly, the JSONL trace
   (`TRACE_ENABLED`) captures full prompts/args/results by default — fine for a
   single-operator dev harness, but a metadata-only mode is future work once the
   harness is multi-tenant.
-- No request timeouts on the agent loop.
+- Configurable per-read LLM timeouts and absolute run deadlines bound stalled calls.
 - Tool execution is sequential.
 - Two LLM providers implemented (Gemini and OpenAI-compatible, each isolated
   in `llm/providers/`); Anthropic stubbed. Registry + ABC ready for more.

@@ -207,6 +207,26 @@ async def _complete_with_retry(
     return last_response
 
 
+async def _close_stream(stream: Any) -> None:
+    """Close a provider stream when its iterator exposes ``aclose``.
+
+    Stream cleanup is best-effort: a provider cleanup failure must not replace
+    the timeout, deadline, or provider exception that ended the attempt.
+    """
+    close = getattr(stream, "aclose", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise
+        logger.warning("LLM stream cleanup was cancelled", exc_info=True)
+    except Exception:  # noqa: BLE001 -- cleanup must preserve the primary outcome.
+        logger.warning("failed to close LLM stream", exc_info=True)
+
+
 def _backoff_delay(base_delay: float, attempt: int) -> float:
     """Jittered exponential backoff, capped."""
     return min(_RETRY_BACKOFF_CAP_SECONDS, base_delay * (2 ** attempt)) + random.uniform(
@@ -303,6 +323,28 @@ async def run_agent(
             if t is not None and t > 0
         ]
         return min(timeouts) if timeouts else None
+
+    def _stream_read_timeout() -> tuple[float | None, bool]:
+        """Return (seconds, deadline_limited) for the next provider read.
+
+        Unlike a whole-call timeout, the configured LLM timeout is an idle
+        bound that resets for every streamed read.  The run deadline remains
+        absolute and therefore shrinks between chunks.
+        """
+        remaining = _remaining_run_seconds()
+        if remaining is not None and remaining <= 0:
+            raise _RunDeadlineExceeded()
+
+        per_read = (
+            llm_timeout_seconds
+            if llm_timeout_seconds is not None and llm_timeout_seconds > 0
+            else None
+        )
+        if remaining is None:
+            return per_read, False
+        if per_read is None or remaining <= per_read:
+            return remaining, True
+        return per_read, False
 
     def _token_budget_exceeded() -> bool:
         return (
@@ -412,6 +454,7 @@ async def run_agent(
                     if _deadline_exceeded():
                         raise _RunDeadlineExceeded()
                     emitted_text = False
+                    chunks: AsyncIterator[Any] | None = None
                     try:
                         chunks = llm.stream(
                             messages=messages_for_llm,
@@ -420,19 +463,19 @@ async def run_agent(
                             max_tokens=max_tokens,
                             thinking_level=thinking_level,
                         )
-                        first_chunk = True
                         while True:
                             if _deadline_exceeded():
                                 raise _RunDeadlineExceeded()
                             try:
-                                if first_chunk:
-                                    timeout = _effective_timeout(llm_timeout_seconds)
-                                    if timeout and timeout > 0:
+                                timeout, deadline_limited = _stream_read_timeout()
+                                if timeout and timeout > 0:
+                                    try:
                                         async with asyncio.timeout(timeout):
                                             chunk = await anext(chunks)
-                                    else:
-                                        chunk = await anext(chunks)
-                                    first_chunk = False
+                                    except TimeoutError as exc:
+                                        if deadline_limited or _deadline_exceeded():
+                                            raise _RunDeadlineExceeded() from exc
+                                        raise
                                 else:
                                     chunk = await anext(chunks)
                             except StopAsyncIteration:
@@ -469,6 +512,8 @@ async def run_agent(
                             continue
                         break
                     except Exception as exc:
+                        if isinstance(exc, _RunDeadlineExceeded):
+                            raise
                         if _deadline_exceeded():
                             raise _RunDeadlineExceeded() from exc
                         transient = isinstance(exc, TimeoutError) or llm.is_transient_error(exc)
@@ -486,6 +531,9 @@ async def run_agent(
                             delay = min(delay, remaining)
                         await asyncio.sleep(delay)
                         continue
+                    finally:
+                        if chunks is not None:
+                            await _close_stream(chunks)
 
                 assert response is not None
             else:

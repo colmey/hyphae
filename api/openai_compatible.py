@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from agent import (
     DoneEvent,
+    ErrorEvent,
     SessionStore,
     TextEvent,
     ToolCallEvent,
@@ -57,6 +58,7 @@ class _ChatCompletionRequest(BaseModel):
 # Internal done_reason -> OpenAI finish_reason.
 _FINISH_REASONS = {
     "end_turn": "stop",
+    "empty": "stop",
     "truncated": "length",
     "max_tokens": "length",
     "max_iterations": "length",
@@ -67,7 +69,16 @@ _FINISH_REASONS = {
 
 
 def _finish_reason(done_reason: str) -> str:
-    return _FINISH_REASONS.get(done_reason, "stop")
+    try:
+        return _FINISH_REASONS[done_reason]
+    except KeyError as exc:
+        raise ValueError(f"unsupported completion reason: {done_reason!r}") from exc
+
+
+def _terminal_error_message(done_reason: str) -> str:
+    if done_reason == "llm_error":
+        return "LLM call failed"
+    return f"unsupported completion reason: {done_reason!r}"
 
 
 def _text_of(content: Any) -> str:
@@ -157,11 +168,16 @@ def _completion_id() -> str:
     return f"chatcmpl-{uuid.uuid4().hex}"
 
 
+def _error_payload(message: str, *, err_type: str) -> dict[str, Any]:
+    """Build the shared OpenAI error envelope for JSON and SSE responses."""
+    return {"error": {"message": message, "type": err_type, "param": None, "code": None}}
+
+
 def _error_response(message: str, *, status: int = 400, err_type: str = "invalid_request_error") -> JSONResponse:
-    """OpenAI-style error envelope."""
+    """Return an OpenAI-style error response."""
     return JSONResponse(
         status_code=status,
-        content={"error": {"message": message, "type": err_type, "param": None, "code": None}},
+        content=_error_payload(message, err_type=err_type),
     )
 
 
@@ -214,17 +230,26 @@ def _chunk(cid: str, created: int, model: str, delta: dict, finish_reason: str |
 
 
 async def _stream(model: str, runner: TurnRunner, turn: dict) -> AsyncIterator[dict]:
-    """SSE generator: one role frame, a content delta per TextEvent, a final
-    frame carrying finish_reason, then the `[DONE]` sentinel.
+    """Render core events as OpenAI SSE frames.
+
+    Successful streams end with a finish-reason chunk. Failed streams instead
+    emit one OpenAI error envelope. Both forms end with the `[DONE]` sentinel.
     """
     cid = _completion_id()
     created = int(time.time())
     yield {"data": json.dumps(_chunk(cid, created, model, {"role": "assistant"}, None))}
 
-    done_reason = "end_turn"
+    done_reason: str | None = None
+    failed = False
     pending_args: dict[str, Any] = {}  # tool_use_id -> input
+
+    def server_error(message: str) -> dict[str, str]:
+        return {"data": json.dumps(_error_payload(message, err_type="server_error"))}
+
     try:
         async for event in runner.events(**turn):
+            if failed:
+                continue
             if isinstance(event, TextEvent):
                 yield {"data": json.dumps(_chunk(cid, created, model, {"content": event.text}, None))}
             elif isinstance(event, ToolCallEvent):
@@ -232,14 +257,28 @@ async def _stream(model: str, runner: TurnRunner, turn: dict) -> AsyncIterator[d
             elif isinstance(event, ToolResultEvent):
                 block = _tool_details(event, pending_args.pop(event.id, None))
                 yield {"data": json.dumps(_chunk(cid, created, model, {"content": block}, None))}
+            elif isinstance(event, ErrorEvent):
+                failed = True
+                yield server_error(event.message)
             elif isinstance(event, DoneEvent):
                 done_reason = event.reason
+                try:
+                    _finish_reason(done_reason)
+                except ValueError:
+                    failed = True
+                    yield server_error(_terminal_error_message(done_reason))
     except Exception as e:  # noqa: BLE001 -- the stream is already open; surface, don't crash.
         logger.exception("error during /v1 stream")
-        err = {"error": {"message": str(e), "type": "server_error", "param": None, "code": None}}
-        yield {"data": json.dumps(err)}
+        if not failed:
+            failed = True
+            yield server_error(str(e) or "error during completion stream")
 
-    yield {"data": json.dumps(_chunk(cid, created, model, {}, _finish_reason(done_reason)))}
+    if not failed:
+        if done_reason is None:
+            failed = True
+            yield server_error("completion stream ended without a terminal event")
+        else:
+            yield {"data": json.dumps(_chunk(cid, created, model, {}, _finish_reason(done_reason)))}
     yield {"data": "[DONE]"}
 
 
@@ -294,6 +333,13 @@ async def chat_completions(
     except Exception as e:  # noqa: BLE001 -- never leak a stack trace to the client.
         logger.exception("error handling /v1/chat/completions")
         return _error_response(str(e), status=500, err_type="server_error")
+
+    try:
+        _finish_reason(done_reason)
+    except ValueError:
+        return _error_response(
+            _terminal_error_message(done_reason), status=500, err_type="server_error"
+        )
 
     return JSONResponse(_completion_body(answer, reported_model, usage, done_reason))
 

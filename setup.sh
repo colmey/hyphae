@@ -51,4 +51,5 @@ echo
 echo "Setup complete."
 echo "  1. Edit .env and set your API keys (e.g. GEMINI_API_KEY) and MCP URLs."
 echo "  2. Run the server:  ./runscript.sh -m uvicorn main:app --host 0.0.0.0 --port 8000"
-echo "  3. Or a smoke test: ./runscript.sh tests/smoke_test_config.py"
+echo "  3. Run hermetic tests: ./runscript.sh -m pytest"
+echo "     Live integrations: ./runscript.sh -m pytest -m live"

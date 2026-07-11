@@ -211,9 +211,10 @@ Content-Type: application/json
 }
 ```
 
-`finish_reason` maps from the loop's done reason: `end_turn → stop`;
+`finish_reason` maps from the loop's done reason: `end_turn`/`empty → stop`;
 `truncated`/`max_tokens`/`max_iterations`/`budget_exceeded`/`deadline_exceeded → length`;
-`no_progress → stop`; anything unmapped falls back to `stop`.
+`no_progress → stop`. Unrecoverable or unknown terminal reasons fail closed
+instead of being presented as a successful stop.
 Provider-extracted reasoning is not included in the `message.content` payload.
 
 **Response (200) — stream** (`stream: true`, OpenWebUI's default): a
@@ -236,7 +237,9 @@ data: [DONE]
 ```
 
 Reasoning events are skipped by the OpenAI-compatible stream mapper; only
-visible assistant text becomes `delta.content`.
+visible assistant text becomes `delta.content`. If the model fails after the
+stream opens, any prior content remains visible, followed by one OpenAI error
+envelope and `[DONE]`; no successful `finish_reason` frame is emitted.
 
 **Tool-call visibility (stream only).** OpenAI clients render only
 `delta.content`, so completed server-side tool calls are folded into collapsible
@@ -248,8 +251,10 @@ only.
 {"error": {"message": "'messages' must be a non-empty array", "type": "invalid_request_error", "param": null, "code": null}}
 ```
 
-Bad input returns **400**; unexpected internal failure returns **500** with
-`type: "server_error"`. Streaming errors are emitted as SSE error frames.
+Bad input returns **400**; unexpected internal failure, including an
+unrecoverable non-streaming LLM call, returns **500** with
+`type: "server_error"`. Streaming errors are emitted in-band as SSE error
+frames and still terminate with `[DONE]`.
 
 ## `GET /v1/models`
 

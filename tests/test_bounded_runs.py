@@ -1,10 +1,7 @@
-"""
-Smoke test for Phase 1 bounded & safe runs: token cap, wall-clock cap,
+"""Pytest coverage for bounded and safe agent runs: token cap, wall-clock cap,
 tool-argument validation, and the no-progress abort threshold.
 
-Like smoke_test_reliability.py / smoke_test_loop_intelligence.py, this hits
-no network: scripted fake LLMClient + scriptable fake MCP manager drive
-run_agent directly.
+Scripted LLM and MCP fakes drive ``run_agent`` without network access.
 
   1. Token cap            - cumulative usage crosses max_run_tokens -> done
                              "budget_exceeded" with the partial text already
@@ -28,8 +25,6 @@ run_agent directly.
   6. /v1 finish_reason mapping - the three new done_reasons map to a sane,
                              non-None OpenAI finish_reason.
 
-Run from the project root:
-    ./runscript.sh tests/smoke_test_bounded_runs.py
 """
 
 from __future__ import annotations
@@ -37,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+
+import pytest
 
 from agent import (
     DoneEvent,
@@ -52,6 +49,7 @@ from llm.schemas import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlo
 from mcp_layer.client import ToolCallResult
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s")
+pytestmark = pytest.mark.anyio
 
 
 # ---------------------------------------------------------------------------
@@ -141,14 +139,8 @@ def multi_tool_response(args: list[dict[str, Any]]) -> AssistantMessage:
 # Harness
 # ---------------------------------------------------------------------------
 
-_failures: list[str] = []
-
-
 def check(cond: bool, msg: str) -> None:
-    status = "PASS" if cond else "FAIL"
-    print(f"    [{status}] {msg}")
-    if not cond:
-        _failures.append(msg)
+    assert cond, msg
 
 
 async def collect(label: str, llm: LLMClient, mcp: Any, **kwargs: Any) -> list[Any]:
@@ -197,7 +189,7 @@ def tool_calls(events: list[Any]) -> list[ToolCallEvent]:
     return [e for e in events if isinstance(e, ToolCallEvent)]
 
 
-async def main() -> None:
+async def test_token_cap_preserves_partial_text() -> None:
     # 1. Token cap
     llm = ScriptedLLM([
         text_and_tool_response("partial answer", {"q": "x"}, usage=Usage(total_tokens=40)),
@@ -208,14 +200,14 @@ async def main() -> None:
     check(all_text(events) == "partial answer", "partial text survived the cap")
     check(llm.calls == 1, f"no second LLM call after the cap tripped (got {llm.calls})")
 
-    # 2. Wall-clock cap
+async def test_wall_clock_cap_prevents_second_model_call() -> None:
     llm = ScriptedLLM([tool_call_response({"q": "x"}), text_response("done")], delay=0.05)
     mcp = ScriptedMCP([("tool ok", False)], schema=_QTOOL_SCHEMA)
     events = await collect("wall-clock cap", llm, mcp, max_run_seconds=0.03, max_iterations=10)
     check(done_reason(events) == "deadline_exceeded", "done_reason == deadline_exceeded")
     check(llm.calls == 1, f"only the first (slow) LLM call ran (got {llm.calls})")
 
-    # 2b. Final no-tool answers that cross the token cap still report budget_exceeded
+async def test_final_answer_crossing_token_cap_reports_budget_exceeded() -> None:
     llm = ScriptedLLM([
         AssistantMessage(
             content=[TextBlock(text="final partial")],
@@ -230,7 +222,7 @@ async def main() -> None:
           "final answer crossing token cap reports budget_exceeded")
     check(all_text(events) == "final partial", "final partial text survived token cap")
 
-    # 2c. A no-tool answer that runs past the wall clock reports deadline_exceeded
+async def test_final_answer_crossing_deadline_is_not_streamed() -> None:
     llm = ScriptedLLM([text_response("late final")], delay=0.05)
     mcp = ScriptedMCP([], schema=_QTOOL_SCHEMA)
     events = await collect("final-answer deadline cap", llm, mcp,
@@ -239,7 +231,7 @@ async def main() -> None:
           "final answer crossing wall clock reports deadline_exceeded")
     check(all_text(events) == "", "timed-out LLM answer was not streamed")
 
-    # 2d. A slow tool that exhausts remaining run time ends the run, not just the tool
+async def test_slow_tool_exhausting_deadline_ends_run() -> None:
     llm = ScriptedLLM([tool_call_response({"q": "x"}), text_response("done")])
     mcp = ScriptedMCP([("tool ok", False)], schema=_QTOOL_SCHEMA)
     original_call_tool = mcp.call_tool
@@ -258,7 +250,7 @@ async def main() -> None:
     check(len(tool_results(events)) == 1 and tool_results(events)[0].is_error,
           "slow tool got a synthetic error result")
 
-    # 3. Zero usage trips the token cap via the local estimator (Phase 3)
+async def test_zero_usage_trips_token_cap_via_estimator() -> None:
     llm = ScriptedLLM([text_response("an estimated answer long enough to count as tokens")])
     mcp = ScriptedMCP([], schema=_QTOOL_SCHEMA)
     events = await collect("zero usage trips token cap via estimator", llm, mcp,
@@ -266,13 +258,13 @@ async def main() -> None:
     check(done_reason(events) == "budget_exceeded",
           "all-zero usage trips budget_exceeded via the estimator")
 
-    # 3b. Without a cap, the estimate changes nothing about the run
+async def test_zero_usage_without_cap_ends_normally() -> None:
     llm = ScriptedLLM([text_response("hi")])
     mcp = ScriptedMCP([], schema=_QTOOL_SCHEMA)
     events = await collect("zero usage without a cap", llm, mcp, max_iterations=10)
     check(done_reason(events) == "end_turn", "no cap set -> zero usage run ends normally")
 
-    # 4. Tool-argument validation
+async def test_invalid_tool_arguments_are_not_dispatched() -> None:
     llm = ScriptedLLM([
         tool_call_response({"q": 123}, call_id="call_1"),   # wrong type for "q"
         tool_call_response({"q": "ok"}, call_id="call_2"),  # valid
@@ -288,7 +280,7 @@ async def main() -> None:
     check(not trs[1].is_error, "the valid call executed normally")
     check(done_reason(events) == "end_turn", "run completed normally after the correction")
 
-    # 5. No-progress abort: N consecutive failures end the run
+async def test_consecutive_tool_failures_abort_no_progress() -> None:
     llm = ScriptedLLM([tool_call_response({"q": str(i)}, call_id=f"call_{i}") for i in range(1, 6)])
     mcp = ScriptedMCP([("boom", True)] * 5, schema=_QTOOL_SCHEMA)
     events = await collect("no-progress abort", llm, mcp,
@@ -297,7 +289,7 @@ async def main() -> None:
     check(llm.calls == 5, f"no 6th LLM call after the abort threshold (got {llm.calls})")
     check(mcp.call_count == 5, f"exactly 5 tool calls ran (got {mcp.call_count})")
 
-    # 5b. A success in between resets the counter -- no abort
+async def test_success_resets_tool_failure_counter() -> None:
     llm = ScriptedLLM([
         tool_call_response({"q": "1"}, call_id="call_1"),
         tool_call_response({"q": "2"}, call_id="call_2"),
@@ -315,7 +307,7 @@ async def main() -> None:
     check(done_reason(events) == "end_turn", "run completed; reset streak never hit the threshold")
     check(mcp.call_count == 5, f"all 5 tool calls ran (got {mcp.call_count})")
 
-    # 5c. Mid-batch abort preserves provider tool-call/tool-result pairing
+async def test_mid_batch_abort_preserves_tool_call_result_pairing() -> None:
     llm = ScriptedLLM([multi_tool_response([{"q": "1"}, {"q": "2"}, {"q": "3"}])])
     mcp = ScriptedMCP([("boom", True)], schema=_QTOOL_SCHEMA)
     events, session = await collect_with_session("mid-batch no-progress shape", llm, mcp,
@@ -332,21 +324,8 @@ async def main() -> None:
           f"all 3 tool results persisted (got {len(saved_tool_results)})")
     check(mcp.call_count == 1, f"only the first failing tool reached MCP (got {mcp.call_count})")
 
-    # 6. /v1 finish_reason mapping for the three new done_reasons
+@pytest.mark.parametrize("reason", ["budget_exceeded", "deadline_exceeded", "no_progress"])
+def test_bounded_done_reasons_map_to_openai_finish_reason(reason: str) -> None:
     from api.openai_compatible import _finish_reason
-    for reason in ("budget_exceeded", "deadline_exceeded", "no_progress"):
-        mapped = _finish_reason(reason)
-        check(mapped is not None and isinstance(mapped, str) and mapped != "",
-              f"{reason} maps to a non-empty finish_reason (got {mapped!r})")
-
-    print()
-    if _failures:
-        print(f"BOUNDED-RUNS SMOKE TEST FAILED: {len(_failures)} check(s) failed:")
-        for f in _failures:
-            print(f"  - {f}")
-        raise SystemExit(1)
-    print("bounded-runs smoke test complete: all checks passed.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    mapped = _finish_reason(reason)
+    assert isinstance(mapped, str) and mapped

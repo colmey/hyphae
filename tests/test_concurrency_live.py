@@ -1,5 +1,4 @@
-"""
-Smoke test for concurrency hardening.
+"""Live pytest coverage for configured-request concurrency hardening.
 
 Drives the live FastAPI app in-process (like smoke_test_http.py) to prove the
 two guarantees the concurrency work added:
@@ -15,22 +14,21 @@ Scenarios:
 Makes real LLM + MCP calls, so it needs the same bootstrap as the other
 HTTP smoke tests.
 
-Run from the project root:
-    ./runscript.sh smoke_test_concurrency.py
+Run explicitly with ``./runscript.sh -m pytest -m "live and http_server"``.
 """
 
 from __future__ import annotations
 
-from bootstrap import load_secrets
-load_secrets()
-
 import asyncio
+import bootstrap
 import logging
 
 import httpx
+import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport
 
+from harness_config import reset_settings
 from main import app
 
 
@@ -38,6 +36,13 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
 )
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.model,
+    pytest.mark.mcp,
+    pytest.mark.http_server,
+    pytest.mark.anyio,
+]
 
 
 # Tool-free prompts: each resolves in a single turn (user + assistant), so an
@@ -55,7 +60,9 @@ DISTINCT_PROMPTS = [
 SAME_SESSION_FANOUT = 4
 
 
-async def main() -> None:
+async def test_configured_request_concurrency() -> None:
+    bootstrap.load_secrets()
+    reset_settings()
     transport = ASGITransport(app=app)
     base_url = "http://harness.local"
 
@@ -134,7 +141,3 @@ async def main() -> None:
             print("  same-session overlap correctly rejected with 409.\n")
 
             print("concurrency smoke test passed.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

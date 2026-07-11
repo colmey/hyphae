@@ -1,5 +1,4 @@
-"""
-Smoke test for step 5: the agent loop.
+"""Live pytest coverage for the configured end-to-end agent loop.
 
 This is the first true end-to-end test. Real LLM, real MCP, real session.
 The only thing missing is the FastAPI surface (step 6) and HTTP request
@@ -16,18 +15,16 @@ Three scenarios:
 We run each scenario with both the streaming-style consumer (iterating the
 generator and reacting to events) and verify the final session state.
 
-Run from the project root:
-    ./runscript.sh smoke_test_agent.py
+Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 """
 
 from __future__ import annotations
 
-from bootstrap import load_secrets
-load_secrets()
-
-import asyncio
+import bootstrap
 import logging
 from typing import Any
+
+import pytest
 
 from agent import (
     DoneEvent,
@@ -38,7 +35,7 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from harness_config import get_settings, load_mcp_config
+from harness_config import get_settings, load_mcp_config, reset_settings
 from llm import build_llm_client
 from mcp_layer import MCPManager
 
@@ -47,6 +44,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
 )
+pytestmark = [pytest.mark.live, pytest.mark.model, pytest.mark.mcp, pytest.mark.anyio]
 
 
 SYSTEM_PROMPT = (
@@ -122,7 +120,9 @@ async def run_scenario(
     print()
 
 
-async def main() -> None:
+async def test_configured_agent_scenarios() -> None:
+    bootstrap.load_secrets()
+    reset_settings()
     settings = get_settings()
     print(f"using provider={settings.llm_provider} model={settings.llm_model}")
     print()
@@ -164,7 +164,3 @@ async def main() -> None:
         print(f"store holds {len(store)} session(s); step 5 smoke test complete.")
     finally:
         await mcp.shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

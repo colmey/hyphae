@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, AsyncIterator
 
 from llm.client import LLMClient
 from llm.schemas import (
@@ -20,7 +20,10 @@ from llm.schemas import (
     Message,
     ModelProfile,
     Role,
+    StreamChunk,
+    StreamEnd,
     TextBlock,
+    TextDelta,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
@@ -55,6 +58,95 @@ def _split_reasoning(text: str | None) -> tuple[str | None, str]:
     return reasoning, text[m.end():]
 
 
+class _ReasoningStreamStripper:
+    """Incrementally strip one leading <think>...</think> block."""
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._state = "pending"
+        self._pending = ""
+        self._reasoning_parts: list[str] = []
+        self._raw_prefix = ""
+
+    @property
+    def reasoning(self) -> str | None:
+        text = "".join(self._reasoning_parts).strip()
+        return text or None
+
+    def feed(self, piece: str) -> str:
+        if not piece:
+            return ""
+        if self._state == "pass":
+            return piece
+        self._raw_prefix += piece
+        if self._state == "pending":
+            return self._feed_pending(piece)
+        if self._state == "reasoning":
+            return self._feed_reasoning(piece)
+        if self._state == "after_reasoning":
+            return self._feed_after_reasoning(piece)
+        return piece
+
+    def finish(self) -> str:
+        """Flush buffered visible text if the stream ended before a think decision."""
+        if self._state == "pending":
+            out = self._pending
+            self._pending = ""
+            self._state = "pass"
+            return out
+        if self._state == "reasoning":
+            out = self._raw_prefix
+            self._pending = ""
+            self._reasoning_parts.clear()
+            self._state = "pass"
+            return out
+        return ""
+
+    def _feed_pending(self, piece: str) -> str:
+        self._pending += piece
+        candidate = self._pending.lstrip()
+
+        if not candidate:
+            return ""
+        if candidate.startswith(self._OPEN):
+            rest = candidate[len(self._OPEN):]
+            self._pending = ""
+            self._state = "reasoning"
+            return self._feed_reasoning(rest)
+        if self._OPEN.startswith(candidate):
+            return ""
+
+        out = self._pending
+        self._pending = ""
+        self._state = "pass"
+        return out
+
+    def _feed_reasoning(self, piece: str) -> str:
+        self._pending += piece
+        close_at = self._pending.find(self._CLOSE)
+        if close_at == -1:
+            keep = max(0, len(self._pending) - (len(self._CLOSE) - 1))
+            if keep:
+                self._reasoning_parts.append(self._pending[:keep])
+                self._pending = self._pending[keep:]
+            return ""
+
+        self._reasoning_parts.append(self._pending[:close_at])
+        rest = self._pending[close_at + len(self._CLOSE):]
+        self._pending = ""
+        self._state = "after_reasoning"
+        return self._feed_after_reasoning(rest)
+
+    def _feed_after_reasoning(self, piece: str) -> str:
+        visible = piece.lstrip()
+        if not visible:
+            return ""
+        self._state = "pass"
+        return visible
+
+
 class OpenAILLMClient(LLMClient):
     """LLMClient implementation backed by the openai AsyncOpenAI SDK."""
 
@@ -84,6 +176,134 @@ class OpenAILLMClient(LLMClient):
         response_schema: type | None = None,
         thinking_level: str | None = None,
     ) -> AssistantMessage:
+        request = self._build_request(
+            messages=messages,
+            tools=tools,
+            system=system,
+            max_tokens=max_tokens,
+            response_schema=response_schema,
+            thinking_level=thinking_level,
+        )
+
+        logger.debug(
+            "openai complete: model=%s messages=%d tools=%d schema=%s",
+            self._model, len(request["messages"]), len(request.get("tools") or []),
+            response_schema.__name__ if response_schema else None,
+        )
+
+        response = await self._client.chat.completions.create(**request)
+        return self._from_openai_response(response)
+
+    async def stream(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+        thinking_level: str | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        request = self._build_request(
+            messages=messages,
+            tools=tools,
+            system=system,
+            max_tokens=max_tokens,
+            response_schema=None,
+            thinking_level=thinking_level,
+        )
+        request["stream"] = True
+        request["stream_options"] = {"include_usage": True}
+
+        logger.debug(
+            "openai stream: model=%s messages=%d tools=%d",
+            self._model, len(request["messages"]), len(request.get("tools") or []),
+        )
+
+        stripper = _ReasoningStreamStripper()
+        text_parts: list[str] = []
+        tool_accs: dict[int, dict[str, str]] = {}
+        finish_reason: Any = None
+        raw_usage: Any = None
+        response_model: str | None = None
+
+        sdk_stream = await self._client.chat.completions.create(**request)
+        async for chunk in sdk_stream:
+            response_model = getattr(chunk, "model", None) or response_model
+            if getattr(chunk, "usage", None) is not None:
+                raw_usage = chunk.usage
+
+            for choice in getattr(chunk, "choices", None) or []:
+                if getattr(choice, "finish_reason", None) is not None:
+                    finish_reason = choice.finish_reason
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+
+                piece = getattr(delta, "content", None)
+                if piece:
+                    visible = stripper.feed(piece)
+                    if visible:
+                        text_parts.append(visible)
+                        yield TextDelta(text=visible)
+
+                for tc in getattr(delta, "tool_calls", None) or []:
+                    index = int(getattr(tc, "index", 0) or 0)
+                    acc = tool_accs.setdefault(index, {"id": "", "name": "", "args": ""})
+                    if getattr(tc, "id", None):
+                        acc["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn and getattr(fn, "name", None):
+                        acc["name"] = fn.name
+                    if fn and getattr(fn, "arguments", None):
+                        acc["args"] += fn.arguments
+
+        tail = stripper.finish()
+        if tail:
+            text_parts.append(tail)
+            yield TextDelta(text=tail)
+
+        blocks: list[Any] = []
+        full_text = "".join(text_parts)
+        if full_text:
+            blocks.append(TextBlock(text=full_text))
+
+        for index in sorted(tool_accs):
+            acc = tool_accs[index]
+            raw_args = acc["args"]
+            try:
+                args = json.loads(raw_args) if raw_args else {}
+                parse_error = None
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("could not parse streamed tool arguments: %r", raw_args)
+                args = {}
+                parse_error = f"arguments were not valid JSON: {raw_args!r}"
+            blocks.append(
+                ToolUseBlock(
+                    id=acc["id"],
+                    name=acc["name"],
+                    input=args,
+                    parse_error=parse_error,
+                )
+            )
+
+        yield StreamEnd(
+            message=AssistantMessage(
+                content=blocks,
+                stop_reason=_canonical_stop_reason(finish_reason),
+                model=response_model or self._model,
+                usage=self._usage_from_raw(raw_usage),
+                reasoning=stripper.reasoning,
+            )
+        )
+
+    def _build_request(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None,
+        system: str | None,
+        max_tokens: int | None,
+        response_schema: type | None,
+        thinking_level: str | None,
+    ) -> dict[str, Any]:
         oai_messages = self._to_openai_messages(messages, system)
         oai_tools = self._to_openai_tools(tools) if tools else None
 
@@ -126,14 +346,7 @@ class OpenAILLMClient(LLMClient):
                 )
                 self._warned_inert_thinking = True
 
-        logger.debug(
-            "openai complete: model=%s messages=%d tools=%d schema=%s",
-            self._model, len(oai_messages), len(oai_tools or []),
-            response_schema.__name__ if response_schema else None,
-        )
-
-        response = await self._client.chat.completions.create(**request)
-        return self._from_openai_response(response)
+        return request
 
     _RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
@@ -299,7 +512,10 @@ class OpenAILLMClient(LLMClient):
 
     def _usage_from_response(self, response: Any) -> Usage:
         """Map OpenAI usage onto our provider-agnostic Usage."""
-        u = getattr(response, "usage", None)
+        return self._usage_from_raw(getattr(response, "usage", None))
+
+    def _usage_from_raw(self, u: Any) -> Usage:
+        """Map an OpenAI usage object onto our provider-agnostic Usage."""
         if u is None:
             return Usage()
 

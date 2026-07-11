@@ -100,6 +100,7 @@ async def _turn_events(
     registry: Optional[LLMRegistry],
     policy: Optional[ToolPolicy] = None,
     tracer: Optional[Tracer] = None,
+    stream: bool = False,
 ) -> AsyncIterator[Event]:
     """Run one user turn end to end, yielding the loop's events as they happen.
 
@@ -171,6 +172,7 @@ async def _turn_events(
                 policy=policy,
                 tracer=tracer,
                 run_id=run_id,
+                stream=stream,
             ):
                 if isinstance(event, DoneEvent):
                     rlog.info(
@@ -229,6 +231,7 @@ class TurnRunner:
         system_override: str | None = None,
         preferences: ToolPreferences | None = None,
         model_id: str | None = None,
+        stream: bool = False,
     ) -> AsyncIterator[Event]:
         """Run one turn, yielding the loop's events live. See `_turn_events`."""
         return _turn_events(
@@ -246,6 +249,7 @@ class TurnRunner:
             registry=self.registry,
             policy=self.policy,
             tracer=self.tracer,
+            stream=stream,
         )
 
     async def run(
@@ -265,5 +269,6 @@ class TurnRunner:
                 system_override=system_override,
                 preferences=preferences,
                 model_id=model_id,
+                stream=False,
             )
         )

@@ -278,7 +278,7 @@ speaks:
 `llm/client.py` — the abstraction + the provider registry, and **nothing
 SDK-specific** (importing it never pulls in a provider SDK):
 
-- **`LLMClient`** ABC with one method:
+- **`LLMClient`** ABC with two call modes:
   ```python
   async complete(
       messages: list[Message],
@@ -288,7 +288,25 @@ SDK-specific** (importing it never pulls in a provider SDK):
       response_schema: type | None = None,
       thinking_level: str | None = None,
   ) -> AssistantMessage
+
+  async stream(
+      messages: list[Message],
+      tools: list[dict] | None = None,
+      system: str | None = None,
+      max_tokens: int | None = None,
+      thinking_level: str | None = None,
+  ) -> AsyncIterator[StreamChunk]
   ```
+  `complete()` is the canonical completed-turn API and remains the path for
+  structured-output calls such as orchestration. `stream()` is an optional
+  token-streaming call mode for ordinary agent turns; the ABC fallback calls
+  `complete()`, emits each final text block as a coarse `TextDelta`, then
+  emits `StreamEnd(AssistantMessage)`. Native streaming providers override it.
+- **`StreamChunk`** is provider-agnostic and SDK-free:
+  `TextDelta(text=...)` carries visible assistant text during generation, and
+  `StreamEnd(message=...)` carries the fully assembled `AssistantMessage`.
+  The agent loop streams deltas to callers immediately, then reuses the normal
+  assistant/session/usage/reasoning/tool tail once `StreamEnd` arrives.
 - **`_PROVIDERS`** — the single source of truth mapping a provider name onto a
   builder. Each builder imports its provider module *lazily* (inside the
   function), so the ABC can be imported without dragging in any SDK, and each
@@ -303,7 +321,28 @@ SDK-specific** (importing it never pulls in a provider SDK):
   variant. Takes a `ModelEntry` (from `models.yaml`), resolves its
   `ModelProfile`, and pulls the API key by `entry.provider` (not by
   `settings.llm_provider`), so one process can hold clients for multiple
-  providers simultaneously. Used by `LLMRegistry`.
+  providers simultaneously. Used by `LLMRegistry`. If the profile declares
+  `supports_native_tools: false`, this factory wraps the provider client in
+  `PromptedToolLLMClient`; omitted or `true` profiles are not wrapped.
+
+`llm/prompted_tools.py` — the prompted-tool dialect adapter for weak/prose
+models:
+
+- Renders the already-filtered tool list into compact system-prompt text:
+  tool name, one-line description, and compressed JSON schema.
+- Calls the wrapped provider with `tools=None`, so endpoints without native
+  tool calling see only ordinary text.
+- Parses one fenced or whole-response JSON action from visible prose and
+  returns a normal `ToolUseBlock`; final prose remains normal `TextBlock`
+  content.
+- Bad JSON gets one repair prompt. Parsed semantic errors such as an unknown
+  tool or non-object arguments become `ToolUseBlock(parse_error=...)`, which
+  the unchanged loop turns into a model-facing `is_error` result instead of
+  executing `{}`.
+
+This is the second-dialect drop-in proof: native function calls and prompted
+JSON actions differ at the model-interface edge, but both normalize to the
+same `AssistantMessage` contract before the agent loop sees them.
 
 **Adding a provider is two steps:** add `llm/providers/<name>.py` implementing
 `LLMClient`, then add one `_PROVIDERS` entry. The loop, orchestrator, session
@@ -706,6 +745,13 @@ OrchestrationDecision(
 
 The fallback preserves pre-orchestrator behavior while `fallback_used` makes the
 degradation observable.
+
+Startup also rejects a prompted-only orchestrator control model. If
+`ORCHESTRATOR_MODEL_ID` or the registry default points to a row with
+`supports_native_tools: false`, `_try_build_orchestration()` logs a warning and
+runs in legacy mode. Prompted-tool models may still be selected for downstream
+agent turns; they are not supported as the structured-output control model in
+this v1 adapter.
 
 **The system-prompt override.** The route, not the orchestrator,
 implements precedence: if the request sets `commands.system`, that wins

@@ -287,7 +287,7 @@ async def chat_completions(
     )
 
     if req.stream:
-        return EventSourceResponse(_stream(reported_model, runner, turn))
+        return EventSourceResponse(_stream(reported_model, runner, {**turn, "stream": True}))
 
     try:
         answer, done_reason, usage = await runner.run(**turn)

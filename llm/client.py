@@ -32,9 +32,9 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
-from .schemas import AssistantMessage, Message
+from .schemas import AssistantMessage, Message, StreamChunk, StreamEnd, TextBlock, TextDelta
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,32 @@ class LLMClient(ABC):
         override to add SDK-specific cases (e.g. HTTP 429/5xx).
         """
         return isinstance(exc, (TimeoutError, ConnectionError))
+
+    async def stream(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+        thinking_level: str | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream one completion turn.
+
+        Default implementation for complete-only providers: run `complete()`,
+        emit any text blocks coarsely, then return the assembled message.
+        Structured-output calls intentionally stay on `complete()`.
+        """
+        msg = await self.complete(
+            messages=messages,
+            tools=tools,
+            system=system,
+            max_tokens=max_tokens,
+            thinking_level=thinking_level,
+        )
+        for block in msg.content:
+            if isinstance(block, TextBlock) and block.text:
+                yield TextDelta(text=block.text)
+        yield StreamEnd(message=msg)
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +215,15 @@ def build_llm_client_from_entry(entry: Any, settings: Any) -> LLMClient:
     to avoid an import-time dependency on orchestrator.schemas.
     """
     profile = entry.to_profile()
-    return _build_client(
+    client = _build_client(
         entry.provider,
         model=entry.model,
         max_tokens=entry.max_tokens or settings.llm_max_tokens,
         settings=settings,
         profile=profile,
     )
+    if profile.supports_native_tools is False:
+        from llm.prompted_tools import PromptedToolLLMClient
+
+        client = PromptedToolLLMClient(client, model=entry.model)
+    return client

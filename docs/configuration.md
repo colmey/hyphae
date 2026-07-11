@@ -171,9 +171,12 @@ Both models are **active** — the orchestrator routes between them (cheap
   (a plain size, no vendor branching) — set it accurately for small local
   models, where overflow is a hard failure.
 - `supports_native_tools` is optional and defaults to `true`. It declares
-  whether the served endpoint supports native tool/function calling. Phase 5
-  validates and carries the flag in the model profile; prompted-tool fallback
-  for `false` entries is intentionally deferred to Phase 6.
+  whether the served endpoint supports native tool/function calling. When set
+  to `false`, `build_llm_client_from_entry()` wraps the provider client with
+  the prompted-tool adapter: tools are rendered into the system prompt, the
+  provider is called with `tools=None`, and one JSON action from prose is
+  normalized back into a normal `ToolUseBlock`. Omitted or `true` keeps native
+  tool behavior unchanged.
 - `thinking` is optional and defaults to `none`. Values:
   `none` means the provider has no request-time thinking knob,
   `hint-param` means the provider can pass the orchestrator's
@@ -188,6 +191,10 @@ Both models are **active** — the orchestrator routes between them (cheap
 - `default: true` on **exactly one** entry. The default model is used
   by the orchestrator itself (unless `ORCHESTRATOR_MODEL_ID` overrides)
   and is the safe fallback when orchestration fails.
+  The orchestrator control model must not be prompted-only: if the resolved
+  orchestrator row has `supports_native_tools: false`, startup logs a warning
+  and runs in legacy no-orchestration mode. Prompted-tool models can still be
+  selected for downstream agent turns.
 - Model IDs must be `[A-Za-z0-9_.\-]+` (clean keys for logging and
   routing).
 

@@ -218,9 +218,12 @@ Provider-extracted reasoning is not included in the `message.content` payload.
 
 **Response (200) — stream** (`stream: true`, OpenWebUI's default): a
 `text/event-stream` of `chat.completion.chunk` frames, terminated by
-`data: [DONE]`. The first frame carries `delta.role = "assistant"`, each
-subsequent frame maps one model text block to a `delta.content`, and the final
-frame carries `finish_reason`:
+`data: [DONE]`. For providers with native streaming, `/v1` emits genuinely
+incremental model text as it arrives. Providers without native streaming still
+work through the `LLMClient.stream()` fallback, but their text arrives as final
+coarse blocks. The first frame carries `delta.role = "assistant"`, each visible
+text delta becomes `delta.content`, and the final frame carries
+`finish_reason`:
 
 ```
 data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}

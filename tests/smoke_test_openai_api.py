@@ -24,7 +24,7 @@ load_secrets()
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 from httpx import ASGITransport
@@ -32,7 +32,7 @@ from httpx import ASGITransport
 from agent import InMemorySessionStore, SessionGuard
 from harness_config import get_settings
 from llm.client import LLMClient
-from llm.schemas import AssistantMessage, TextBlock, Usage
+from llm.schemas import AssistantMessage, StreamChunk, StreamEnd, TextBlock, TextDelta, Usage
 from main import app
 from orchestrator import LLMRegistry, load_models_config
 
@@ -42,14 +42,32 @@ from orchestrator import LLMRegistry, load_models_config
 class FakeLLM(LLMClient):
     """Returns a fixed two-block answer, no tool calls -> a clean end_turn."""
 
+    def __init__(self) -> None:
+        self.complete_calls = 0
+        self.stream_calls = 0
+
     async def complete(self, messages, tools=None, system=None, max_tokens=None,
                        response_schema=None, thinking_level=None) -> AssistantMessage:
+        self.complete_calls += 1
         return AssistantMessage(
             content=[TextBlock(text="Hello"), TextBlock(text=", world")],
             stop_reason="end_turn",
             model="fake",
             usage=Usage(input_tokens=11, output_tokens=3, total_tokens=14),
         )
+
+    async def stream(self, messages, tools=None, system=None, max_tokens=None,
+                     thinking_level=None) -> AsyncIterator[StreamChunk]:
+        self.stream_calls += 1
+        yield TextDelta(text="Hello")
+        yield TextDelta(text=", ")
+        yield TextDelta(text="world")
+        yield StreamEnd(AssistantMessage(
+            content=[TextBlock(text="Hello, world")],
+            stop_reason="end_turn",
+            model="fake",
+            usage=Usage(input_tokens=11, output_tokens=3, total_tokens=14),
+        ))
 
 
 class FakeMCP:
@@ -149,8 +167,10 @@ async def main() -> None:
         assert all(f["object"] == "chat.completion.chunk" for f in frames)
         assert frames[0]["choices"][0]["delta"].get("role") == "assistant"
         deltas = [f["choices"][0]["delta"].get("content", "") for f in frames]
+        assert deltas.count("Hello") == 1 and ", " in deltas and "world" in deltas, deltas
         assert "".join(deltas) == "Hello, world", f"reassembled deltas wrong: {deltas}"
         assert frames[-1]["choices"][0]["finish_reason"] == "stop"
+        assert app.state.llm.stream_calls == 1, "stream:true must route through LLMClient.stream()"
         print()
 
         # ----- graceful error -----

@@ -71,6 +71,15 @@ def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | N
     # Catch a bad orchestrator_model_id at startup instead of first request.
     orch_model_id = settings.orchestrator_model_id or registry.default_id()
     try:
+        orch_entry = registry.get_entry(orch_model_id)
+        if orch_entry.supports_native_tools is False:
+            logger.warning(
+                "orchestrator_model_id=%r declares supports_native_tools:false; "
+                "prompted-tool models are not supported as orchestrator control "
+                "models. running in legacy mode.",
+                orch_model_id,
+            )
+            return None, None
         registry.get(orch_model_id)
     except Exception as e:
         logger.warning(

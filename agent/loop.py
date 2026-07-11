@@ -14,7 +14,16 @@ from typing import Any, AsyncIterator, Callable
 import jsonschema
 
 from llm.client import LLMClient
-from llm.schemas import AssistantMessage, Message, TextBlock, ToolResultBlock, ToolUseBlock, Usage
+from llm.schemas import (
+    AssistantMessage,
+    Message,
+    StreamEnd,
+    TextBlock,
+    TextDelta,
+    ToolResultBlock,
+    ToolUseBlock,
+    Usage,
+)
 from mcp_layer import MCPManager
 
 from .context import ContextBudget, assemble_context, clip_content, estimate_usage_tokens
@@ -232,6 +241,7 @@ async def run_agent(
     policy: ToolPolicy | None = None,
     tracer: Tracer | None = None,
     run_id: str | None = None,
+    stream: bool = False,
 ) -> AsyncIterator[Event]:
     """Drive a conversation to completion, yielding events along the way.
 
@@ -394,19 +404,104 @@ async def run_agent(
         # LLM call with per-attempt timeout and bounded retry.
         llm_started = time.perf_counter()
         try:
-            response = await _complete_with_retry(
-                llm,
-                messages=messages_for_llm,
-                tools=effective_tools or None,
-                system=effective_system,
-                max_tokens=max_tokens,
-                timeout=_effective_timeout(llm_timeout_seconds),
-                max_retries=max_retries,
-                base_delay=retry_base_delay,
-                thinking_level=thinking_level,
-                deadline_expired=_deadline_exceeded,
-                remaining_seconds=_remaining_run_seconds,
-            )
+            if stream:
+                attempts = max(0, max_retries) + 1
+                response: AssistantMessage | None = None
+
+                for attempt in range(attempts):
+                    if _deadline_exceeded():
+                        raise _RunDeadlineExceeded()
+                    emitted_text = False
+                    try:
+                        chunks = llm.stream(
+                            messages=messages_for_llm,
+                            tools=effective_tools or None,
+                            system=effective_system,
+                            max_tokens=max_tokens,
+                            thinking_level=thinking_level,
+                        )
+                        first_chunk = True
+                        while True:
+                            if _deadline_exceeded():
+                                raise _RunDeadlineExceeded()
+                            try:
+                                if first_chunk:
+                                    timeout = _effective_timeout(llm_timeout_seconds)
+                                    if timeout and timeout > 0:
+                                        async with asyncio.timeout(timeout):
+                                            chunk = await anext(chunks)
+                                    else:
+                                        chunk = await anext(chunks)
+                                    first_chunk = False
+                                else:
+                                    chunk = await anext(chunks)
+                            except StopAsyncIteration:
+                                break
+
+                            if isinstance(chunk, TextDelta):
+                                if chunk.text:
+                                    emitted_text = True
+                                    yield await _emit(TextEvent(text=chunk.text))
+                            elif isinstance(chunk, StreamEnd):
+                                response = chunk.message
+                                break
+
+                        if response is None:
+                            response = AssistantMessage(
+                                content=[],
+                                stop_reason="empty",
+                                model=None,
+                                usage=Usage(),
+                            )
+                        if response.stop_reason == "empty" and attempt < attempts - 1 and not emitted_text:
+                            delay = _backoff_delay(retry_base_delay, attempt)
+                            logger.warning(
+                                "empty LLM stream (attempt %d/%d), retrying in %.2fs",
+                                attempt + 1, attempts, delay,
+                            )
+                            remaining = _remaining_run_seconds()
+                            if remaining is not None:
+                                if remaining <= 0:
+                                    raise _RunDeadlineExceeded()
+                                delay = min(delay, remaining)
+                            await asyncio.sleep(delay)
+                            response = None
+                            continue
+                        break
+                    except Exception as exc:
+                        if _deadline_exceeded():
+                            raise _RunDeadlineExceeded() from exc
+                        transient = isinstance(exc, TimeoutError) or llm.is_transient_error(exc)
+                        if emitted_text or not transient or attempt == attempts - 1:
+                            raise
+                        delay = _backoff_delay(retry_base_delay, attempt)
+                        logger.warning(
+                            "transient LLM stream error (attempt %d/%d), retrying in %.2fs: %s",
+                            attempt + 1, attempts, delay, exc,
+                        )
+                        remaining = _remaining_run_seconds()
+                        if remaining is not None:
+                            if remaining <= 0:
+                                raise _RunDeadlineExceeded() from exc
+                            delay = min(delay, remaining)
+                        await asyncio.sleep(delay)
+                        continue
+
+                assert response is not None
+            else:
+                response = await _complete_with_retry(
+                    llm,
+                    messages=messages_for_llm,
+                    tools=effective_tools or None,
+                    system=effective_system,
+                    max_tokens=max_tokens,
+                    timeout=_effective_timeout(llm_timeout_seconds),
+                    max_retries=max_retries,
+                    base_delay=retry_base_delay,
+                    thinking_level=thinking_level,
+                    deadline_expired=_deadline_exceeded,
+                    remaining_seconds=_remaining_run_seconds,
+                )
         except _RunDeadlineExceeded:
             elapsed = time.perf_counter() - run_started
             logger.warning("run exceeded max_run_seconds=%.1f during LLM call (elapsed=%.1fs)",
@@ -449,7 +544,7 @@ async def run_agent(
             yield await _emit(ReasoningEvent(text=response.reasoning))
 
         for block in response.content:
-            if isinstance(block, TextBlock) and block.text:
+            if not stream and isinstance(block, TextBlock) and block.text:
                 yield await _emit(TextEvent(text=block.text))
 
         tool_uses: list[ToolUseBlock] = [

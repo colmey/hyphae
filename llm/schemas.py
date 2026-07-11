@@ -183,3 +183,20 @@ class AssistantMessage:
 
     def to_message(self) -> Message:
         return Message.assistant(self.content)
+
+
+@dataclass
+class TextDelta:
+    """A fragment of assistant text produced mid-generation."""
+    text: str
+    type: Literal["text_delta"] = "text_delta"
+
+
+@dataclass
+class StreamEnd:
+    """Terminal stream chunk carrying the fully assembled assistant turn."""
+    message: AssistantMessage
+    type: Literal["stream_end"] = "stream_end"
+
+
+StreamChunk = Union[TextDelta, StreamEnd]

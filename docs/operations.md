@@ -101,6 +101,55 @@ answer text and records it as trace-only reasoning. Endpoints that accept a
 request hint such as `reasoning_effort` should use `thinking: hint-param`.
 See [configuration.md](configuration.md) for the env vars and profile fields.
 
+`/v1/chat/completions` with `stream:true` uses the provider's native token
+stream when the selected OpenAI-compatible model client supports it. The
+existing `LLM_TIMEOUT_SECONDS` caps time-to-first-chunk for this path; after
+the first text delta is emitted, the harness does not retry or resume a broken
+stream. A later provider failure is surfaced as partial text followed by an
+error event and `done_reason=llm_error`.
+
+Local harness verification:
+
+```bash
+./runscript.sh -m uvicorn main:app --host 127.0.0.1 --port 8000
+curl -N http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-oss-20b","stream":true,"messages":[{"role":"user","content":"Write three short sentences slowly."}]}'
+```
+
+If OpenWebUI reaches the harness through Nginx Proxy Manager, proxy buffering
+can make correct harness-local token streaming appear all-at-once. Disable
+buffering for the proxy host (`proxy_buffering off` / `X-Accel-Buffering: no`)
+before treating an end-to-end OpenWebUI test as authoritative.
+
+### Connecting a weak prose-only tool model
+
+If a served model cannot reliably emit native OpenAI/Gemini tool calls but can
+follow JSON-in-prose instructions, keep the same provider and add a model row
+with `supports_native_tools: false`:
+
+```yaml
+models:
+  weak-local-prompted:
+    provider: openai
+    model: small-local-model
+    description: >
+      Local prose-only model with no reliable native tool calling. Use for
+      lightweight tasks where prompted JSON tool actions are acceptable.
+    supports_native_tools: false
+    thinking: none
+    context_window: 32768
+    max_tokens: 4096
+```
+
+No provider code or loop changes are required. The registry builds the normal
+provider client, wraps it with the prompted-tool adapter, renders the
+orchestrator-selected tools into the system prompt, and parses one JSON action
+back into the same `ToolUseBlock` shape native models produce. Do not use a
+prompted-only row as the orchestrator control model; startup will log a warning
+and disable orchestration because the control path depends on structured output.
+
 ### Adding persistence
 
 Not needed for the current use case — LibreChat is the system of record and
@@ -401,6 +450,8 @@ are run via `./runscript.sh tests/<file>`.
 | `smoke_test_bounded_runs.py`      | Phase 1 bounded & safe runs with scripted fakes (no network): token cap, in-flight wall-clock cap, final-answer cap edges, zero-usage-trips-cap-via-estimator, tool-argument validation, no-progress abort + counter reset, mid-batch abort shape, `/v1` finish_reason mapping for the new reasons |
 | `smoke_test_context_assembly.py`  | Phase 3 context assembly with scripted fakes (no network): token estimator sanity, budget math, `naive` pass-through, compaction invariants (task header + recent tail verbatim, summary inserted, no orphaned tool pairs, session untouched), summarizer-failure degrade, estimated-usage token-cap fallback |
 | `smoke_test_capabilities.py`      | Phase 5 capability profiles with scripted fakes (no network): profile validation, sampling request pass-through, reasoning routing, malformed tool-call args becoming teaching errors, thinking-level request shaping |
+| `smoke_test_prompted_tools.py`    | Phase 6 prompted-tool adapter with scripted fakes (no network): render/parser, wrapper repair, factory selection, and drop-in proof through `run_agent()` |
+| `smoke_test_streaming.py`         | Phase 7 token streaming with scripted fakes (no network): native incremental deltas, ABC fallback, streamed tool dispatch, partial-stream error handling, and split `<think>` stripping |
 | `smoke_test_orchestrator.py`      | Orchestrator decisions: model selection, tool filtering, system prompt generation, thinking level (parsing + live), history block. Asserts `fallback_used=false`. |
 | `smoke_test_http.py`              | Full HTTP surface in-process (lifespan, plain-text `/chat`, session header, 400/404) |
 | `smoke_test_openai_api.py`        | OpenAI-compatible `/v1`: `/v1/models` shape, non-stream `chat.completion`, SSE chunk deltas + `[DONE]`, error JSON. Hermetic (scripted fake LLM, no backend). |
@@ -497,9 +548,9 @@ extension path described above.
   *visibility*). See [configuration.md](configuration.md).
 - **Capability profiles are declarative.** `models.yaml` can declare
   `supports_native_tools`, `thinking`, and `sampling` per model. Sampling and
-  supported thinking hints are consumed by providers; `supports_native_tools`
-  is validated and visible but the `false` fallback path (prompted tools) is
-  deferred to Phase 6.
+  supported thinking hints are consumed by providers; setting
+  `supports_native_tools` to `false` selects the prompted-tool wrapper for
+  downstream agent turns.
 - **Reasoning is trace/debug data, not answer text.** OpenAI-compatible
   leading `<think>...</think>` content is separated from visible text and
   emitted as a `reasoning` trace/event record. The raw `/chat/stream` route

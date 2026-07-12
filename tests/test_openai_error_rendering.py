@@ -45,7 +45,7 @@ class _Request:
 
 def _collect_stream(runner: _EventsRunner) -> list[dict]:
     async def collect() -> list[dict]:
-        return [item async for item in _stream("test-model", runner, {})]
+        return [item async for item in _stream("test-model", runner, {}, 2000)]
 
     return asyncio.run(collect())
 

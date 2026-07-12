@@ -154,7 +154,7 @@ class OpenAILLMClient(LLMClient):
         self,
         api_key: str,
         model: str,
-        default_max_tokens: int = 4096,
+        default_max_tokens: int,
         base_url: str | None = None,
         profile: ModelProfile | None = None,
     ) -> None:

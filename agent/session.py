@@ -170,10 +170,10 @@ class InMemorySessionStore(SessionStore):
 
     Eviction is lazy: it runs on create() (the only operation that grows the
     store), avoiding a background sweeper and the lifecycle that comes with it.
-    ttl_seconds <= 0 or max_count <= 0 disables that dimension.
+    ttl_seconds <= 0 or max_count <= 0 (the defaults) disables that dimension; production bounds are injected from Settings in main.py.
     """
 
-    def __init__(self, ttl_seconds: int = 3600, max_count: int = 1000) -> None:
+    def __init__(self, ttl_seconds: int = 0, max_count: int = 0) -> None:
         self._sessions: dict[str, Session] = {}
         self._ttl_seconds = ttl_seconds
         self._max_count = max_count

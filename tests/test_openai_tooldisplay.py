@@ -19,7 +19,7 @@ def _result(
 
 
 def test_render_then_strip_roundtrips() -> None:
-    block = _tool_details(_result("the answer is 42"), {"q": "meaning"})
+    block = _tool_details(_result("the answer is 42"), {"q": "meaning"}, 2000)
     assert "<details>" in block and "</details>" in block
     assert "🔧 web__search ✅" in block
     assert '"q": "meaning"' in block
@@ -30,7 +30,7 @@ def test_render_then_strip_roundtrips() -> None:
 
 
 def test_error_result_uses_error_icon() -> None:
-    assert "🔧 web__search ❌" in _tool_details(_result("boom", is_error=True), {"q": "x"})
+    assert "🔧 web__search ❌" in _tool_details(_result("boom", is_error=True), {"q": "x"}, 2000)
 
 
 def test_strip_preserves_model_authored_details() -> None:
@@ -39,14 +39,14 @@ def test_strip_preserves_model_authored_details() -> None:
 
 
 def test_tool_result_cannot_close_details_early() -> None:
-    block = _tool_details(_result("snippet with </details> inside it"), {"q": "html"})
+    block = _tool_details(_result("snippet with </details> inside it"), {"q": "html"}, 2000)
     assert block.count("</details>") == 1
     assert "<\u200b/details>" in block
     assert _strip_tool_blocks(f"before{block}after") == "beforeafter"
 
 
 def test_prepare_strips_assistant_history_but_not_prompt() -> None:
-    block = _tool_details(_result("tool output"), {"q": "y"})
+    block = _tool_details(_result("tool output"), {"q": "y"}, 2000)
     messages = [
         _ChatMessage(role="system", content="be terse"),
         _ChatMessage(role="user", content="first question"),

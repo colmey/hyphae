@@ -241,7 +241,7 @@ async def run_agent(
     *,
     store: SessionStore | None = None,
     system: str | None = None,
-    max_iterations: int = 25,
+    max_iterations: int = 10,
     max_tokens: int | None = None,
     tools: list[dict[str, Any]] | None = None,
     llm_timeout_seconds: float | None = None,
@@ -267,6 +267,9 @@ async def run_agent(
 
     The caller appends the user turn first. The loop handles assistant turns,
     tool round-trips, optional context shaping, dispatch policy, and tracing.
+
+    In production every tunable kwarg is injected from Settings by
+    api/turn.py; these defaults serve direct callers and tests.
     """
     # `tools` controls what the model sees; MCP dispatch still routes by name.
     if tools is None:

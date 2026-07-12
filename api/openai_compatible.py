@@ -104,7 +104,6 @@ def _text_of(content: Any) -> str:
 # blocks are stripped from replayed assistant history on the next request.
 
 _TOOL_SUMMARY_MARK = "🔧 "
-_TOOL_RESULT_MAX = 2000
 
 # Keyed on the marker so model-authored <details> blocks are left alone.
 _TOOL_BLOCK_RE = re.compile(
@@ -113,7 +112,7 @@ _TOOL_BLOCK_RE = re.compile(
 )
 
 
-def _tool_details(event: ToolResultEvent, args: Any) -> str:
+def _tool_details(event: ToolResultEvent, args: Any, max_chars: int) -> str:
     """Render one completed tool call as a self-contained collapsible block.
 
     A single delta avoids exposing unbalanced markdown to progressive renderers.
@@ -124,8 +123,8 @@ def _tool_details(event: ToolResultEvent, args: Any) -> str:
     if args:
         out.append(f"\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```\n")
     result = event.content
-    if len(result) > _TOOL_RESULT_MAX:
-        result = result[:_TOOL_RESULT_MAX] + "\n…[truncated]"
+    if len(result) > max_chars:
+        result = result[:max_chars] + "\n…[truncated]"
     # Defang embedded HTML so tool output cannot close the presentation block.
     result = result.replace("</details>", "<\u200b/details>")
     out.append(f"\n```\n{result}\n```\n\n</details>\n\n")
@@ -229,7 +228,7 @@ def _chunk(cid: str, created: int, model: str, delta: dict, finish_reason: str |
     }
 
 
-async def _stream(model: str, runner: TurnRunner, turn: dict) -> AsyncIterator[dict]:
+async def _stream(model: str, runner: TurnRunner, turn: dict, tool_block_max_chars: int) -> AsyncIterator[dict]:
     """Render core events as OpenAI SSE frames.
 
     Successful streams end with a finish-reason chunk. Failed streams instead
@@ -255,7 +254,7 @@ async def _stream(model: str, runner: TurnRunner, turn: dict) -> AsyncIterator[d
             elif isinstance(event, ToolCallEvent):
                 pending_args[event.id] = event.input
             elif isinstance(event, ToolResultEvent):
-                block = _tool_details(event, pending_args.pop(event.id, None))
+                block = _tool_details(event, pending_args.pop(event.id, None), tool_block_max_chars)
                 yield {"data": json.dumps(_chunk(cid, created, model, {"content": block}, None))}
             elif isinstance(event, ErrorEvent):
                 failed = True
@@ -326,7 +325,14 @@ async def chat_completions(
     )
 
     if req.stream:
-        return EventSourceResponse(_stream(reported_model, runner, {**turn, "stream": True}))
+        return EventSourceResponse(
+            _stream(
+                reported_model,
+                runner,
+                {**turn, "stream": True},
+                settings.openai_tool_block_max_chars,
+            )
+        )
 
     try:
         answer, done_reason, usage = await runner.run(**turn)

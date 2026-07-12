@@ -45,7 +45,7 @@ class GeminiLLMClient(LLMClient):
         self,
         api_key: str,
         model: str,
-        default_max_tokens: int = 4096,
+        default_max_tokens: int,
         profile: ModelProfile | None = None,
     ) -> None:
         # Pass explicitly so env/config failures surface early.

@@ -6,29 +6,19 @@ Public API:
   - OrchestrationDecision: per-call return value from Orchestrator.decide()
                            (wraps result + fallback_used + fallback_reason).
   - OrchestrationResult: the structured-output schema the LLM produces.
-  - ModelEntry / ModelsConfig: typed models.yaml shape.
-  - load_models_config / load_orchestrator_prompt: config loaders for main.py.
+
+Config types and loaders (ModelEntry, ModelsConfig, load_models_config,
+load_orchestrator_prompt) live in the config package.
 """
 
-from .config import load_models_config, load_orchestrator_prompt
 from .orchestrator import Orchestrator
 from .registry import LLMRegistry
-from .schemas import (
-    ModelEntry,
-    ModelsConfig,
-    OrchestrationDecision,
-    OrchestrationResult,
-    ToolPreferences,
-)
+from .schemas import OrchestrationDecision, OrchestrationResult, ToolPreferences
 
 __all__ = [
     "LLMRegistry",
-    "ModelEntry",
-    "ModelsConfig",
     "Orchestrator",
     "OrchestrationDecision",
     "OrchestrationResult",
     "ToolPreferences",
-    "load_models_config",
-    "load_orchestrator_prompt",
 ]

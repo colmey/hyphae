@@ -28,7 +28,8 @@ from agent.tracing import event_record
 from llm.client import LLMClient
 from llm.providers.openai import OpenAILLMClient
 from llm.schemas import AssistantMessage, Message, ModelProfile, TextBlock, ToolUseBlock
-from orchestrator.schemas import ModelsConfig
+from config import ModelsConfig
+from llm.client import profile_from_entry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -136,7 +137,7 @@ def test_model_config_defaults() -> None:
     raw = yaml.safe_load((ROOT / "config" / "models.yaml").read_text(encoding="utf-8"))
     cfg = ModelsConfig.model_validate(raw)
     model_id = cfg.default_id()
-    profile = cfg.models[model_id].to_profile()
+    profile = profile_from_entry(cfg.models[model_id])
     check(isinstance(profile, ModelProfile), "default model resolves to ModelProfile")
     check(profile == ModelProfile.default(), "unprofiled current config keeps default profile")
 

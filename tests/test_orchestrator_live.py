@@ -35,13 +35,8 @@ import pytest
 from harness_config import get_settings, load_mcp_config, reset_settings
 from llm.schemas import Message, TextBlock
 from mcp_layer import MCPManager
-from orchestrator import (
-    LLMRegistry,
-    Orchestrator,
-    ToolPreferences,
-    load_models_config,
-    load_orchestrator_prompt,
-)
+from config import load_models_config, load_orchestrator_prompt
+from orchestrator import LLMRegistry, Orchestrator, ToolPreferences
 from orchestrator.schemas import OrchestrationResult
 
 

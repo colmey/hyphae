@@ -8,7 +8,8 @@ import pytest
 
 from llm.client import LLMClient
 from llm.schemas import AssistantMessage, StreamChunk, StreamEnd, TextBlock, TextDelta, Usage
-from orchestrator import LLMRegistry, load_models_config
+from config import load_models_config
+from orchestrator import LLMRegistry
 from tests._app_support import wired_app
 
 

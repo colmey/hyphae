@@ -36,7 +36,7 @@ from llm.schemas import (
     Usage,
 )
 from mcp_layer.client import ToolCallResult
-from orchestrator.schemas import ModelEntry
+from config import ModelEntry
 
 
 TOOL = {

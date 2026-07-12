@@ -24,7 +24,7 @@ from typing import Any
 
 from llm.client import LLMClient, build_llm_client_from_entry
 
-from .schemas import ModelEntry, ModelsConfig
+from config import ModelEntry, ModelsConfig
 
 logger = logging.getLogger(__name__)
 

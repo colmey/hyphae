@@ -34,7 +34,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Callable
 
-from .schemas import AssistantMessage, Message, StreamChunk, StreamEnd, TextBlock, TextDelta
+from .schemas import AssistantMessage, Message, ModelProfile, StreamChunk, StreamEnd, TextBlock, TextDelta
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,22 @@ def build_llm_client(settings: Any) -> LLMClient:
     )
 
 
+def profile_from_entry(entry: Any) -> ModelProfile:
+    """Build the ModelProfile declared by one models.yaml entry.
+
+    `entry` is duck-typed (config.ModelEntry shape: supports_native_tools,
+    thinking, sampling) so this module never imports the config layer.
+    """
+    s = entry.sampling
+    return ModelProfile(
+        supports_native_tools=entry.supports_native_tools,
+        thinking=entry.thinking,
+        temperature=s.temperature if s else None,
+        top_p=s.top_p if s else None,
+        top_k=s.top_k if s else None,
+    )
+
+
 def build_llm_client_from_entry(entry: Any, settings: Any) -> LLMClient:
     """Construct an LLM client for one ModelEntry from models.yaml.
 
@@ -212,9 +228,9 @@ def build_llm_client_from_entry(entry: Any, settings: Any) -> LLMClient:
     process can hold clients for multiple providers simultaneously.
 
     `entry` is duck-typed (must expose `.provider`, `.model`, `.max_tokens`)
-    to avoid an import-time dependency on orchestrator.schemas.
+    to avoid an import-time dependency on the config layer.
     """
-    profile = entry.to_profile()
+    profile = profile_from_entry(entry)
     client = _build_client(
         entry.provider,
         model=entry.model,

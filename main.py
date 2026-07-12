@@ -19,12 +19,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from harness_config import get_settings, load_mcp_config
 from llm import build_llm_client
 from mcp_layer import MCPManager
-from orchestrator import (
-    LLMRegistry,
-    Orchestrator,
-    load_models_config,
-    load_orchestrator_prompt,
-)
+from config import load_models_config, load_orchestrator_prompt
+from llm.client import supported_providers
+from orchestrator import LLMRegistry, Orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +36,7 @@ def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | N
         return None, None
 
     try:
-        models_config = load_models_config(settings.models_config_path)
+        models_config = load_models_config(settings.models_config_path, known_providers=supported_providers())
     except FileNotFoundError:
         logger.warning(
             "orchestration enabled but models config not found at %s; "

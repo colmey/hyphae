@@ -8,7 +8,7 @@ import asyncio
 import logging
 from typing import Any
 
-from harness_config import MCPConfig
+from config import MCPConfig
 from .client import MCPClient, Tool, ToolCallResult
 
 logger = logging.getLogger(__name__)

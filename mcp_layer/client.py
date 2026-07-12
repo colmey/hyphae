@@ -14,7 +14,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from harness_config import MCPServerConfig, SSEServer, StdioServer, StreamableHTTPServer
+from config import MCPServerConfig, SSEServer, StdioServer, StreamableHTTPServer
 
 logger = logging.getLogger(__name__)
 

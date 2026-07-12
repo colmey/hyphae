@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from harness_config import SSEServer, StreamableHTTPServer
+from config import SSEServer, StreamableHTTPServer
 from mcp_layer.client import MCPClient
 
 

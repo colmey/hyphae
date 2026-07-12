@@ -85,7 +85,7 @@ manager.
 
 ### Runtime conventions
 
-- **Bootstrap is in-process and explicit.** `bootstrap.load_secrets()`
+- **Bootstrap is in-process and explicit.** `config.load_secrets()`
   loads the project's `.env` file into `os.environ` (via `python-dotenv`).
   Runtime entry points (`main.py` and any future CLI)
   calls `load_secrets()` as its first action.
@@ -93,13 +93,13 @@ manager.
   `.env` file at the project root (template: `.env.example`). Real
   environment variables already set in the process win over `.env`, so the
   same file works for local dev, containers, and CI.
-- **Settings are pulled lazily** via `harness_config.get_settings()`.
-  Nothing in the codebase should `from harness_config import settings` at
+- **Settings are pulled lazily** via `config.get_settings()`.
+  Nothing in the codebase should `from config import settings` at
   module level — the global instance doesn't exist. Lazy + cached means
-  bootstrap runs first and is picked up correctly.
+  `config.load_secrets()` runs first and is picked up correctly.
 - **`runscript.sh`** is the canonical launcher; it cd's to the project
   root, activates the venv, prepends `.` to `PYTHONPATH` (so scripts in
-  subdirs like `tests/` can still import `bootstrap`, `harness_config`,
+  subdirs like `tests/` can still import `config`, `main`,
   etc.), and runs Python.
 - **LLM providers implemented: Gemini and OpenAI-compatible**, each isolated in
   `llm/providers/`. The OpenAI client (`llm/providers/openai.py`) speaks the
@@ -120,8 +120,6 @@ manager.
 ```
 PyAiHarness/
 ├── main.py                   # FastAPI app, lifespan, wires everything
-├── bootstrap.py              # load_secrets() - loads .env into os.environ
-├── harness_config.py         # Settings (env) + MCPConfig (YAML loader)
 ├── requirements.txt
 ├── .env.example              # Template for .env (copy and fill in)
 ├── setup.sh                  # Creates .venv + installs deps + seeds .env
@@ -129,8 +127,8 @@ PyAiHarness/
 ├── chat_client.py            # Optional interactive REPL client (uses HTTP)
 ├── harness_client.py         # Reference async Python client (orchestration-aware)
 │
-├── config/                   # All runtime YAML/text config
-│   ├── mcp_config.yaml       # MCP server definitions
+├── config/                   # Config package: Settings, schemas, loaders, load_secrets
+│   ├── mcp_config.yaml       #   ...plus the runtime YAML/text config it loads
 │   ├── models.yaml           # Routable model registry for the orchestrator
 │   └── orchestrator_prompt.md  # Orchestrator's own system prompt
 │
@@ -195,7 +193,7 @@ PyAiHarness/
 
 ### Config Layer
 
-`harness_config.py` exposes runtime `Settings` and typed MCP config loading.
+The `config` package exposes runtime `Settings` and typed file-config loading.
 `Settings` is always accessed via `get_settings()`, never instantiated at
 module import.
 
@@ -677,7 +675,7 @@ adds fallback metadata for in-process callers.
 
 **`orchestrator/config.py`** — `load_models_config(path)` and
 `load_orchestrator_prompt(path)`. Mirrors the loader pattern in
-`harness_config.load_mcp_config`.
+`config.load_mcp_config`.
 
 **`orchestrator/registry.py`** — `LLMRegistry`:
 
@@ -770,7 +768,7 @@ use the default LLM, all MCP tools, and any request system override directly.
 **`main.py`** — FastAPI entry point with a `lifespan` context manager.
 
 Startup order:
-1. `bootstrap.load_secrets()` (called at the top of `main.py`).
+1. `config.load_secrets()` (called at the top of `main.py`).
 2. `get_settings()` — reads from env.
 3. `build_llm_client(settings)` — fails fast if API key missing.
    This is the *legacy/default* client used when orchestration is
@@ -871,7 +869,7 @@ resolve a problem we hit; don't change them without understanding why.
    layer's ABC and registry in `llm/client.py` stay SDK-free).
 2. **Settings are pulled lazily**, not snapshotted at import. Bootstrap
    (which loads `.env` into `os.environ`) and the harness run in the same
-   process; lazy + cached means env vars are read after bootstrap, not before.
+   process; lazy + cached means env vars are read after `config.load_secrets()`, not before.
 3. **`mcp_layer/` not `mcp/`** to avoid shadowing the SDK's `mcp` package.
 4. **`__` is the tool-namespacing separator.** Config validation enforces
    that server names can't contain it.

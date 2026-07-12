@@ -160,8 +160,8 @@ a model — write it for an LLM audience.
 **`config/orchestrator_prompt.md`** — the orchestrator's system prompt.
 Edit this to tune routing behavior; no code changes needed.
 
-**Secrets** live in a `.env` file at the project root. `bootstrap.load_secrets()`
-loads it into `os.environ` before the harness starts; bootstrap runs
+**Secrets** live in a `.env` file at the project root. `config.load_secrets()`
+loads it into `os.environ` before the harness starts; it runs
 in-process at the top of every entry point. Copy `.env.example` to `.env`
 (`setup.sh` does this) and fill in your values. Real environment variables
 already set in the process take precedence over `.env`.
@@ -262,14 +262,12 @@ registry. Full detail in [docs/api.md](docs/api.md#post-v1chatcompletions).
 ```
 PyAiHarness/
 ├── main.py                 # FastAPI app + lifespan
-├── bootstrap.py            # load_secrets(): .env → os.environ
-├── harness_config.py       # Settings + MCPConfig
 ├── harness_client.py       # Reference async Python client
 ├── .env.example            # Env var template (copy to .env)
 ├── setup.sh                # Create .venv + install deps + seed .env
 │
-├── config/                 # All runtime YAML/text config
-│   ├── mcp_config.yaml
+├── config/                 # Config layer: Settings, schemas, loaders, .env loading
+│   ├── mcp_config.yaml     #   ...plus the runtime YAML/text config it loads
 │   ├── models.yaml
 │   └── orchestrator_prompt.md
 │

@@ -11,7 +11,7 @@ orchestrator's system prompt).
 ## Environment Variables
 
 Read into `Settings` via `pydantic-settings`. They live in a `.env` file at
-the project root; `bootstrap.load_secrets()` loads it into `os.environ`
+the project root; `config.load_secrets()` loads it into `os.environ`
 before settings are read. Copy `.env.example` to `.env` (the `setup.sh`
 script does this for you) and fill in your values. Real environment
 variables already set in the process take precedence over `.env`, so the

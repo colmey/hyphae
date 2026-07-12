@@ -411,7 +411,7 @@ check if you need one.
 
 | Symptom                                       | Likely cause                                                 |
 |-----------------------------------------------|--------------------------------------------------------------|
-| App fails to start with missing-key error     | API key missing from `.env`, `bootstrap.load_secrets()` didn't run, or wrong `LLM_PROVIDER` |
+| App fails to start with missing-key error     | API key missing from `.env`, `config.load_secrets()` didn't run, or wrong `LLM_PROVIDER` |
 | `/health` shows fewer servers than configured | One or more MCP servers were unreachable at startup          |
 | `/health` shows `orchestration_enabled: false` | `models.yaml` or `orchestrator_prompt.md` missing/unparseable, or `ORCHESTRATION_ENABLED=false`. Lifespan logs the reason. |
 | Every response has `orchestration.fallback_used: true` | Orchestrator's LLM call is failing. Check the `orchestration fallback in effect:` warning logs for the underlying provider error. |

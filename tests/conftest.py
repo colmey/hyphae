@@ -8,25 +8,24 @@ from typing import Any
 
 import httpx
 import pytest
-import bootstrap
+import config
 from agent import InMemorySessionStore, Session
-from harness_config import reset_settings
-from harness_config import Settings
+from config import Settings, reset_settings
 
 from tests.fakes import ScriptedLLM, ScriptedMCP, collect_agent_events
 
 
-_REAL_LOAD_SECRETS = bootstrap.load_secrets
+_REAL_LOAD_SECRETS = config.load_secrets
 
 
 def _ignore_dotenv(*args: Any, **kwargs: Any) -> None:
-    """Collection-safe replacement for the process-global dotenv bootstrap."""
+    """Collection-safe replacement for the process-global dotenv loading."""
 
 
 # conftest is imported before test modules. Neutralize dotenv at that boundary,
 # not merely once fixtures begin, because application modules may be imported
 # while pytest is collecting tests.
-bootstrap.load_secrets = _ignore_dotenv
+config.load_secrets = _ignore_dotenv
 
 
 @pytest.fixture(scope="session")
@@ -71,7 +70,7 @@ def isolate_dotenv(
 ) -> Iterator[None]:
     """Isolate settings and prevent hermetic tests from loading developer secrets."""
     loader = _REAL_LOAD_SECRETS if request.node.get_closest_marker("live") else _ignore_dotenv
-    monkeypatch.setattr(bootstrap, "load_secrets", loader)
+    monkeypatch.setattr(config, "load_secrets", loader)
     reset_settings()
     yield
     reset_settings()

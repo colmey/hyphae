@@ -48,7 +48,7 @@ class GeminiLLMClient(LLMClient):
         default_max_tokens: int = 4096,
         profile: ModelProfile | None = None,
     ) -> None:
-        # Pass explicitly so bootstrap/config failures surface early.
+        # Pass explicitly so env/config failures surface early.
         self._client = genai.Client(api_key=api_key)
         self._model = model
         self._default_max_tokens = default_max_tokens

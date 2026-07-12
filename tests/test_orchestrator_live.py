@@ -26,13 +26,13 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 
 from __future__ import annotations
 
-import bootstrap
+import config
 import logging
 from types import SimpleNamespace
 
 import pytest
 
-from harness_config import get_settings, load_mcp_config, reset_settings
+from config import get_settings, load_mcp_config, reset_settings
 from llm.schemas import Message, TextBlock
 from mcp_layer import MCPManager
 from config import load_models_config, load_orchestrator_prompt
@@ -96,7 +96,7 @@ def _check_history_block(orch: Orchestrator) -> None:
 
 
 async def test_configured_orchestration_decisions() -> None:
-    bootstrap.load_secrets()
+    config.load_secrets()
     reset_settings()
     settings = get_settings()
 

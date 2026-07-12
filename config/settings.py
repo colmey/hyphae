@@ -233,7 +233,7 @@ class Settings(BaseSettings):
         return key
 
 
-# Lazily populated after bootstrap has loaded environment variables.
+# Lazily populated after load_secrets() has loaded environment variables.
 _settings_cache: Settings | None = None
 
 

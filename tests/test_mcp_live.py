@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import logging
 
-import bootstrap
+import config
 import pytest
 
-from harness_config import get_settings, load_mcp_config, reset_settings
+from config import get_settings, load_mcp_config, reset_settings
 from mcp_layer import MCPManager
 
 
@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.live, pytest.mark.mcp, pytest.mark.anyio]
 
 
 async def test_configured_mcp_inventory() -> None:
-    bootstrap.load_secrets()
+    config.load_secrets()
     reset_settings()
     settings = get_settings()
     mcp_config = load_mcp_config(settings.mcp_config_path)

@@ -14,8 +14,8 @@ dataset.
 
 from __future__ import annotations
 
-from bootstrap import load_secrets
-load_secrets()
+import config
+config.load_secrets()
 
 import asyncio
 import logging
@@ -38,7 +38,7 @@ from agent import (
     run_agent,
 )
 from api.turn import TurnRunner
-from harness_config import get_settings
+from config import get_settings
 from llm.client import LLMClient, build_llm_client
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
 from mcp_layer.client import ToolCallResult

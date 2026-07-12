@@ -11,7 +11,7 @@ Scenarios:
      one runs (200) and the overlapping ones are rejected (409) by
      SessionGuard rather than racing on one message history.
 
-Makes real LLM + MCP calls, so it needs the same bootstrap as the other
+Makes real LLM + MCP calls, so it needs the same load_secrets() setup as the other
 HTTP smoke tests.
 
 Run explicitly with ``./runscript.sh -m pytest -m "live and http_server"``.
@@ -20,7 +20,7 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and http_server"``.
 from __future__ import annotations
 
 import asyncio
-import bootstrap
+import config
 import logging
 
 import httpx
@@ -28,7 +28,7 @@ import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport
 
-from harness_config import reset_settings
+from config import reset_settings
 from main import app
 
 
@@ -61,7 +61,7 @@ SAME_SESSION_FANOUT = 4
 
 
 async def test_configured_request_concurrency() -> None:
-    bootstrap.load_secrets()
+    config.load_secrets()
     reset_settings()
     transport = ASGITransport(app=app)
     base_url = "http://harness.local"

@@ -190,7 +190,7 @@ def _build_client(
 def build_llm_client(settings: Any) -> LLMClient:
     """Construct the LLM client matching settings.llm_provider.
 
-    Takes Settings duck-typed to avoid a circular import with harness_config.
+    Takes Settings duck-typed to avoid a circular import with the config layer.
 
     Preserved for the legacy/default path. The orchestration layer uses
     `build_llm_client_from_entry` instead, which is parameterized by a

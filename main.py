@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from bootstrap import load_secrets
+from config import load_secrets
 load_secrets()
 
 import logging
@@ -16,10 +16,9 @@ from agent import InMemorySessionStore, SessionGuard, build_tool_policy, build_t
 from api import router
 from api.openai_compatible import openai_auth_exception_handler
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from harness_config import get_settings, load_mcp_config
 from llm import build_llm_client
 from mcp_layer import MCPManager
-from config import load_models_config, load_orchestrator_prompt
+from config import get_settings, load_mcp_config, load_models_config, load_orchestrator_prompt
 from llm.client import supported_providers
 from orchestrator import LLMRegistry, Orchestrator
 
@@ -124,7 +123,7 @@ def _log_ready_summary(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
-    # Settings and default LLM fail loud if bootstrap/config is broken.
+    # Settings and default LLM fail loud if env/config is broken.
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level,

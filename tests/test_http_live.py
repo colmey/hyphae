@@ -22,7 +22,7 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and http_server"``.
 
 from __future__ import annotations
 
-import bootstrap
+import config
 import json
 import logging
 
@@ -31,7 +31,7 @@ import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport
 
-from harness_config import reset_settings
+from config import reset_settings
 from main import app
 
 
@@ -59,7 +59,7 @@ def _print_chat(label: str, r: httpx.Response) -> None:
 
 
 async def test_configured_http_surface() -> None:
-    bootstrap.load_secrets()
+    config.load_secrets()
     reset_settings()
     transport = ASGITransport(app=app)
     base_url = "http://harness.local"

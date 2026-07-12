@@ -12,7 +12,7 @@ smoke_test_llm.py:
      receive tool_use, execute via MCPManager, send the result back, get a
      final answer.
 
-Configure via environment before running (bootstrap only sets GEMINI_API_KEY):
+Configure via environment before running (load_secrets only sets GEMINI_API_KEY):
     export OPENAI_BASE_URL=http://localhost:11434/v1   # for local Ollama
     export OPENAI_API_KEY=<key>                         # any non-empty value
     export OPENAI_MODEL=qwen3.6-35b-a3b                 # an `ollama list` tag
@@ -22,13 +22,13 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 
 from __future__ import annotations
 
-import bootstrap
+import config
 import logging
 import os
 
 import pytest
 
-from harness_config import get_settings, load_mcp_config, reset_settings
+from config import get_settings, load_mcp_config, reset_settings
 from llm import (
     LLMClient,
     Message,
@@ -141,7 +141,7 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
 
 
 async def test_configured_openai_provider_scenarios() -> None:
-    bootstrap.load_secrets()
+    config.load_secrets()
     reset_settings()
     settings = get_settings()
 

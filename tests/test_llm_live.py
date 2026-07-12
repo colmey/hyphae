@@ -15,12 +15,12 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 
 from __future__ import annotations
 
-import bootstrap
+import config
 import logging
 
 import pytest
 
-from harness_config import get_settings, load_mcp_config, reset_settings
+from config import get_settings, load_mcp_config, reset_settings
 from llm import (
     LLMClient,
     Message,
@@ -140,7 +140,7 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
 
 
 async def test_configured_llm_scenarios() -> None:
-    bootstrap.load_secrets()
+    config.load_secrets()
     reset_settings()
     settings = get_settings()
     print(f"using provider={settings.llm_provider} model={settings.llm_model}")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from harness_config import MCPConfig, Settings, ToolPolicyConfig, load_mcp_config
+from config import MCPConfig, Settings, ToolPolicyConfig, load_mcp_config
 
 
 @pytest.mark.parametrize(

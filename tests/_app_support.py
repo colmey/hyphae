@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 from agent import InMemorySessionStore, SessionGuard
-from harness_config import Settings
+from config import Settings
 
 
 class EmptyMCP:

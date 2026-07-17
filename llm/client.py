@@ -68,6 +68,9 @@ class GenerationRequest:
 class LLMClient(ABC):
     """Provider-agnostic LLM client interface."""
 
+    async def aclose(self) -> None:
+        """Release client-owned resources. Resource-free clients need no override."""
+
     @abstractmethod
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         """Run one completion turn and return the assistant's response.

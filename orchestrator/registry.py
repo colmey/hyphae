@@ -19,7 +19,10 @@ a rare double-build wastes a few cycles but cannot produce wrong behavior.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Iterable
+from itertools import chain
 from typing import Any
 
 from llm.client import LLMClient, build_llm_client_from_entry
@@ -112,3 +115,49 @@ class LLMRegistry:
                 fallback,
             )
         return fallback, self.get(fallback)
+
+    async def aclose(self, *, additional_clients: Iterable[LLMClient] = ()) -> None:
+        """Detach the cache and close each cached/additional identity once.
+
+        The application lifespan supplies its default client through
+        ``additional_clients`` so aliases across both ownership paths are
+        deduplicated in the same snapshot.
+        """
+        cached = tuple(self._clients.values())
+        self._clients.clear()
+
+        clients: list[LLMClient] = []
+        seen: set[int] = set()
+        for client in chain(additional_clients, cached):
+            identity = id(client)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            clients.append(client)
+
+        if not clients:
+            return
+        await asyncio.gather(
+            *(_close_client(client) for client in clients),
+        )
+
+
+async def _close_client(client: LLMClient) -> None:
+    """Best-effort close for one registry-owned client."""
+    try:
+        await client.aclose()
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise
+        logger.warning(
+            "LLM client cleanup was cancelled for %s",
+            type(client).__name__,
+            exc_info=True,
+        )
+    except Exception:  # noqa: BLE001 -- continue closing sibling clients.
+        logger.warning(
+            "failed to close LLM client %s",
+            type(client).__name__,
+            exc_info=True,
+        )

@@ -137,6 +137,7 @@ class PromptedToolLLMClient(LLMClient):
         self._inner = inner
         self._model = model
         self._max_repairs = max_repairs
+        self._closed = False
 
     @property
     def inner(self) -> LLMClient:
@@ -145,6 +146,13 @@ class PromptedToolLLMClient(LLMClient):
 
     def is_transient_error(self, exc: BaseException) -> bool:
         return self._inner.is_transient_error(exc)
+
+    async def aclose(self) -> None:
+        """Close the wrapped client once; the decorator owns its lifecycle."""
+        if self._closed:
+            return
+        self._closed = True
+        await self._inner.aclose()
 
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         if not request.tools or request.response_schema is not None:

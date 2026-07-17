@@ -9,7 +9,9 @@ chain-of-thought is not replayed as assistant content.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
+import inspect
 import json
 import logging
 import re
@@ -40,6 +42,26 @@ logger = logging.getLogger(__name__)
 _THINK_BLOCK = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
+
+
+async def _close_sdk_stream(stream: Any) -> None:
+    """Close one SDK stream without replacing its primary outcome."""
+    close = getattr(stream, "aclose", None)
+    if close is None:
+        close = getattr(stream, "close", None)
+    if close is None:
+        return
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise
+        logger.warning("OpenAI SDK stream cleanup was cancelled", exc_info=True)
+    except Exception:  # noqa: BLE001 -- preserve the active stream outcome.
+        logger.warning("failed to close OpenAI SDK stream", exc_info=True)
 
 
 _STOP_REASON_MAP: dict[str, CanonicalStopReason] = {
@@ -255,6 +277,14 @@ class OpenAILLMClient(LLMClient):
         self._default_max_tokens = default_max_tokens
         self._profile = profile or ModelProfile.default()
         self._warned_inert_thinking = False
+        self._closed = False
+
+    async def aclose(self) -> None:
+        """Close the AsyncOpenAI client once."""
+        if self._closed:
+            return
+        self._closed = True
+        await self._client.close()
 
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         sdk_request = self._build_request(request)
@@ -297,95 +327,98 @@ class OpenAILLMClient(LLMClient):
         response_model: str | None = None
 
         sdk_stream = await self._client.chat.completions.create(**sdk_request)
-        async for chunk in sdk_stream:
-            response_model = getattr(chunk, "model", None) or response_model
-            if getattr(chunk, "usage", None) is not None:
-                raw_usage = chunk.usage
+        try:
+            async for chunk in sdk_stream:
+                response_model = getattr(chunk, "model", None) or response_model
+                if getattr(chunk, "usage", None) is not None:
+                    raw_usage = chunk.usage
 
-            for choice in getattr(chunk, "choices", None) or []:
-                saw_choice = True
-                if getattr(choice, "finish_reason", None) is not None:
-                    finish_reason = choice.finish_reason
-                delta = getattr(choice, "delta", None)
-                if delta is None:
-                    continue
+                for choice in getattr(chunk, "choices", None) or []:
+                    saw_choice = True
+                    if getattr(choice, "finish_reason", None) is not None:
+                        finish_reason = choice.finish_reason
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
 
-                piece = getattr(delta, "content", None)
-                if piece:
-                    visible = stripper.feed(piece)
-                    if visible:
-                        text_parts.append(visible)
-                        yield TextDelta(text=visible)
+                    piece = getattr(delta, "content", None)
+                    if piece:
+                        visible = stripper.feed(piece)
+                        if visible:
+                            text_parts.append(visible)
+                            yield TextDelta(text=visible)
 
-                refusal_piece = getattr(delta, "refusal", None)
-                if refusal_piece:
-                    has_refusal = True
-                    text_parts.append(refusal_piece)
-                    yield TextDelta(text=refusal_piece)
+                    refusal_piece = getattr(delta, "refusal", None)
+                    if refusal_piece:
+                        has_refusal = True
+                        text_parts.append(refusal_piece)
+                        yield TextDelta(text=refusal_piece)
 
-                for tc in getattr(delta, "tool_calls", None) or []:
-                    index = int(getattr(tc, "index", 0) or 0)
-                    acc = tool_accs.setdefault(index, _ToolCallAccumulator())
-                    fn = getattr(tc, "function", None)
-                    acc.update(
-                        call_id=getattr(tc, "id", None),
-                        name=getattr(fn, "name", None) if fn else None,
-                        arguments=getattr(fn, "arguments", None) if fn else None,
-                    )
+                    for tc in getattr(delta, "tool_calls", None) or []:
+                        index = int(getattr(tc, "index", 0) or 0)
+                        acc = tool_accs.setdefault(index, _ToolCallAccumulator())
+                        fn = getattr(tc, "function", None)
+                        acc.update(
+                            call_id=getattr(tc, "id", None),
+                            name=getattr(fn, "name", None) if fn else None,
+                            arguments=getattr(fn, "arguments", None) if fn else None,
+                        )
 
-                legacy_fn = getattr(delta, "function_call", None)
-                if legacy_fn is not None:
-                    if legacy_tool_acc is None:
-                        legacy_tool_acc = _ToolCallAccumulator()
-                    legacy_tool_acc.update(
-                        call_id=None,
-                        name=getattr(legacy_fn, "name", None),
-                        arguments=getattr(legacy_fn, "arguments", None),
-                    )
+                    legacy_fn = getattr(delta, "function_call", None)
+                    if legacy_fn is not None:
+                        if legacy_tool_acc is None:
+                            legacy_tool_acc = _ToolCallAccumulator()
+                        legacy_tool_acc.update(
+                            call_id=None,
+                            name=getattr(legacy_fn, "name", None),
+                            arguments=getattr(legacy_fn, "arguments", None),
+                        )
 
-        tail = stripper.finish()
-        if tail:
-            text_parts.append(tail)
-            yield TextDelta(text=tail)
+            tail = stripper.finish()
+            if tail:
+                text_parts.append(tail)
+                yield TextDelta(text=tail)
 
-        blocks: list[Any] = []
-        full_text = "".join(text_parts)
-        if full_text:
-            blocks.append(TextBlock(text=full_text))
+            blocks: list[Any] = []
+            full_text = "".join(text_parts)
+            if full_text:
+                blocks.append(TextBlock(text=full_text))
 
-        for index in sorted(tool_accs):
-            blocks.append(tool_accs[index].finalize())
+            for index in sorted(tool_accs):
+                blocks.append(tool_accs[index].finalize())
 
-        # Prefer the modern representation if a compatible server emits both.
-        if not tool_accs and legacy_tool_acc is not None:
-            blocks.append(legacy_tool_acc.finalize())
+            # Prefer the modern representation if a compatible server emits both.
+            if not tool_accs and legacy_tool_acc is not None:
+                blocks.append(legacy_tool_acc.finalize())
 
-        has_tools = any(isinstance(block, ToolUseBlock) for block in blocks)
-        has_visible_content = any(
-            isinstance(block, TextBlock) and bool(block.text) for block in blocks
-        )
-        raw_stop_reason = _raw_stop_reason(finish_reason)
-        stop_reason = (
-            _canonical_stop_reason(
-                finish_reason,
-                has_tools=has_tools,
-                has_visible_content=has_visible_content,
-                has_refusal=has_refusal,
+            has_tools = any(isinstance(block, ToolUseBlock) for block in blocks)
+            has_visible_content = any(
+                isinstance(block, TextBlock) and bool(block.text) for block in blocks
             )
-            if saw_choice
-            else "empty"
-        )
-
-        yield StreamEnd(
-            message=AssistantMessage(
-                content=blocks,
-                stop_reason=stop_reason,
-                raw_stop_reason=raw_stop_reason,
-                model=response_model or self._model,
-                usage=self._usage_from_raw(raw_usage),
-                reasoning=stripper.reasoning,
+            raw_stop_reason = _raw_stop_reason(finish_reason)
+            stop_reason = (
+                _canonical_stop_reason(
+                    finish_reason,
+                    has_tools=has_tools,
+                    has_visible_content=has_visible_content,
+                    has_refusal=has_refusal,
+                )
+                if saw_choice
+                else "empty"
             )
-        )
+
+            yield StreamEnd(
+                message=AssistantMessage(
+                    content=blocks,
+                    stop_reason=stop_reason,
+                    raw_stop_reason=raw_stop_reason,
+                    model=response_model or self._model,
+                    usage=self._usage_from_raw(raw_usage),
+                    reasoning=stripper.reasoning,
+                )
+            )
+        finally:
+            await _close_sdk_stream(sdk_stream)
 
     def _build_request(self, generation: GenerationRequest) -> dict[str, Any]:
         oai_messages = self._to_openai_messages(

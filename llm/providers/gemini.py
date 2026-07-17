@@ -80,6 +80,14 @@ class GeminiLLMClient(LLMClient):
         self._model = model
         self._default_max_tokens = default_max_tokens
         self._profile = profile or ModelProfile.default()
+        self._closed = False
+
+    async def aclose(self) -> None:
+        """Close the async google-genai client once."""
+        if self._closed:
+            return
+        self._closed = True
+        await self._client.aio.aclose()
 
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         contents = self._to_genai_contents(request.messages)

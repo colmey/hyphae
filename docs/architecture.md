@@ -301,6 +301,8 @@ SDK-specific** (importing it never pulls in a provider SDK):
   async stream(
       request: GenerationRequest,
   ) -> AsyncIterator[StreamChunk]
+
+  async aclose() -> None
   ```
   `complete()` is the canonical completed-turn API and remains the path for
   structured-output calls such as orchestration. `stream()` is an optional
@@ -309,6 +311,8 @@ SDK-specific** (importing it never pulls in a provider SDK):
   emits `StreamEnd(AssistantMessage)`. Native streaming providers override it.
   Streaming rejects a non-`None` `response_schema` explicitly before making a
   provider call.
+  `aclose()` is an idempotent no-op for resource-free clients. Provider
+  implementations override it to release their long-lived async SDK client.
 - **`StreamChunk`** is provider-agnostic and SDK-free:
   `TextDelta(text=...)` carries visible assistant text during generation, and
   `StreamEnd(message=...)` carries the fully assembled `AssistantMessage`.
@@ -751,6 +755,9 @@ adds fallback metadata for in-process callers.
   silently falls back to default on unknown id.
 - `registry.describe_for_prompt()` formats the model inventory as the
   orchestrator-prompt block ("AVAILABLE MODELS").
+- `registry.aclose()` snapshots and clears the lazy cache, deduplicates concrete
+  client identities, and closes them best-effort. The lifespan includes the
+  legacy/default client in that identity set so an alias is never closed twice.
 - Concurrency: clients are built on first use and stashed in a dict
   with no lock. Client construction is idempotent, so a rare double-build
   wastes a few cycles but cannot produce wrong behavior.
@@ -848,7 +855,12 @@ Startup order:
    `guard`, `registry`, `orchestrator`).
 9. A single consolidated "harness ready" INFO log line is emitted.
 
-Shutdown closes MCP connections; other singletons currently need no teardown.
+Shutdown attempts LLM, MCP, and tracer cleanup independently. The default LLM
+and every constructed registry client are deduplicated by object identity and
+closed once; never-constructed lazy clients have no resources to release.
+Provider generators own their SDK streams, while the agent loop owns only the
+provider generator. Cleanup failures are logged without replacing the request
+exception or cancellation that initiated shutdown.
 
 **`api/dependencies.py`** — `Depends()` providers that pull from `app.state`.
 `require_api_key` is the optional route-layer auth gate for `/chat`,

@@ -375,6 +375,22 @@ because client construction is idempotent. **Single process (the default)
 is fully covered** — distinct sessions run concurrently, same-session
 overlaps get 409.
 
+### Graceful shutdown
+
+Uvicorn lifespan shutdown closes every constructed LLM SDK client, then MCP
+connections and the tracer. The default LLM and lazy registry cache are
+combined by object identity, so a client reachable through both paths is closed
+once. Prompted-tool wrappers forward lifecycle ownership to their inner
+provider. One cleanup failure is logged and does not skip the remaining LLMs or
+the MCP/tracer owners; an active task cancellation is preserved.
+
+For OpenAI streaming, the agent loop closes the provider generator and the
+provider generator closes its inner SDK stream. This releases the HTTP response
+on normal completion, timeout, provider failure, cancellation, and clients that
+stop reading early. Repeated graceful shutdown is safe. A forced process kill
+(`SIGKILL`, container hard-stop, or equivalent) bypasses Python lifespan hooks,
+so the operating system must reclaim any remaining sockets and file handles.
+
 ### Logs
 
 Logging is `INFO` by default. Key log lines to know:

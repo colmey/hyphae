@@ -4,16 +4,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from agent import InMemorySessionStore, SessionGuard, build_tool_policy, build_tracer
+from agent import (
+    InMemorySessionStore,
+    SessionGuard,
+    Tracer,
+    build_tool_policy,
+    build_tracer,
+)
 from api import router
 from api.openai_compatible import openai_auth_exception_handler
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from llm import build_llm_client
+from llm import LLMClient, build_llm_client
 from mcp_layer import MCPManager
 from config import (
     get_settings,
@@ -28,6 +36,52 @@ from orchestrator import LLMRegistry, Orchestrator
 load_secrets()
 
 logger = logging.getLogger(__name__)
+
+
+async def _close_application_resources(
+    *,
+    llm: LLMClient,
+    registry: LLMRegistry | None,
+    mcp: MCPManager | None,
+    tracer: Tracer | None,
+) -> None:
+    """Close process-owned resources without masking the active outcome."""
+    active_cancellation: asyncio.CancelledError | None = None
+
+    async def _run_async_cleanup(
+        label: str, cleanup: Callable[[], Awaitable[None]]
+    ) -> None:
+        nonlocal active_cancellation
+        try:
+            await cleanup()
+        except asyncio.CancelledError as exc:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                active_cancellation = active_cancellation or exc
+            else:
+                logger.warning("%s cleanup was cancelled", label, exc_info=True)
+        except Exception:  # noqa: BLE001 -- shutdown is best-effort.
+            logger.warning("%s cleanup failed", label, exc_info=True)
+
+    if registry is not None:
+        await _run_async_cleanup(
+            "LLM",
+            lambda: registry.aclose(additional_clients=(llm,)),
+        )
+    else:
+        await _run_async_cleanup("LLM", llm.aclose)
+
+    if mcp is not None:
+        await _run_async_cleanup("MCP", mcp.shutdown)
+
+    if tracer is not None:
+        try:
+            tracer.close()
+        except Exception:  # noqa: BLE001 -- shutdown is best-effort.
+            logger.warning("tracer cleanup failed", exc_info=True)
+
+    if active_cancellation is not None:
+        raise active_cancellation
 
 
 def _try_build_orchestration(
@@ -149,47 +203,53 @@ async def lifespan(app: FastAPI):
 
     llm = build_llm_client(settings)
 
-    mcp_config = load_mcp_config(settings.mcp_config_path)
-    mcp = MCPManager(mcp_config)
-    await mcp.startup()
-
-    # Dispatch policy is what may run; orchestration is only what the model sees.
-    policy = build_tool_policy(mcp_config.tool_policy)
-
-    # The guard rejects concurrent requests for the same session_id.
-    store = InMemorySessionStore(
-        ttl_seconds=settings.session_ttl_seconds,
-        max_count=settings.session_max_count,
-    )
-    guard = SessionGuard()
-
-    registry, orchestrator = _try_build_orchestration(settings, mcp)
-
-    tracer = build_tracer(enabled=settings.trace_enabled, path=settings.trace_path)
-
-    app.state.settings = settings
-    app.state.llm = llm
-    app.state.mcp = mcp
-    app.state.store = store
-    app.state.guard = guard
-    app.state.registry = registry
-    app.state.orchestrator = orchestrator
-    app.state.policy = policy
-    app.state.tracer = tracer
-
-    _log_ready_summary(
-        settings=settings,
-        mcp=mcp,
-        registry=registry,
-    )
-
+    mcp: MCPManager | None = None
+    registry: LLMRegistry | None = None
+    tracer: Tracer | None = None
     try:
+        mcp_config = load_mcp_config(settings.mcp_config_path)
+        mcp = MCPManager(mcp_config)
+        await mcp.startup()
+
+        # Dispatch policy is what may run; orchestration is only what the model sees.
+        policy = build_tool_policy(mcp_config.tool_policy)
+
+        # The guard rejects concurrent requests for the same session_id.
+        store = InMemorySessionStore(
+            ttl_seconds=settings.session_ttl_seconds,
+            max_count=settings.session_max_count,
+        )
+        guard = SessionGuard()
+
+        registry, orchestrator = _try_build_orchestration(settings, mcp)
+
+        tracer = build_tracer(enabled=settings.trace_enabled, path=settings.trace_path)
+
+        app.state.settings = settings
+        app.state.llm = llm
+        app.state.mcp = mcp
+        app.state.store = store
+        app.state.guard = guard
+        app.state.registry = registry
+        app.state.orchestrator = orchestrator
+        app.state.policy = policy
+        app.state.tracer = tracer
+
+        _log_ready_summary(
+            settings=settings,
+            mcp=mcp,
+            registry=registry,
+        )
+
         yield
     finally:
         logger.info("shutting down harness")
-        await mcp.shutdown()
-        if tracer is not None:
-            tracer.close()
+        await _close_application_resources(
+            llm=llm,
+            registry=registry,
+            mcp=mcp,
+            tracer=tracer,
+        )
 
 
 app = FastAPI(

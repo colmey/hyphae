@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -260,12 +261,168 @@ class _StreamingCompletions:
         return stream()
 
 
+class _OwnedSDKStream:
+    def __init__(
+        self,
+        chunks: list[Any] | None = None,
+        *,
+        failure: Exception | None = None,
+        blocked: bool = False,
+        close_failure: Exception | None = None,
+    ) -> None:
+        self._chunks = list(chunks or [])
+        self._failure = failure
+        self._blocked = blocked
+        self._blocker = asyncio.Event()
+        self.entered = asyncio.Event()
+        self._index = 0
+        self.close_calls = 0
+        self.close_failure = close_failure
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        self.entered.set()
+        if self._blocked:
+            await self._blocker.wait()
+        if self._index < len(self._chunks):
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+        if self._failure is not None:
+            raise self._failure
+        raise StopAsyncIteration
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_failure is not None:
+            raise self.close_failure
+
+
+class _OwnedStreamingCompletions:
+    def __init__(self, stream: _OwnedSDKStream) -> None:
+        self.stream = stream
+
+    async def create(self, **request: Any) -> _OwnedSDKStream:
+        return self.stream
+
+
 def _stream_client(chunks: list[Any]) -> OpenAILLMClient:
     client = _client(compatible=True)
     client._client = SimpleNamespace(
         chat=SimpleNamespace(completions=_StreamingCompletions(chunks))
     )
     return client
+
+
+def _owned_stream_client(stream: _OwnedSDKStream) -> OpenAILLMClient:
+    client = _client(compatible=True)
+    client._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_OwnedStreamingCompletions(stream))
+    )
+    return client
+
+
+def _text_chunk(text: str = "piece", *, finish_reason: str | None = "stop") -> Any:
+    return SimpleNamespace(
+        model="provider-model",
+        usage=None,
+        choices=[
+            SimpleNamespace(
+                finish_reason=finish_reason,
+                delta=SimpleNamespace(
+                    content=text,
+                    refusal=None,
+                    function_call=None,
+                    tool_calls=None,
+                ),
+            )
+        ],
+    )
+
+
+@pytest.mark.anyio
+async def test_sdk_stream_closes_after_normal_completion() -> None:
+    sdk_stream = _OwnedSDKStream([_text_chunk()])
+
+    emitted = [
+        chunk
+        async for chunk in _owned_stream_client(sdk_stream).stream(
+            GenerationRequest(messages=[])
+        )
+    ]
+
+    assert any(isinstance(chunk, StreamEnd) for chunk in emitted)
+    assert sdk_stream.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_sdk_stream_closes_when_provider_generator_closes_early() -> None:
+    sdk_stream = _OwnedSDKStream(
+        [_text_chunk("first", finish_reason=None), _text_chunk("second")]
+    )
+    provider_stream = _owned_stream_client(sdk_stream).stream(
+        GenerationRequest(messages=[])
+    )
+
+    await anext(provider_stream)
+    await provider_stream.aclose()
+
+    assert sdk_stream.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_sdk_stream_closes_on_timeout() -> None:
+    sdk_stream = _OwnedSDKStream(blocked=True)
+    provider_stream = _owned_stream_client(sdk_stream).stream(
+        GenerationRequest(messages=[])
+    )
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.01):
+            await anext(provider_stream)
+
+    assert sdk_stream.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_sdk_stream_close_failure_preserves_provider_error() -> None:
+    provider_error = RuntimeError("provider stream failed")
+    sdk_stream = _OwnedSDKStream(
+        failure=provider_error,
+        close_failure=RuntimeError("stream close failed"),
+    )
+
+    with pytest.raises(RuntimeError, match="provider stream failed") as raised:
+        _ = [
+            chunk
+            async for chunk in _owned_stream_client(sdk_stream).stream(
+                GenerationRequest(messages=[])
+            )
+        ]
+
+    assert raised.value is provider_error
+    assert sdk_stream.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_sdk_stream_close_failure_preserves_task_cancellation() -> None:
+    sdk_stream = _OwnedSDKStream(
+        blocked=True,
+        close_failure=RuntimeError("stream close failed"),
+    )
+    provider_stream = _owned_stream_client(sdk_stream).stream(
+        GenerationRequest(messages=[])
+    )
+    task = asyncio.create_task(anext(provider_stream))
+    await sdk_stream.entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sdk_stream.close_calls == 1
 
 
 @pytest.mark.anyio

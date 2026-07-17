@@ -90,7 +90,6 @@ models:
       from natural language understanding to advanced problem solving.
     supports_native_tools: true
     context_window: 131072
-    default: true
 
   glm-4.7-flash:
     provider: openai
@@ -151,3 +150,4 @@ models:
     supports_native_tools: true
     context_window: 262144
     max_tokens: 32768
+    default: true

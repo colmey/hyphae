@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from agent import JSONLTracer, Session, run_agent
+from agent import JSONLTracer, RunContext, RunLimits, Session, run_agent
 from agent.events import DoneEvent, ToolCallEvent, ToolResultEvent, UsageEvent
 from llm.client import LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
@@ -58,14 +59,21 @@ class FakeMCP:
 async def _drive(tracer) -> list:
     session = Session()
     session.append_user("what's the weather?")
+    limits = RunLimits()
+    context = RunContext.start(
+        max_run_seconds=limits.max_run_seconds,
+        base_logger=logging.getLogger(__name__),
+        tracer=tracer,
+        run_id="run_test_123",
+    )
     return [
         event
         async for event in run_agent(
             session=session,
             llm=ScriptedLLM(),
             mcp=FakeMCP(),
-            tracer=tracer,
-            run_id="run_test_123",
+            limits=limits,
+            context=context,
         )
     ]
 

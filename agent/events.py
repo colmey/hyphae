@@ -74,7 +74,7 @@ class UsageEvent:
 class OrchestrationDecisionEvent:
     """The orchestrator picked a model, tool subset, and system prompt.
 
-    Emitted by the route (not the loop) before run_agent() runs, so that
+    Emitted by TurnRunner before run_agent() runs, so that
     clients can see why a particular model was chosen. Carries the same
     fields as orchestrator.schemas.OrchestrationResult but lives here so
     the API layer doesn't have to import the orchestrator package just to

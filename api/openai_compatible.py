@@ -9,6 +9,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import replace
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, Request
@@ -36,7 +37,7 @@ from .dependencies import (
     get_turn_runner,
     require_api_key,
 )
-from .turn import TurnRunner
+from .turn import TurnRequest, TurnRunner
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -228,7 +229,12 @@ def _chunk(cid: str, created: int, model: str, delta: dict, finish_reason: str |
     }
 
 
-async def _stream(model: str, runner: TurnRunner, turn: dict, tool_block_max_chars: int) -> AsyncIterator[dict]:
+async def _stream(
+    model: str,
+    runner: TurnRunner,
+    turn: TurnRequest,
+    tool_block_max_chars: int,
+) -> AsyncIterator[dict]:
     """Render core events as OpenAI SSE frames.
 
     Successful streams end with a finish-reason chunk. Failed streams instead
@@ -246,26 +252,27 @@ async def _stream(model: str, runner: TurnRunner, turn: dict, tool_block_max_cha
         return {"data": json.dumps(_error_payload(message, err_type="server_error"))}
 
     try:
-        async for event in runner.events(**turn):
-            if failed:
-                continue
-            if isinstance(event, TextEvent):
-                yield {"data": json.dumps(_chunk(cid, created, model, {"content": event.text}, None))}
-            elif isinstance(event, ToolCallEvent):
-                pending_args[event.id] = event.input
-            elif isinstance(event, ToolResultEvent):
-                block = _tool_details(event, pending_args.pop(event.id, None), tool_block_max_chars)
-                yield {"data": json.dumps(_chunk(cid, created, model, {"content": block}, None))}
-            elif isinstance(event, ErrorEvent):
-                failed = True
-                yield server_error(event.message)
-            elif isinstance(event, DoneEvent):
-                done_reason = event.reason
-                try:
-                    _finish_reason(done_reason)
-                except ValueError:
+        async with runner.open(turn) as execution:
+            async for event in execution.events:
+                if failed:
+                    continue
+                if isinstance(event, TextEvent):
+                    yield {"data": json.dumps(_chunk(cid, created, model, {"content": event.text}, None))}
+                elif isinstance(event, ToolCallEvent):
+                    pending_args[event.id] = event.input
+                elif isinstance(event, ToolResultEvent):
+                    block = _tool_details(event, pending_args.pop(event.id, None), tool_block_max_chars)
+                    yield {"data": json.dumps(_chunk(cid, created, model, {"content": block}, None))}
+                elif isinstance(event, ErrorEvent):
                     failed = True
-                    yield server_error(_terminal_error_message(done_reason))
+                    yield server_error(event.message)
+                elif isinstance(event, DoneEvent):
+                    done_reason = event.reason
+                    try:
+                        _finish_reason(done_reason)
+                    except ValueError:
+                        failed = True
+                        yield server_error(_terminal_error_message(done_reason))
     except Exception as e:  # noqa: BLE001 -- the stream is already open; surface, don't crash.
         logger.exception("error during /v1 stream")
         if not failed:
@@ -317,7 +324,7 @@ async def chat_completions(
             session.append_assistant(AssistantMessage(content=[TextBlock(text=text)]))
 
     # `model` is a routing hint; the runner owns singleton dependencies.
-    turn = dict(
+    turn = TurnRequest(
         prompt=prompt,
         session=session,
         system_override=system_override,
@@ -329,25 +336,27 @@ async def chat_completions(
             _stream(
                 reported_model,
                 runner,
-                {**turn, "stream": True},
+                replace(turn, stream=True),
                 settings.openai_tool_block_max_chars,
             )
         )
 
     try:
-        answer, done_reason, usage = await runner.run(**turn)
+        result = await runner.run(turn)
     except Exception as e:  # noqa: BLE001 -- never leak a stack trace to the client.
         logger.exception("error handling /v1/chat/completions")
         return _error_response(str(e), status=500, err_type="server_error")
 
     try:
-        _finish_reason(done_reason)
+        _finish_reason(result.done_reason)
     except ValueError:
         return _error_response(
-            _terminal_error_message(done_reason), status=500, err_type="server_error"
+            _terminal_error_message(result.done_reason), status=500, err_type="server_error"
         )
 
-    return JSONResponse(_completion_body(answer, reported_model, usage, done_reason))
+    return JSONResponse(
+        _completion_body(result.answer, reported_model, result.usage, result.done_reason)
+    )
 
 
 @router.get("/v1/models", dependencies=[Depends(require_api_key)])
@@ -358,7 +367,7 @@ async def list_models(
     ids = registry.model_ids if registry is not None else [settings.llm_model]
     created = int(time.time())
     data = [
-        {"id": mid, "object": "model", "created": created, "owned_by": "pyaiharness"}
+        {"id": mid, "object": "model", "created": created, "owned_by": "hyphae"}
         for mid in ids
     ]
     return JSONResponse({"object": "list", "data": data})

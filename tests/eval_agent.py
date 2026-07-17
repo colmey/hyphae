@@ -31,13 +31,14 @@ from agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
+    RunLimits,
     SessionGuard,
     TextEvent,
     ToolCallEvent,
     ToolResultEvent,
     run_agent,
 )
-from api.turn import TurnRunner
+from api.turn import TurnRequest, TurnRunner
 from config import get_settings
 from llm.client import LLMClient, build_llm_client
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
@@ -143,7 +144,9 @@ class ScriptedOrchestrator:
     def __init__(self, config: dict[str, Any]) -> None:
         self._config = config
 
-    async def decide(self, prompt, preferences=None, history=None) -> OrchestrationDecision:
+    async def decide(
+        self, prompt, tools, preferences=None, history=None, timeout=None, log=None
+    ) -> OrchestrationDecision:
         result = OrchestrationResult(
             selected_model_id=self._config.get("selected_model_id", "default"),
             selected_tools=list(self._config.get("selected_tools", [])),
@@ -326,21 +329,25 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
             policy=None,
             tracer=None,
         )
-        async for event in runner.events(
+        turn = TurnRequest(
             prompt=case["prompt"],
             session=session,
             system_override=(case.get("run") or {}).get("system"),
-        ):
-            events.append(event)
+        )
+        async with runner.open(turn) as execution:
+            events.extend([event async for event in execution.events])
     else:
         session.append_user(case["prompt"])
+        run_options = _run_kwargs(case)
+        thinking_level = run_options.pop("thinking_level", None)
         async for event in run_agent(
             session=session,
             llm=llm,
             mcp=mcp,
             store=store,
             system=(case.get("run") or {}).get("system"),
-            **_run_kwargs(case),
+            thinking_level=thinking_level,
+            limits=RunLimits(**run_options),
         ):
             events.append(event)
 
@@ -362,11 +369,13 @@ async def _run_live(case: dict[str, Any]) -> RunArtifacts:
         llm=llm,
         mcp=mcp,
         store=store,
-        max_iterations=(case.get("expect") or {}).get("max_iterations", 2),
         tools=[],
-        max_retries=settings.llm_max_retries,
-        retry_base_delay=settings.llm_retry_base_delay,
-        llm_timeout_seconds=settings.llm_timeout_seconds,
+        limits=RunLimits(
+            max_iterations=(case.get("expect") or {}).get("max_iterations", 2),
+            max_retries=settings.llm_max_retries,
+            retry_base_delay=settings.llm_retry_base_delay,
+            llm_timeout_seconds=settings.llm_timeout_seconds,
+        ),
     ):
         events.append(event)
     answer = "".join(e.text for e in events if isinstance(e, TextEvent)).strip()

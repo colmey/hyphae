@@ -1,12 +1,10 @@
-# api/turn.py
-
-"""Shared orchestrate-to-loop core used by native and /v1 route renderers."""
+"""Guarded turn execution shared by native and OpenAI-compatible routes."""
 
 from __future__ import annotations
 
 import logging
-import uuid
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import HTTPException
@@ -14,6 +12,9 @@ from fastapi import HTTPException
 from agent import (
     DoneEvent,
     Event,
+    OrchestrationDecisionEvent,
+    RunContext,
+    RunLimits,
     Session,
     SessionBusyError,
     SessionGuard,
@@ -22,173 +23,66 @@ from agent import (
     ToolPolicy,
     Tracer,
     run_agent,
-    run_logger,
 )
 from llm.client import LLMClient
-from mcp_layer import MCPManager
-from orchestrator import LLMRegistry, Orchestrator, ToolPreferences
+from mcp_layer import MCPManager, ToolSnapshot
+from orchestrator import LLMRegistry, Orchestrator
 
-from .schemas import OrchestrationInfo, TokenUsage
+from .schemas import TokenUsage
 
 logger = logging.getLogger(__name__)
 
 
-async def _resolve_routing(
-    *,
-    prompt: str,
-    system_override: str | None,
-    preferences: ToolPreferences | None,
-    model_id: str | None,
-    orchestrator: Optional[Orchestrator],
-    registry: Optional[LLMRegistry],
-    mcp: MCPManager,
-    default_llm: LLMClient,
-    history: list | None,
-) -> tuple[LLMClient, list[dict], str | None, str | None, OrchestrationInfo | None, Any]:
-    """Decide model, tools, thinking level, and system prompt for one request.
+@dataclass(frozen=True)
+class TurnRequest:
+    """All request-scoped input needed to execute one turn."""
 
-    Returns selected LLM, tools, system prompt, thinking level, orchestration
-    metadata, and selected model entry (when available for context budgeting).
-    """
-    if orchestrator is None or registry is None:
-        return default_llm, mcp.get_tools_for_llm(), system_override, None, None, None
-
-    decision = await orchestrator.decide(prompt, preferences=preferences, history=history)
-    result = decision.result
-    if decision.fallback_used:
-        logger.info("orchestration fallback in effect: %s", decision.fallback_reason)
-
-    # A valid model hint wins over the orchestrator's model pick.
-    chosen_id = model_id if (model_id and model_id in registry.model_ids) else result.selected_model_id
-    resolved_id, llm = registry.get_or_default(chosen_id)
-
-    # Best effort: fake registries/tests may not expose get_entry.
-    try:
-        model_entry = registry.get_entry(resolved_id)
-    except Exception:  # noqa: BLE001
-        model_entry = None
-
-    # Filter against live inventory so disabled tools cannot slip through.
-    selected = set(result.selected_tools)
-    tools_for_llm = [t for t in mcp.get_tools_for_llm() if t["name"] in selected]
-
-    system_prompt = system_override if system_override is not None else result.generated_system_prompt
-
-    info = OrchestrationInfo(
-        model_id=resolved_id,
-        tools=[t["name"] for t in tools_for_llm],
-        system_prompt=system_prompt,
-        fallback_used=decision.fallback_used,
-        thinking_level=result.thinking_level,
-    )
-    return llm, tools_for_llm, system_prompt, result.thinking_level, info, model_entry
+    prompt: str
+    session: Session
+    system_override: str | None = None
+    model_id: str | None = None
+    stream: bool = False
 
 
-async def _turn_events(
-    *,
-    prompt: str,
-    session: Session,
-    system_override: str | None,
-    preferences: ToolPreferences | None,
-    model_id: str | None,
-    llm: LLMClient,
-    mcp: MCPManager,
-    store: SessionStore,
-    guard: SessionGuard,
-    settings,
-    orchestrator: Optional[Orchestrator],
-    registry: Optional[LLMRegistry],
-    policy: Optional[ToolPolicy] = None,
-    tracer: Optional[Tracer] = None,
-    stream: bool = False,
-) -> AsyncIterator[Event]:
-    """Run one user turn end to end, yielding the loop's events as they happen.
+@dataclass(frozen=True)
+class TurnMetadata:
+    """Stable identity and sanitized routing facts for one accepted turn."""
 
-    Resolves routing, appends the prompt under the same-session guard, and
-    drives the agent loop with the selected model/tools/system.
-    """
-    run_id = uuid.uuid4().hex
-    rlog = run_logger(logger, run_id)
-
-    selected_llm, selected_tools, system_prompt, thinking_level, orch_info, model_entry = await _resolve_routing(
-        prompt=prompt,
-        system_override=system_override,
-        preferences=preferences,
-        model_id=model_id,
-        orchestrator=orchestrator,
-        registry=registry,
-        mcp=mcp,
-        default_llm=llm,
-        history=session.messages,
-    )
-
-    if orch_info is not None:
-        rlog.info(
-            "chat: orchestrator picked model=%s tools=%d thinking=%s fallback=%s",
-            orch_info.model_id, len(orch_info.tools),
-            orch_info.thinking_level, orch_info.fallback_used,
-        )
-        rlog.debug("chat: system_prompt=%r tools=%r", orch_info.system_prompt, orch_info.tools)
-    else:
-        rlog.info("chat: legacy mode (orchestration disabled), tools=%d", len(selected_tools))
-
-    # Selected model entry wins; Settings defaults fill gaps.
-    context_window = (
-        getattr(model_entry, "context_window", None)
-        or settings.context_default_window_tokens
-    )
-    max_output_tokens = (
-        getattr(model_entry, "max_tokens", None)
-        or settings.llm_max_tokens
-    )
-
-    # Reject same-session concurrency instead of interleaving turns.
-    try:
-        async with guard.claim(session.session_id):
-            session.append_user(prompt)
-            async for event in run_agent(
-                session=session,
-                llm=selected_llm,
-                mcp=mcp,
-                store=store,
-                system=system_prompt,
-                max_iterations=settings.max_loop_iterations,
-                max_tokens=max_output_tokens,
-                tools=selected_tools,
-                llm_timeout_seconds=settings.llm_timeout_seconds,
-                tool_timeout_seconds=settings.tool_timeout_seconds,
-                max_retries=settings.llm_max_retries,
-                retry_base_delay=settings.llm_retry_base_delay,
-                tool_result_max_chars=settings.tool_result_max_chars,
-                max_run_tokens=settings.max_run_tokens,
-                max_run_seconds=settings.max_run_seconds,
-                abort_after_consecutive_tool_failures=settings.abort_after_consecutive_tool_failures,
-                thinking_level=thinking_level,
-                context_strategy=settings.context_strategy,
-                context_window=context_window,
-                context_safety_margin_tokens=settings.context_safety_margin_tokens,
-                context_recent_messages=settings.context_recent_messages,
-                context_summary_max_tokens=settings.context_summary_max_tokens,
-                policy=policy,
-                tracer=tracer,
-                run_id=run_id,
-                stream=stream,
-            ):
-                if isinstance(event, DoneEvent):
-                    rlog.info(
-                        "chat: done reason=%s iterations=%d tokens=%d session=%s",
-                        event.reason, event.iterations, event.total_tokens, session.session_id,
-                    )
-                yield event
-    except SessionBusyError:
-        raise HTTPException(
-            status_code=409,
-            detail=f"session {session.session_id!r} is processing another request",
-        )
+    run_id: str
+    model_id: str
+    orchestration: OrchestrationDecisionEvent | None = None
 
 
-async def _collect(events: AsyncIterator[Event]) -> tuple[str, str, TokenUsage]:
-    """Collect a turn's events into (answer, done_reason, usage)."""
+@dataclass(frozen=True)
+class TurnExecution:
+    """Metadata plus events whose lifetime is owned by ``TurnRunner.open``."""
+
+    metadata: TurnMetadata
+    events: AsyncIterator[Event]
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    """Buffered terminal representation of a turn."""
+
+    answer: str
+    done_reason: str
+    usage: TokenUsage
+    metadata: TurnMetadata
+
+
+@dataclass(frozen=True)
+class _ResolvedRouting:
+    llm: LLMClient
+    tools: list[dict[str, Any]]
+    system_prompt: str | None
+    thinking_level: str | None
+    model_id: str
+    model_entry: Any = None
+    orchestration: OrchestrationDecisionEvent | None = None
+
+
+async def _collect(events: AsyncIterator[Event], metadata: TurnMetadata) -> TurnResult:
     text_parts: list[str] = []
     done_reason = "unknown"
     usage = TokenUsage()
@@ -203,15 +97,17 @@ async def _collect(events: AsyncIterator[Event]) -> tuple[str, str, TokenUsage]:
                 total_tokens=event.total_tokens,
                 thinking_tokens=event.thinking_tokens,
             )
-    return "".join(text_parts).strip(), done_reason, usage
+    return TurnResult(
+        answer="".join(text_parts).strip(),
+        done_reason=done_reason,
+        usage=usage,
+        metadata=metadata,
+    )
 
 
 @dataclass(frozen=True)
 class TurnRunner:
-    """The seam between an API renderer and the orchestrate->loop core.
-
-    Holds process-wide singletons; methods take only per-request primitives.
-    """
+    """Own the complete lifecycle of an accepted turn."""
 
     llm: LLMClient
     mcp: MCPManager
@@ -222,53 +118,166 @@ class TurnRunner:
     registry: Optional[LLMRegistry]
     policy: Optional[ToolPolicy]
     tracer: Optional[Tracer]
+    limits: RunLimits = field(init=False)
 
-    def events(
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "limits", RunLimits.from_settings(self.settings))
+
+    async def _resolve_routing(
+        self,
+        request: TurnRequest,
+        tools: ToolSnapshot,
+        context: RunContext,
+    ) -> _ResolvedRouting:
+        if self.orchestrator is None or self.registry is None:
+            context.logger.info(
+                "chat: legacy mode (orchestration disabled), tools=%d", len(tools.tools)
+            )
+            return _ResolvedRouting(
+                llm=self.llm,
+                tools=tools.as_llm_tools(),
+                system_prompt=request.system_override,
+                thinking_level=None,
+                model_id=self.settings.llm_model,
+            )
+
+        decision = await self.orchestrator.decide(
+            request.prompt,
+            tools,
+            history=request.session.messages,
+            timeout=context.effective_timeout(self.limits.llm_timeout_seconds),
+            log=context.logger,
+        )
+        result = decision.result
+        if decision.fallback_used:
+            context.logger.info("orchestration fallback in effect: %s", decision.fallback_reason)
+
+        chosen_id = (
+            request.model_id
+            if request.model_id and request.model_id in self.registry.model_ids
+            else result.selected_model_id
+        )
+        resolved_id, selected_llm = self.registry.get_or_default(chosen_id)
+        try:
+            model_entry = self.registry.get_entry(resolved_id)
+        except (AttributeError, KeyError):
+            model_entry = None
+
+        selected_tools = tools.selected(result.selected_tools)
+        system_prompt = (
+            request.system_override
+            if request.system_override is not None
+            else result.generated_system_prompt
+        )
+        event = OrchestrationDecisionEvent(
+            model_id=resolved_id,
+            tools=[tool.name for tool in selected_tools.tools],
+            system_prompt=system_prompt,
+            fallback_used=decision.fallback_used,
+            thinking_level=result.thinking_level,
+        )
+        context.logger.info(
+            "chat: orchestrator picked model=%s tools=%d thinking=%s fallback=%s",
+            resolved_id,
+            len(selected_tools.tools),
+            result.thinking_level,
+            decision.fallback_used,
+        )
+        context.logger.debug(
+            "chat: system_prompt=%r tools=%r", system_prompt, event.tools
+        )
+        return _ResolvedRouting(
+            llm=selected_llm,
+            tools=selected_tools.as_llm_tools(),
+            system_prompt=system_prompt,
+            thinking_level=result.thinking_level,
+            model_id=resolved_id,
+            model_entry=model_entry,
+            orchestration=event,
+        )
+
+    async def _events(
         self,
         *,
-        prompt: str,
-        session: Session,
-        system_override: str | None = None,
-        preferences: ToolPreferences | None = None,
-        model_id: str | None = None,
-        stream: bool = False,
+        request: TurnRequest,
+        routing: _ResolvedRouting,
+        limits: RunLimits,
+        context: RunContext,
     ) -> AsyncIterator[Event]:
-        """Run one turn, yielding the loop's events live. See `_turn_events`."""
-        return _turn_events(
-            prompt=prompt,
-            session=session,
-            system_override=system_override,
-            preferences=preferences,
-            model_id=model_id,
-            llm=self.llm,
+        request.session.append_user(request.prompt)
+
+        if routing.orchestration is not None:
+            yield await context.emit(routing.orchestration)
+
+        if context.deadline_exceeded():
+            context.logger.warning(
+                "turn deadline exhausted during routing (elapsed=%.3fs)", context.elapsed()
+            )
+            yield await context.emit(DoneEvent(reason="deadline_exceeded", iterations=0))
+            return
+
+        agent_events = run_agent(
+            session=request.session,
+            llm=routing.llm,
             mcp=self.mcp,
             store=self.store,
-            guard=self.guard,
-            settings=self.settings,
-            orchestrator=self.orchestrator,
-            registry=self.registry,
+            system=routing.system_prompt,
+            tools=routing.tools,
+            thinking_level=routing.thinking_level,
+            limits=limits,
+            context=context,
             policy=self.policy,
-            tracer=self.tracer,
-            stream=stream,
+            stream=request.stream,
         )
+        try:
+            async for event in agent_events:
+                if isinstance(event, DoneEvent):
+                    context.logger.info(
+                        "chat: done reason=%s iterations=%d tokens=%d session=%s",
+                        event.reason,
+                        event.iterations,
+                        event.total_tokens,
+                        request.session.session_id,
+                    )
+                yield event
+        finally:
+            await agent_events.aclose()
 
-    async def run(
-        self,
-        *,
-        prompt: str,
-        session: Session,
-        system_override: str | None = None,
-        preferences: ToolPreferences | None = None,
-        model_id: str | None = None,
-    ) -> tuple[str, str, TokenUsage]:
-        """Run one turn and collect it into (answer, done_reason, usage)."""
-        return await _collect(
-            self.events(
-                prompt=prompt,
-                session=session,
-                system_override=system_override,
-                preferences=preferences,
-                model_id=model_id,
-                stream=False,
+    @asynccontextmanager
+    async def open(self, request: TurnRequest) -> AsyncIterator[TurnExecution]:
+        """Claim a session and hold it through routing, iteration, and cleanup."""
+        try:
+            async with self.guard.claim(request.session.session_id):
+                context = RunContext.start(
+                    max_run_seconds=self.limits.max_run_seconds,
+                    base_logger=logger,
+                    tracer=self.tracer,
+                )
+                tool_snapshot = ToolSnapshot.from_llm_tools(self.mcp.get_tools_for_llm())
+                routing = await self._resolve_routing(request, tool_snapshot, context)
+                limits = self.limits.for_model(routing.model_entry)
+                metadata = TurnMetadata(
+                    run_id=context.run_id,
+                    model_id=routing.model_id,
+                    orchestration=routing.orchestration,
+                )
+                events = self._events(
+                    request=request,
+                    routing=routing,
+                    limits=limits,
+                    context=context,
+                )
+                try:
+                    yield TurnExecution(metadata=metadata, events=events)
+                finally:
+                    await events.aclose()
+        except SessionBusyError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"session {request.session.session_id!r} is processing another request",
             )
-        )
+
+    async def run(self, request: TurnRequest) -> TurnResult:
+        """Buffer one turn while preserving the same guarded execution envelope."""
+        async with self.open(request) as execution:
+            return await _collect(execution.events, execution.metadata)

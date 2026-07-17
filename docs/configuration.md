@@ -1,4 +1,4 @@
-# PyAiHarness — Configuration
+# hyphae — Configuration
 
 Everything the harness reads at startup: environment variables and the
 three files under `config/` (MCP servers, the model registry, and the

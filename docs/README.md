@@ -1,4 +1,4 @@
-# PyAiHarness — Reference Docs
+# hyphae — Reference Docs
 
 A minimal, extendable AI harness in Python. Receives a prompt over HTTP,
 runs an **orchestrator** to pick a model + tool subset + system prompt,
@@ -21,6 +21,7 @@ use, streaming, persistence) without rewrites.
 | Env vars or the three `config/` files | [configuration.md](configuration.md) |
 | The HTTP request/response contract (`/chat`, `/health`) | [api.md](api.md) |
 | Running, extending, smoke tests, known limitations | [operations.md](operations.md) |
+| Implementing the audit remediation work | [remediation plan index](remediation/README.md) |
 
 Each file also cross-links to the others at the top.
 

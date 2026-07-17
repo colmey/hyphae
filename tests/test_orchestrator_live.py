@@ -34,7 +34,7 @@ import pytest
 
 from config import get_settings, load_mcp_config, reset_settings
 from llm.schemas import Message, TextBlock
-from mcp_layer import MCPManager
+from mcp_layer import MCPManager, ToolSnapshot
 from config import load_models_config, load_orchestrator_prompt
 from orchestrator import LLMRegistry, Orchestrator, ToolPreferences
 from orchestrator.schemas import OrchestrationResult
@@ -85,11 +85,14 @@ def _check_history_block(orch: Orchestrator) -> None:
         Message.user("List the tables in the customer database."),
         Message.assistant([TextBlock(text="The tables are: customers, orders, invoices.")]),
     ]
-    with_hist = orch._build_prompt("now do the same for last month", history=history)
+    tools = ToolSnapshot()
+    with_hist = orch._build_prompt(
+        "now do the same for last month", tools, history=history
+    )
     assert "CONVERSATION SO FAR" in with_hist, "history block missing from prompt"
     assert "customer database" in with_hist, "history content missing from prompt"
 
-    without_hist = orch._build_prompt("hello", history=None)
+    without_hist = orch._build_prompt("hello", tools, history=None)
     assert "CONVERSATION SO FAR" not in without_hist, \
         "first-turn prompt should have no history block"
     print("  history block OK (present with history, absent without)\n")
@@ -140,7 +143,6 @@ async def test_configured_orchestration_decisions() -> None:
         print("=" * 72)
         orch = Orchestrator(
             registry=registry,
-            mcp=mcp,
             system_prompt=orch_prompt,
             model_id=settings.orchestrator_model_id or None,
         )
@@ -157,7 +159,8 @@ async def test_configured_orchestration_decisions() -> None:
         for i, msg in enumerate(messages, 1):
             print(f"\n--- decision {i} ---")
             print(f"  user: {msg!r}")
-            decision = await orch.decide(msg)
+            snapshot = ToolSnapshot.from_llm_tools(mcp.get_tools_for_llm())
+            decision = await orch.decide(msg, snapshot)
             result = decision.result
 
             print(f"  fallback_used:           {decision.fallback_used}")
@@ -205,7 +208,10 @@ async def test_configured_orchestration_decisions() -> None:
                 [SimpleNamespace(name=server, tools={tool: ["arg1"]})]
             )
             print(f"\n--- preference decision (prioritizing {pref_tool!r}) ---")
-            decision = await orch.decide("Do a trivial task.", preferences=prefs)
+            snapshot = ToolSnapshot.from_llm_tools(mcp.get_tools_for_llm())
+            decision = await orch.decide(
+                "Do a trivial task.", snapshot, preferences=prefs
+            )
             print(f"  selected_tools: {decision.result.selected_tools}")
             assert pref_tool in decision.result.selected_tools, (
                 f"preferred tool {pref_tool!r} was not guaranteed into the selection"

@@ -7,9 +7,9 @@ The chat endpoint is plain-text in / plain-text out (see api/routes.py), so it
 has no request/response body schema. What remains here are the JSON shapes the
 harness still uses:
   - HealthResponse: the GET /health body.
-  - OrchestrationInfo / TokenUsage: internal value objects produced while
-    running a turn (routing metadata, token cost) — surfaced in logs/traces,
-    not in the /chat response.
+  - TokenUsage: internal token-cost value surfaced by buffered turns.
+  - OrchestrationInfo: legacy routing shape retained for the later boundary
+    cleanup; active turns use api.turn.TurnMetadata instead.
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ class TokenUsage(BaseModel):
 
 
 class OrchestrationInfo(BaseModel):
-    """The orchestrator's routing decision for one request.
+    """Legacy routing shape superseded by ``api.turn.TurnMetadata``.
 
-    Null when orchestration is disabled. Carried internally for logging/tracing.
+    Retained until the planned boundary cleanup removes old API models.
     """
     model_id: str = Field(..., description="The model_id the orchestrator selected.")
     tools: list[str] = Field(

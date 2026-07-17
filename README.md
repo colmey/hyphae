@@ -1,4 +1,4 @@
-# PyAiHarness
+# hyphae
 
 A minimal, extendable AI harness in Python. Receives a prompt over HTTP,
 runs an **orchestrator** to pick a model + tool subset + system prompt
@@ -260,7 +260,7 @@ registry. Full detail in [docs/api.md](docs/api.md#post-v1chatcompletions).
 ## Project layout
 
 ```
-PyAiHarness/
+hyphae/
 ├── main.py                 # FastAPI app + lifespan
 ├── harness_client.py       # Reference async Python client
 ├── .env.example            # Env var template (copy to .env)

@@ -12,7 +12,7 @@ from typing import Iterable, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from mcp_layer.manager import NAMESPACE_SEP
+from mcp_layer.contracts import NAMESPACE_SEP
 
 
 class OrchestrationResult(BaseModel):

@@ -43,7 +43,7 @@ from typing import Any
 
 import pytest
 
-from agent import DoneEvent, InMemorySessionStore, TextEvent, run_agent
+from agent import DoneEvent, InMemorySessionStore, RunLimits, TextEvent, run_agent
 from agent.context import (
     _SUMMARY_HEADER,
     _SUMMARY_SYSTEM,
@@ -347,9 +347,11 @@ async def test_summarizer_failure_degrades_to_pass_through() -> None:
     events = []
     async for event in run_agent(
         session=session, llm=failing, mcp=ScriptedMCP(), store=store,
-        context_strategy="compaction", context_window=1000,
-        context_safety_margin_tokens=100, max_tokens=200,
-        context_recent_messages=2, max_iterations=5,
+        limits=RunLimits(
+            context_strategy="compaction", context_window=1000,
+            context_safety_margin_tokens=100, max_tokens=200,
+            context_recent_messages=2, max_iterations=5,
+        ),
     ):
         events.append(event)
     done = next(e for e in events if isinstance(e, DoneEvent))
@@ -368,10 +370,12 @@ async def test_loop_uses_compacted_view_without_mutating_session_history() -> No
     events = []
     async for event in run_agent(
         session=session, llm=llm, mcp=ScriptedMCP(), store=store,
-        context_strategy="compaction", context_window=1000,
-        context_safety_margin_tokens=100, max_tokens=200,
-        context_recent_messages=2, context_summary_max_tokens=64,
-        max_iterations=5,
+        limits=RunLimits(
+            context_strategy="compaction", context_window=1000,
+            context_safety_margin_tokens=100, max_tokens=200,
+            context_recent_messages=2, context_summary_max_tokens=64,
+            max_iterations=5,
+        ),
     ):
         events.append(event)
     done = next(e for e in events if isinstance(e, DoneEvent))
@@ -400,7 +404,7 @@ async def test_agent_token_cap_falls_back_to_estimator() -> None:
     events = []
     async for event in run_agent(
         session=session, llm=llm, mcp=ScriptedMCP(), store=store,
-        max_run_tokens=5, max_iterations=10,
+        limits=RunLimits(max_run_tokens=5, max_iterations=10),
     ):
         events.append(event)
     done = next(e for e in events if isinstance(e, DoneEvent))
@@ -415,8 +419,13 @@ async def test_nonzero_provider_usage_is_authoritative() -> None:
     session = await store.create()
     session.append_user("go")
     events = []
-    async for event in run_agent(session=session, llm=llm, mcp=ScriptedMCP(), store=store,
-                                 max_iterations=5):
+    async for event in run_agent(
+        session=session,
+        llm=llm,
+        mcp=ScriptedMCP(),
+        store=store,
+        limits=RunLimits(max_iterations=5),
+    ):
         events.append(event)
     done = next(e for e in events if isinstance(e, DoneEvent))
     check(done.total_tokens == 40, "provider usage used as-is (no estimate added)")

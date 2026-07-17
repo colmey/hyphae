@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from agent import InMemorySessionStore, run_agent
+from agent import InMemorySessionStore, RunLimits, run_agent
 from llm.client import LLMClient
 from llm.schemas import AssistantMessage
 from mcp_layer.client import ToolCallResult
@@ -106,6 +106,7 @@ async def collect_agent_events(
     store = InMemorySessionStore()
     session = await store.create()
     session.append_user(prompt)
+    stream = bool(run_options.pop("stream", False))
     return [
         event
         async for event in run_agent(
@@ -113,6 +114,7 @@ async def collect_agent_events(
             llm=llm,
             mcp=mcp,
             store=store,
-            **run_options,
+            limits=RunLimits(**run_options),
+            stream=stream,
         )
     ]

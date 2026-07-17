@@ -10,11 +10,9 @@ from typing import Any
 
 from config import MCPConfig
 from .client import MCPClient, Tool, ToolCallResult
+from .contracts import NAMESPACE_SEP
 
 logger = logging.getLogger(__name__)
-
-NAMESPACE_SEP = "__"
-
 
 class MCPManager:
     """Aggregates MCPClient instances and presents a unified tool registry."""

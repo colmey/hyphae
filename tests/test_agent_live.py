@@ -30,6 +30,7 @@ from agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
+    RunLimits,
     TextEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -85,7 +86,7 @@ async def run_scenario(
         mcp=mcp,
         store=store,
         system=SYSTEM_PROMPT,
-        max_iterations=max_iterations,
+        limits=RunLimits(max_iterations=max_iterations),
     ):
         if isinstance(event, TextEvent):
             text_chunks.append(event.text)

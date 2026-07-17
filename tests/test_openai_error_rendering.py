@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from agent import DoneEvent, ErrorEvent, Session, TextEvent
 from api.openai_compatible import _FINISH_REASONS, _finish_reason, _stream, chat_completions
 from api.schemas import TokenUsage
+from api.turn import TurnExecution, TurnMetadata, TurnRequest, TurnResult
 
 
 class _EventsRunner:
@@ -18,19 +20,31 @@ class _EventsRunner:
         self._events = events
         self._failure = failure
 
-    async def events(self, **_turn):
-        for event in self._events:
-            yield event
-        if self._failure is not None:
-            raise self._failure
+    @asynccontextmanager
+    async def open(self, _turn):
+        async def events():
+            for event in self._events:
+                yield event
+            if self._failure is not None:
+                raise self._failure
+
+        yield TurnExecution(
+            metadata=TurnMetadata(run_id="test-run", model_id="test-model"),
+            events=events(),
+        )
 
 
 class _RunRunner:
     def __init__(self, done_reason: str) -> None:
         self.done_reason = done_reason
 
-    async def run(self, **_turn):
-        return "partial answer", self.done_reason, TokenUsage(total_tokens=3)
+    async def run(self, _turn):
+        return TurnResult(
+            answer="partial answer",
+            done_reason=self.done_reason,
+            usage=TokenUsage(total_tokens=3),
+            metadata=TurnMetadata(run_id="test-run", model_id="test-model"),
+        )
 
 
 class _Store:
@@ -45,7 +59,8 @@ class _Request:
 
 def _collect_stream(runner: _EventsRunner) -> list[dict]:
     async def collect() -> list[dict]:
-        return [item async for item in _stream("test-model", runner, {}, 2000)]
+        turn = TurnRequest(prompt="hello", session=Session(), stream=True)
+        return [item async for item in _stream("test-model", runner, turn, 2000)]
 
     return asyncio.run(collect())
 

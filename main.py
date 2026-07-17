@@ -86,7 +86,6 @@ def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | N
 
     orchestrator = Orchestrator(
         registry=registry,
-        mcp=mcp,
         system_prompt=orch_prompt,
         model_id=orch_model_id,
     )
@@ -178,7 +177,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="PyAiHarness",
+    title="hyphae",
     description="Minimal extendable AI harness with MCP tool support and orchestration layer.",
     version="0.2.0",
     lifespan=lifespan,

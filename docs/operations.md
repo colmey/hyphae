@@ -1,4 +1,4 @@
-# PyAiHarness — Operations & Extending
+# hyphae — Operations & Extending
 
 How to run the harness, read its logs, diagnose failures, run its tests,
 and extend it along its designed seams. Plus the known v1

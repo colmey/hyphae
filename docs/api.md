@@ -1,4 +1,4 @@
-# PyAiHarness — HTTP API
+# hyphae — HTTP API
 
 Request/response contracts for the native routes and the OpenAI-compatible
 adapter. All chat surfaces drive the same shared turn core
@@ -264,8 +264,8 @@ OpenAI list shape, sourced from the model registry:
 {
   "object": "list",
   "data": [
-    {"id": "gemini-flash", "object": "model", "created": 1718600000, "owned_by": "pyaiharness"},
-    {"id": "gemini-pro",   "object": "model", "created": 1718600000, "owned_by": "pyaiharness"}
+    {"id": "gemini-flash", "object": "model", "created": 1718600000, "owned_by": "hyphae"},
+    {"id": "gemini-pro",   "object": "model", "created": 1718600000, "owned_by": "hyphae"}
   ]
 }
 ```

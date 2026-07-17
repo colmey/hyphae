@@ -19,6 +19,7 @@ from .events import (
     UsageEvent,
 )
 from .loop import run_agent
+from .runtime import RunContext, RunLimits
 from .tool_policy import PolicyDecision, ToolPolicy, Verdict, build_tool_policy
 from .session import (
     InMemorySessionStore,
@@ -40,6 +41,8 @@ __all__ = [
     "OrchestrationDecisionEvent",
     "PolicyDecision",
     "ReasoningEvent",
+    "RunContext",
+    "RunLimits",
     "Session",
     "SessionBusyError",
     "SessionGuard",

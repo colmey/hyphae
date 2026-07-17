@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from llm.schemas import Message, TextBlock
+from mcp_layer import ToolSnapshot
 from orchestrator import Orchestrator
 from orchestrator.schemas import OrchestrationResult
 
@@ -41,15 +42,9 @@ class _RegistryStub:
         return "model: test model"
 
 
-class _MCPStub:
-    def get_tools_for_llm(self) -> list[dict[str, Any]]:
-        return []
-
-
 def test_prompt_includes_history_only_when_present() -> None:
     orchestrator = Orchestrator(
         registry=_RegistryStub(),  # type: ignore[arg-type]
-        mcp=_MCPStub(),  # type: ignore[arg-type]
         system_prompt="route requests",
     )
     history = [
@@ -57,8 +52,9 @@ def test_prompt_includes_history_only_when_present() -> None:
         Message.assistant([TextBlock(text="The tables are customers and orders.")]),
     ]
 
-    with_history = orchestrator._build_prompt("now do last month", history=history)
-    without_history = orchestrator._build_prompt("hello", history=None)
+    tools = ToolSnapshot()
+    with_history = orchestrator._build_prompt("now do last month", tools, history=history)
+    without_history = orchestrator._build_prompt("hello", tools, history=None)
 
     assert "CONVERSATION SO FAR" in with_history
     assert "customer database" in with_history

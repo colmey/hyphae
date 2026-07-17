@@ -10,7 +10,15 @@ from typing import Any, AsyncIterator
 
 import pytest
 
-from agent import DoneEvent, ErrorEvent, InMemorySessionStore, TextEvent, ToolCallEvent, run_agent
+from agent import (
+    DoneEvent,
+    ErrorEvent,
+    InMemorySessionStore,
+    RunLimits,
+    TextEvent,
+    ToolCallEvent,
+    run_agent,
+)
 from llm.client import LLMClient
 from llm.providers.openai import _ReasoningStreamStripper
 from llm.schemas import (
@@ -122,8 +130,7 @@ async def collect(llm: LLMClient, mcp: FakeMCP | None = None) -> list[Any]:
         mcp=mcp or FakeMCP(),
         store=store,
         stream=True,
-        max_retries=1,
-        retry_base_delay=0.0,
+        limits=RunLimits(max_retries=1, retry_base_delay=0.0),
     ):
         events.append(event)
     return events

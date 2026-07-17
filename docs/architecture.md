@@ -1,4 +1,4 @@
-# PyAiHarness — Architecture
+# hyphae — Architecture
 
 How the harness is put together: the request flow, the stack, the
 directory layout, every subsystem, and the architectural principles and
@@ -118,7 +118,7 @@ manager.
 ## Directory Layout
 
 ```
-PyAiHarness/
+hyphae/
 ├── main.py                   # FastAPI app, lifespan, wires everything
 ├── requirements.txt
 ├── .env.example              # Template for .env (copy and fill in)

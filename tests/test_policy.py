@@ -25,6 +25,7 @@ import pytest
 from agent import (
     DoneEvent,
     InMemorySessionStore,
+    RunLimits,
     TextEvent,
     ToolPolicy,
     ToolResultEvent,
@@ -98,7 +99,15 @@ async def collect(label: str, llm: LLMClient, mcp: Any, **kwargs: Any):
     session = await store.create()
     session.append_user("go")
     events: list[Any] = []
-    async for event in run_agent(session=session, llm=llm, mcp=mcp, store=store, **kwargs):
+    policy = kwargs.pop("policy", None)
+    async for event in run_agent(
+        session=session,
+        llm=llm,
+        mcp=mcp,
+        store=store,
+        policy=policy,
+        limits=RunLimits(**kwargs),
+    ):
         events.append(event)
     return events, session
 

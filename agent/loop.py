@@ -39,7 +39,7 @@ from .events import (
 )
 from .session import Session, SessionStore
 from .tool_policy import _DEFAULT_POLICY, ToolPolicy, Verdict
-from .tracing import Tracer, event_record
+from .runtime import RunContext, RunLimits
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,12 @@ def _canonical_args(args: dict[str, Any]) -> str:
         return repr(args)
 
 
-def _validate_tool_args(schema: dict[str, Any] | None, args: dict[str, Any]) -> str | None:
+def _validate_tool_args(
+    schema: dict[str, Any] | None,
+    args: dict[str, Any],
+    *,
+    log: logging.Logger | logging.LoggerAdapter = logger,
+) -> str | None:
     """Validate a tool call's arguments against its declared `input_schema`.
 
     Returns a model-facing error on failure. Missing or malformed schemas are
@@ -109,7 +114,7 @@ def _validate_tool_args(schema: dict[str, Any] | None, args: dict[str, Any]) -> 
             f"Expected shape: {json.dumps(exc.schema, ensure_ascii=False)}"
         )
     except jsonschema.SchemaError:
-        logger.warning("tool input_schema is invalid; skipping arg validation", exc_info=True)
+        log.warning("tool input_schema is invalid; skipping arg validation", exc_info=True)
         return None
     return None
 
@@ -134,6 +139,7 @@ async def _complete_with_retry(
     thinking_level: str | None = None,
     deadline_expired: Callable[[], bool] | None = None,
     remaining_seconds: Callable[[], float | None] | None = None,
+    log: logging.Logger | logging.LoggerAdapter = logger,
 ) -> AssistantMessage:
     """Call llm.complete() with a per-attempt timeout and bounded retries.
 
@@ -171,7 +177,7 @@ async def _complete_with_retry(
             if not transient or attempt == attempts - 1:
                 raise
             delay = _backoff_delay(base_delay, attempt)
-            logger.warning(
+            log.warning(
                 "transient LLM error (attempt %d/%d), retrying in %.2fs: %s",
                 attempt + 1, attempts, delay, exc,
             )
@@ -188,7 +194,7 @@ async def _complete_with_retry(
         if response.stop_reason == "empty" and attempt < attempts - 1:
             last_response = response
             delay = _backoff_delay(base_delay, attempt)
-            logger.warning(
+            log.warning(
                 "empty LLM response (attempt %d/%d), retrying in %.2fs",
                 attempt + 1, attempts, delay,
             )
@@ -207,7 +213,11 @@ async def _complete_with_retry(
     return last_response
 
 
-async def _close_stream(stream: Any) -> None:
+async def _close_stream(
+    stream: Any,
+    *,
+    log: logging.Logger | logging.LoggerAdapter = logger,
+) -> None:
     """Close a provider stream when its iterator exposes ``aclose``.
 
     Stream cleanup is best-effort: a provider cleanup failure must not replace
@@ -222,9 +232,9 @@ async def _close_stream(stream: Any) -> None:
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise
-        logger.warning("LLM stream cleanup was cancelled", exc_info=True)
+        log.warning("LLM stream cleanup was cancelled", exc_info=True)
     except Exception:  # noqa: BLE001 -- cleanup must preserve the primary outcome.
-        logger.warning("failed to close LLM stream", exc_info=True)
+        log.warning("failed to close LLM stream", exc_info=True)
 
 
 def _backoff_delay(base_delay: float, attempt: int) -> float:
@@ -241,26 +251,11 @@ async def run_agent(
     *,
     store: SessionStore | None = None,
     system: str | None = None,
-    max_iterations: int = 10,
-    max_tokens: int | None = None,
     tools: list[dict[str, Any]] | None = None,
-    llm_timeout_seconds: float | None = None,
-    tool_timeout_seconds: float | None = None,
-    max_retries: int = 0,
-    retry_base_delay: float = 0.5,
-    tool_result_max_chars: int | None = None,
-    max_run_tokens: int | None = None,
-    max_run_seconds: float | None = None,
-    abort_after_consecutive_tool_failures: int | None = None,
     thinking_level: str | None = None,
-    context_strategy: str = "naive",
-    context_window: int | None = None,
-    context_safety_margin_tokens: int = 1024,
-    context_recent_messages: int = 6,
-    context_summary_max_tokens: int = 512,
+    limits: RunLimits | None = None,
+    context: RunContext | None = None,
     policy: ToolPolicy | None = None,
-    tracer: Tracer | None = None,
-    run_id: str | None = None,
     stream: bool = False,
 ) -> AsyncIterator[Event]:
     """Drive a conversation to completion, yielding events along the way.
@@ -268,9 +263,32 @@ async def run_agent(
     The caller appends the user turn first. The loop handles assistant turns,
     tool round-trips, optional context shaping, dispatch policy, and tracing.
 
-    In production every tunable kwarg is injected from Settings by
-    api/turn.py; these defaults serve direct callers and tests.
+    ``limits`` is immutable policy; ``context`` carries the original turn
+    deadline, run identity, and trace sequence. Direct callers may omit them
+    to use defaults, while TurnRunner always supplies both.
     """
+    limits = limits or RunLimits()
+    context = context or RunContext.start(
+        max_run_seconds=limits.max_run_seconds,
+        base_logger=logger,
+    )
+    run_log = context.logger
+    max_iterations = limits.max_iterations
+    max_tokens = limits.max_tokens
+    llm_timeout_seconds = limits.llm_timeout_seconds
+    tool_timeout_seconds = limits.tool_timeout_seconds
+    max_retries = limits.max_retries
+    retry_base_delay = limits.retry_base_delay
+    tool_result_max_chars = limits.tool_result_max_chars
+    max_run_tokens = limits.max_run_tokens
+    max_run_seconds = limits.max_run_seconds
+    abort_after_consecutive_tool_failures = limits.abort_after_consecutive_tool_failures
+    context_strategy = limits.context_strategy
+    context_window = limits.context_window
+    context_safety_margin_tokens = limits.context_safety_margin_tokens
+    context_recent_messages = limits.context_recent_messages
+    context_summary_max_tokens = limits.context_summary_max_tokens
+
     # `tools` controls what the model sees; MCP dispatch still routes by name.
     if tools is None:
         tools = mcp.get_tools_for_llm()
@@ -281,25 +299,12 @@ async def run_agent(
     policy = policy or _DEFAULT_POLICY
     iteration = 0
     cumulative = Usage()
-    run_started = time.perf_counter()
 
     # Run-scoped state for repeat-call detection and failure nudging.
     seen_calls: set[tuple[str, str]] = set()
     consecutive_tool_errors = 0
 
-    # Trace step advances only when a tracer is attached.
-    step = 0
-
-    async def _emit(event: Event) -> Event:
-        """Serialize an event to the tracer, best-effort."""
-        nonlocal step
-        if tracer is not None:
-            step += 1
-            try:
-                tracer.emit(event_record(event, run_id=run_id, step=step))
-            except Exception:  # noqa: BLE001
-                logger.warning("trace emit failed (run_id=%s)", run_id, exc_info=True)
-        return event
+    _emit = context.emit
 
     def _done(reason: str) -> DoneEvent:
         return DoneEvent(
@@ -312,20 +317,13 @@ async def run_agent(
         )
 
     def _remaining_run_seconds() -> float | None:
-        if not max_run_seconds or max_run_seconds <= 0:
-            return None
-        return max_run_seconds - (time.perf_counter() - run_started)
+        return context.remaining()
 
     def _deadline_exceeded() -> bool:
-        remaining = _remaining_run_seconds()
-        return remaining is not None and remaining <= 0
+        return context.deadline_exceeded()
 
     def _effective_timeout(per_call_timeout: float | None) -> float | None:
-        timeouts = [
-            t for t in (per_call_timeout, _remaining_run_seconds())
-            if t is not None and t > 0
-        ]
-        return min(timeouts) if timeouts else None
+        return context.effective_timeout(per_call_timeout)
 
     def _stream_read_timeout() -> tuple[float | None, bool]:
         """Return (seconds, deadline_limited) for the next provider read.
@@ -393,13 +391,13 @@ async def run_agent(
     while iteration < max_iterations:
         # Bounded-run guards before spending another LLM call.
         if _deadline_exceeded():
-            elapsed = time.perf_counter() - run_started
-            logger.warning("run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
+            elapsed = context.elapsed()
+            run_log.warning("run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
                            max_run_seconds, elapsed)
             yield await _emit(_done(reason="deadline_exceeded"))
             return
         if _token_budget_exceeded():
-            logger.warning("run exceeded max_run_tokens=%d (used=%d)",
+            run_log.warning("run exceeded max_run_tokens=%d (used=%d)",
                            max_run_tokens, cumulative.total_tokens)
             yield await _emit(_done(reason="budget_exceeded"))
             return
@@ -415,7 +413,7 @@ async def run_agent(
             effective_system = system
             effective_tools = tools
 
-        logger.debug("agent loop iteration %d (history=%d msgs, tools=%d, final=%s)",
+        run_log.debug("agent loop iteration %d (history=%d msgs, tools=%d, final=%s)",
                      iteration, len(session.messages),
                      len(effective_tools) if effective_tools else 0, is_final_iteration)
 
@@ -444,7 +442,7 @@ async def run_agent(
                 else:
                     messages_for_llm = (await assembly).messages
             except Exception:  # noqa: BLE001
-                logger.warning("context assembly failed; sending full history", exc_info=True)
+                run_log.warning("context assembly failed; sending full history", exc_info=True)
 
         # LLM call with per-attempt timeout and bounded retry.
         llm_started = time.perf_counter()
@@ -501,7 +499,7 @@ async def run_agent(
                             )
                         if response.stop_reason == "empty" and attempt < attempts - 1 and not emitted_text:
                             delay = _backoff_delay(retry_base_delay, attempt)
-                            logger.warning(
+                            run_log.warning(
                                 "empty LLM stream (attempt %d/%d), retrying in %.2fs",
                                 attempt + 1, attempts, delay,
                             )
@@ -523,7 +521,7 @@ async def run_agent(
                         if emitted_text or not transient or attempt == attempts - 1:
                             raise
                         delay = _backoff_delay(retry_base_delay, attempt)
-                        logger.warning(
+                        run_log.warning(
                             "transient LLM stream error (attempt %d/%d), retrying in %.2fs: %s",
                             attempt + 1, attempts, delay, exc,
                         )
@@ -536,7 +534,7 @@ async def run_agent(
                         continue
                     finally:
                         if chunks is not None:
-                            await _close_stream(chunks)
+                            await _close_stream(chunks, log=run_log)
 
                 assert response is not None
             else:
@@ -552,16 +550,17 @@ async def run_agent(
                     thinking_level=thinking_level,
                     deadline_expired=_deadline_exceeded,
                     remaining_seconds=_remaining_run_seconds,
+                    log=run_log,
                 )
         except _RunDeadlineExceeded:
-            elapsed = time.perf_counter() - run_started
-            logger.warning("run exceeded max_run_seconds=%.1f during LLM call (elapsed=%.1fs)",
+            elapsed = context.elapsed()
+            run_log.warning("run exceeded max_run_seconds=%.1f during LLM call (elapsed=%.1fs)",
                            max_run_seconds, elapsed)
             yield await _emit(_done(reason="deadline_exceeded"))
             return
         except Exception as e:
             # The model never sees unrecoverable LLM failures; the caller does.
-            logger.exception("LLM completion failed on iteration %d", iteration)
+            run_log.exception("LLM completion failed on iteration %d", iteration)
             yield await _emit(ErrorEvent(message=f"LLM call failed: {e}"))
             yield await _emit(_done(reason="llm_error"))
             return
@@ -622,11 +621,11 @@ async def run_agent(
                 if store is not None:
                     await store.save(session)
             if guard_reason == "deadline_exceeded":
-                elapsed = time.perf_counter() - run_started
-                logger.warning("run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
+                elapsed = context.elapsed()
+                run_log.warning("run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
                                max_run_seconds, elapsed)
             else:
-                logger.warning("run exceeded max_run_tokens=%d (used=%d)",
+                run_log.warning("run exceeded max_run_tokens=%d (used=%d)",
                                max_run_tokens, cumulative.total_tokens)
             yield await _emit(_done(reason=guard_reason))
             return
@@ -658,8 +657,8 @@ async def run_agent(
                 session.append_tool_results(results)
                 if store is not None:
                     await store.save(session)
-                elapsed = time.perf_counter() - run_started
-                logger.warning("run exceeded max_run_seconds=%.1f before tool dispatch (elapsed=%.1fs)",
+                elapsed = context.elapsed()
+                run_log.warning("run exceeded max_run_seconds=%.1f before tool dispatch (elapsed=%.1fs)",
                                max_run_seconds, elapsed)
                 yield await _emit(_done(reason="deadline_exceeded"))
                 return
@@ -668,7 +667,7 @@ async def run_agent(
             call_key = (tu.name, _canonical_args(tu.input))
             tool_latency_ms: float | None = None
             if call_key in seen_calls:
-                logger.info("stall: repeat call to %s with identical args; skipping", tu.name)
+                run_log.info("stall: repeat call to %s with identical args; skipping", tu.name)
                 content = _STALL_MESSAGE
                 is_error = True
             else:
@@ -681,17 +680,19 @@ async def run_agent(
                         "return the arguments as a JSON object matching the tool schema."
                     )
                 else:
-                    validation_error = _validate_tool_args(tool_schemas.get(tu.name), tu.input)
+                    validation_error = _validate_tool_args(
+                        tool_schemas.get(tu.name), tu.input, log=run_log
+                    )
 
                 # Denied calls never reach MCP and count as model-facing errors.
                 decision = policy.check(tu.name, tu.input) if validation_error is None else None
                 if validation_error is not None:
-                    logger.info("invalid args for %s: %s", tu.name, validation_error)
+                    run_log.info("invalid args for %s: %s", tu.name, validation_error)
                     content = validation_error
                     is_error = True
                     tool_latency_ms = None
                 elif decision is not None and decision.verdict is Verdict.DENY:
-                    logger.info("policy denied %s", tu.name)
+                    run_log.info("policy denied %s", tu.name)
                     content = decision.reason
                     is_error = True
                     tool_latency_ms = None
@@ -719,8 +720,8 @@ async def run_agent(
                             session.append_tool_results(results)
                             if store is not None:
                                 await store.save(session)
-                            elapsed = time.perf_counter() - run_started
-                            logger.warning(
+                            elapsed = context.elapsed()
+                            run_log.warning(
                                 "run exceeded max_run_seconds=%.1f during tool dispatch (elapsed=%.1fs)",
                                 max_run_seconds,
                                 elapsed,
@@ -728,12 +729,12 @@ async def run_agent(
                             yield await _emit(_done(reason="deadline_exceeded"))
                             return
                         # Surface tool timeouts as tool-result errors.
-                        logger.warning("tool %s timed out after %ss", tu.name, tool_timeout_seconds)
+                        run_log.warning("tool %s timed out after %ss", tu.name, tool_timeout_seconds)
                         content = f"tool {tu.name!r} timed out after {tool_timeout_seconds}s"
                         is_error = True
                     except Exception as e:
                         # Normalize unexpected tool exceptions into tool results.
-                        logger.exception("tool execution raised for %s", tu.name)
+                        run_log.exception("tool execution raised for %s", tu.name)
                         content = f"tool execution raised: {e}"
                         is_error = True
                     tool_latency_ms = round((time.perf_counter() - tool_started) * 1000, 2)
@@ -774,7 +775,7 @@ async def run_agent(
                 for event in events:
                     yield await _emit(event)
                 results.extend(skipped_results)
-                logger.warning(
+                run_log.warning(
                     "aborting run: %d consecutive tool failures (threshold=%d)",
                     consecutive_tool_errors, abort_after_consecutive_tool_failures,
                 )
@@ -789,6 +790,6 @@ async def run_agent(
             await store.save(session)
 
     # Structural fallback: the generator must always end on a DoneEvent.
-    logger.warning("agent loop hit max_iterations=%d without end_turn",
+    run_log.warning("agent loop hit max_iterations=%d without end_turn",
                    max_iterations)
     yield await _emit(_done(reason="max_iterations"))

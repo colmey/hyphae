@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -30,7 +29,7 @@ from .dependencies import (
     require_api_key,
 )
 from .schemas import HealthResponse
-from .turn import TurnRunner
+from .turn import TurnRequest, TurnRunner
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -82,10 +81,10 @@ async def chat(
     prompt = await _prompt_from_body(request)
     session = await _session_from_header(request, store)
 
-    answer, done_reason, _usage = await runner.run(prompt=prompt, session=session)
+    result = await runner.run(TurnRequest(prompt=prompt, session=session))
     return PlainTextResponse(
-        answer,
-        headers={"X-Session-Id": session.session_id, "X-Done-Reason": done_reason},
+        result.answer,
+        headers={"X-Session-Id": session.session_id, "X-Done-Reason": result.done_reason},
     )
 
 
@@ -104,14 +103,18 @@ async def chat_stream(
     prompt = await _prompt_from_body(request)
     session = await _session_from_header(request, store)
 
-    run_id = uuid.uuid4().hex
-
     async def _events() -> AsyncIterator[dict]:
         step = 0
         try:
-            async for event in runner.events(prompt=prompt, session=session):
-                step += 1
-                yield {"data": json.dumps(event_record(event, run_id=run_id, step=step))}
+            turn = TurnRequest(prompt=prompt, session=session, stream=True)
+            async with runner.open(turn) as execution:
+                async for event in execution.events:
+                    step += 1
+                    yield {
+                        "data": json.dumps(
+                            event_record(event, run_id=execution.metadata.run_id, step=step)
+                        )
+                    }
         except HTTPException as exc:
             # The stream is already 200, so send guard failures as error frames.
             yield {"data": json.dumps({"type": "error", "message": str(exc.detail)})}

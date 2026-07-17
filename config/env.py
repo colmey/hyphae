@@ -10,6 +10,7 @@ Real environment variables always win: load_dotenv() does not override a
 variable that is already present in os.environ, so container/CI-provided
 config takes precedence over the .env file.
 """
+
 from pathlib import Path
 
 from dotenv import load_dotenv

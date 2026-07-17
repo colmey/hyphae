@@ -108,7 +108,8 @@ class GeminiLLMClient(LLMClient):
 
         logger.debug(
             "gemini complete: model=%s messages=%d tools=%s schema=%s thinking=%s",
-            self._model, len(contents),
+            self._model,
+            len(contents),
             len(genai_tools[0].function_declarations) if genai_tools else 0,
             response_schema.__name__ if response_schema else None,
             thinking_level,
@@ -143,7 +144,9 @@ class GeminiLLMClient(LLMClient):
         out: list[genai_types.Content] = []
         for msg in messages:
             if msg.role == Role.SYSTEM:
-                logger.warning("system message in history was ignored; use the system= param")
+                logger.warning(
+                    "system message in history was ignored; use the system= param"
+                )
                 continue
 
             parts: list[genai_types.Part] = []
@@ -196,7 +199,8 @@ class GeminiLLMClient(LLMClient):
             genai_types.FunctionDeclaration(
                 name=t["name"],
                 description=t.get("description", ""),
-                parameters_json_schema=t.get("input_schema") or {
+                parameters_json_schema=t.get("input_schema")
+                or {
                     "type": "object",
                     "properties": {},
                 },
@@ -212,7 +216,9 @@ class GeminiLLMClient(LLMClient):
         candidates = getattr(response, "candidates", None) or []
         if not candidates:
             return AssistantMessage(
-                content=[], stop_reason="empty", model=self._model,
+                content=[],
+                stop_reason="empty",
+                model=self._model,
                 usage=self._usage_from_response(response),
                 reasoning=None,
             )

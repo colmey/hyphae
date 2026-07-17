@@ -29,7 +29,9 @@ from agent import (
 )
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s"
+)
 pytestmark = pytest.mark.anyio
 
 
@@ -37,15 +39,18 @@ pytestmark = pytest.mark.anyio
 # Scripted fakes
 # ---------------------------------------------------------------------------
 
+
 class TransientError(Exception):
     """An error the fake client classifies as transient (retryable)."""
 
 
 # ----- AssistantMessage builders -----
 
+
 def text_response(text: str, stop_reason: str = "end_turn") -> AssistantMessage:
-    return AssistantMessage(content=[TextBlock(text=text)], stop_reason=stop_reason,
-                            usage=Usage())
+    return AssistantMessage(
+        content=[TextBlock(text=text)], stop_reason=stop_reason, usage=Usage()
+    )
 
 
 def empty_response() -> AssistantMessage:
@@ -53,20 +58,23 @@ def empty_response() -> AssistantMessage:
 
 
 def truncated_response(text: str) -> AssistantMessage:
-    return AssistantMessage(content=[TextBlock(text=text)], stop_reason="max_tokens",
-                            usage=Usage())
+    return AssistantMessage(
+        content=[TextBlock(text=text)], stop_reason="max_tokens", usage=Usage()
+    )
 
 
 def tool_call_response(name: str = "srv__tool") -> AssistantMessage:
     return AssistantMessage(
         content=[ToolUseBlock(id="call_1", name=name, input={})],
-        stop_reason="tool_use", usage=Usage(),
+        stop_reason="tool_use",
+        usage=Usage(),
     )
 
 
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
+
 
 def check(cond: bool, msg: str) -> None:
     assert cond, msg
@@ -103,6 +111,7 @@ async def test_retry_then_succeed(
     check(all_text(events) == "recovered", "final answer survived the retry")
     check(not any(isinstance(e, ErrorEvent) for e in events), "no ErrorEvent emitted")
 
+
 async def test_non_transient_error_fails_fast(
     scripted_llm_factory, scripted_mcp_factory, agent_event_collector
 ) -> None:
@@ -114,11 +123,13 @@ async def test_non_transient_error_fails_fast(
     check(done_reason(events) == "llm_error", "done_reason == llm_error")
     check(any(isinstance(e, ErrorEvent) for e in events), "ErrorEvent emitted")
 
+
 async def test_empty_response_retry(
     scripted_llm_factory, scripted_mcp_factory, agent_event_collector
 ) -> None:
     llm = scripted_llm_factory(
-        [empty_response(), text_response("second try")], transient_types=(TransientError,)
+        [empty_response(), text_response("second try")],
+        transient_types=(TransientError,),
     )
     events = await agent_event_collector(
         llm=llm, mcp=scripted_mcp_factory(), max_retries=2, retry_base_delay=0.0
@@ -126,6 +137,7 @@ async def test_empty_response_retry(
     check(llm.calls == 2, f"empty response retried (got {llm.calls} calls)")
     check(done_reason(events) == "end_turn", "done_reason == end_turn")
     check(all_text(events) == "second try", "answer from the retry attempt")
+
 
 async def test_truncation_reason(
     scripted_llm_factory, scripted_mcp_factory, agent_event_collector
@@ -135,10 +147,13 @@ async def test_truncation_reason(
     check(done_reason(events) == "truncated", "done_reason == truncated")
     check(all_text(events) == "half an answe", "partial text still streamed")
 
+
 async def test_tool_timeout(
     scripted_llm_factory, scripted_mcp_factory, agent_event_collector
 ) -> None:
-    llm = scripted_llm_factory([tool_call_response(), text_response("handled the timeout")])
+    llm = scripted_llm_factory(
+        [tool_call_response(), text_response("handled the timeout")]
+    )
     mcp = scripted_mcp_factory(delay=5.0)
     events = await agent_event_collector(llm=llm, mcp=mcp, tool_timeout_seconds=0.1)
     trs = tool_results(events)
@@ -147,15 +162,14 @@ async def test_tool_timeout(
     check(done_reason(events) == "end_turn", "loop continued to a final answer")
     check(llm.calls == 2, f"model ran again after the timeout (got {llm.calls})")
 
+
 async def test_tool_result_clip(
     scripted_llm_factory, scripted_mcp_factory, agent_event_collector
 ) -> None:
     big = "x" * 100_000
     llm = scripted_llm_factory([tool_call_response(), text_response("summarized")])
     mcp = scripted_mcp_factory(content=big)
-    events = await agent_event_collector(
-        llm=llm, mcp=mcp, tool_result_max_chars=1000
-    )
+    events = await agent_event_collector(llm=llm, mcp=mcp, tool_result_max_chars=1000)
     trs = tool_results(events)
     check(len(trs) == 1, "one tool result")
     check(len(trs[0].content) < 2000, f"content clipped (len={len(trs[0].content)})")

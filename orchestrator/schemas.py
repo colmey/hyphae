@@ -30,7 +30,7 @@ class OrchestrationResult(BaseModel):
     selected_tools: list[str] = Field(
         default_factory=list,
         description="Namespaced tool names ({server}__{tool}) to expose to the agent. "
-                    "Empty list = no tools.",
+        "Empty list = no tools.",
     )
     generated_system_prompt: str = Field(
         ...,
@@ -39,9 +39,9 @@ class OrchestrationResult(BaseModel):
     thinking_level: Literal["low", "medium", "high"] = Field(
         default="medium",
         description="How much the downstream model should deliberate: 'low' for "
-                    "lookups/single-tool calls, 'medium' for the typical case, "
-                    "'high' for complex multi-step reasoning. Defaults to 'medium' "
-                    "if the orchestrator omits it.",
+        "lookups/single-tool calls, 'medium' for the typical case, "
+        "'high' for complex multi-step reasoning. Defaults to 'medium' "
+        "if the orchestrator omits it.",
     )
 
     @field_validator("thinking_level", mode="before")

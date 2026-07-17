@@ -34,7 +34,15 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Callable
 
-from .schemas import AssistantMessage, Message, ModelProfile, StreamChunk, StreamEnd, TextBlock, TextDelta
+from .schemas import (
+    AssistantMessage,
+    Message,
+    ModelProfile,
+    StreamChunk,
+    StreamEnd,
+    TextBlock,
+    TextDelta,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +50,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Abstract interface
 # ---------------------------------------------------------------------------
+
 
 class LLMClient(ABC):
     """Provider-agnostic LLM client interface."""
@@ -186,6 +195,7 @@ def _build_client(
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
+
 
 def build_llm_client(settings: Any) -> LLMClient:
     """Construct the LLM client matching settings.llm_provider.

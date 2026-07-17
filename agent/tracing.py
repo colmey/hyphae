@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 # Tracer seam
 # ---------------------------------------------------------------------------
 
+
 class Tracer(ABC):
     """Sink for trace records, one per loop event. The swappable observability
     seam (JSONL now, OTel later), analogous to SessionStore."""
@@ -95,7 +96,9 @@ class JSONLTracer(Tracer):
 
     def emit(self, record: dict) -> None:
         try:
-            self._fh.write(json.dumps(record, default=_json_default, ensure_ascii=False))
+            self._fh.write(
+                json.dumps(record, default=_json_default, ensure_ascii=False)
+            )
             self._fh.write("\n")
             self._fh.flush()
         except Exception:  # noqa: BLE001 - tracing is best-effort
@@ -122,13 +125,16 @@ def build_tracer(*, enabled: bool, path: Path | str) -> Tracer | None:
         logger.info("tracing enabled: JSONL trace -> %s", path)
         return tracer
     except Exception as e:  # noqa: BLE001
-        logger.warning("tracing enabled but tracer init failed: %s; running without traces.", e)
+        logger.warning(
+            "tracing enabled but tracer init failed: %s; running without traces.", e
+        )
         return None
 
 
 # ---------------------------------------------------------------------------
 # Per-request logging adapter
 # ---------------------------------------------------------------------------
+
 
 class _RunLogAdapter(logging.LoggerAdapter):
     """Prefixes every message with the run_id so per-request log lines correlate
@@ -146,6 +152,7 @@ def run_logger(base: logging.Logger, run_id: str) -> logging.LoggerAdapter:
 # ---------------------------------------------------------------------------
 # Event -> record mapping
 # ---------------------------------------------------------------------------
+
 
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()

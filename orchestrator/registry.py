@@ -88,8 +88,12 @@ class LLMRegistry:
         entry = self.get_entry(model_id)
         client = build_llm_client_from_entry(entry, self._settings)
         self._clients[model_id] = client
-        logger.info("built LLM client for model_id=%s (provider=%s model=%s)",
-                    model_id, entry.provider, entry.model)
+        logger.info(
+            "built LLM client for model_id=%s (provider=%s model=%s)",
+            model_id,
+            entry.provider,
+            entry.model,
+        )
         return client
 
     def get_or_default(self, model_id: str | None) -> tuple[str, LLMClient]:
@@ -104,6 +108,7 @@ class LLMRegistry:
         if model_id and model_id != fallback:
             logger.warning(
                 "model_id %r not in registry; falling back to default %r",
-                model_id, fallback,
+                model_id,
+                fallback,
             )
         return fallback, self.get(fallback)

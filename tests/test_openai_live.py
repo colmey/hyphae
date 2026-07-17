@@ -82,10 +82,12 @@ async def scenario_2_with_tools(llm: LLMClient, mcp: MCPManager) -> None:
     print(f"  attached {len(tools)} tools from MCP manager")
 
     response = await llm.complete(
-        messages=[Message.user(
-            "List the tables available in the customer database. "
-            "Use the appropriate tool."
-        )],
+        messages=[
+            Message.user(
+                "List the tables available in the customer database. "
+                "Use the appropriate tool."
+            )
+        ],
         tools=tools,
         system=(
             "You are a database assistant with access to tools. "
@@ -126,14 +128,20 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
     for tu in tool_uses:
         print(f"  executing tool: {tu.name} args={tu.input}")
         result = await mcp.call_tool(tu.name, tu.input)
-        preview = result.content if len(result.content) < 400 else result.content[:397] + "..."
+        preview = (
+            result.content
+            if len(result.content) < 400
+            else result.content[:397] + "..."
+        )
         print(f"    result (is_error={result.is_error}): {preview}")
-        results.append(ToolResultBlock(
-            tool_use_id=tu.id,
-            name=tu.name,
-            content=result.content,
-            is_error=result.is_error,
-        ))
+        results.append(
+            ToolResultBlock(
+                tool_use_id=tu.id,
+                name=tu.name,
+                content=result.content,
+                is_error=result.is_error,
+            )
+        )
     history.append(Message.tool_results(results))
 
     second = await llm.complete(messages=history, tools=tools, system=system)
@@ -158,7 +166,9 @@ async def test_configured_openai_provider_scenarios() -> None:
             "and OPENAI_BASE_URL before running this test."
         )
 
-    print(f"using openai-compatible base_url={base_url or '<real OpenAI>'} model={model}")
+    print(
+        f"using openai-compatible base_url={base_url or '<real OpenAI>'} model={model}"
+    )
     print()
 
     llm = OpenAILLMClient(

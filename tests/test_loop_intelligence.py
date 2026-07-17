@@ -37,13 +37,16 @@ from llm.client import LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
 from mcp_layer.client import ToolCallResult
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s"
+)
 pytestmark = pytest.mark.anyio
 
 
 # ---------------------------------------------------------------------------
 # Scripted fakes
 # ---------------------------------------------------------------------------
+
 
 class ScriptedLLM(LLMClient):
     """Replays a fixed script of responses, recording each call's system/tools.
@@ -59,8 +62,15 @@ class ScriptedLLM(LLMClient):
         self.tools_seen: list[Any] = []
         self.thinking_seen: list[str | None] = []
 
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         self.calls += 1
         self.systems.append(system)
         self.tools_seen.append(tools)
@@ -88,22 +98,30 @@ class FakeMCP:
 
 # ----- AssistantMessage builders -----
 
+
 def text_response(text: str) -> AssistantMessage:
-    return AssistantMessage(content=[TextBlock(text=text)], stop_reason="end_turn",
-                            usage=Usage())
+    return AssistantMessage(
+        content=[TextBlock(text=text)], stop_reason="end_turn", usage=Usage()
+    )
 
 
-def tool_call_response(args: dict[str, Any] | None = None, *, name: str = "srv__tool",
-                       call_id: str = "call_1") -> AssistantMessage:
+def tool_call_response(
+    args: dict[str, Any] | None = None,
+    *,
+    name: str = "srv__tool",
+    call_id: str = "call_1",
+) -> AssistantMessage:
     return AssistantMessage(
         content=[ToolUseBlock(id=call_id, name=name, input=args or {})],
-        stop_reason="tool_use", usage=Usage(),
+        stop_reason="tool_use",
+        usage=Usage(),
     )
 
 
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
+
 
 def check(cond: bool, msg: str) -> None:
     assert cond, msg
@@ -147,58 +165,81 @@ async def test_final_iteration_wrap_up() -> None:
     # 1. Final-iteration wrap-up
     llm = ScriptedLLM([tool_call_response(), text_response("best-effort answer")])
     mcp = FakeMCP()
-    events = await collect("final-iteration wrap-up", llm, mcp,
-                           system="You are helpful.", max_iterations=2)
+    events = await collect(
+        "final-iteration wrap-up", llm, mcp, system="You are helpful.", max_iterations=2
+    )
     check(llm.calls == 2, f"two iterations ran (got {llm.calls})")
     check(llm.tools_seen[0] is not None, "iteration 1 saw tools")
     check(llm.tools_seen[1] is None, "final iteration withheld tools")
-    check(_FINAL_ITERATION_WRAPUP in (llm.systems[1] or ""),
-          "final iteration system prompt carries the wrap-up note")
-    check(_FINAL_ITERATION_WRAPUP not in (llm.systems[0] or ""),
-          "earlier iteration system prompt is untouched")
+    check(
+        _FINAL_ITERATION_WRAPUP in (llm.systems[1] or ""),
+        "final iteration system prompt carries the wrap-up note",
+    )
+    check(
+        _FINAL_ITERATION_WRAPUP not in (llm.systems[0] or ""),
+        "earlier iteration system prompt is untouched",
+    )
     check(done_reason(events) == "max_iterations", "done_reason == max_iterations")
     check(all_text(events) == "best-effort answer", "forced final answer streamed")
-    check(mcp.call_count == 1, f"the one tool ran on iteration 1 (got {mcp.call_count})")
+    check(
+        mcp.call_count == 1, f"the one tool ran on iteration 1 (got {mcp.call_count})"
+    )
+
 
 async def test_identical_repeat_is_short_circuited() -> None:
-    llm = ScriptedLLM([
-        tool_call_response({"q": "x"}),
-        tool_call_response({"q": "x"}),
-        text_response("answered"),
-    ])
+    llm = ScriptedLLM(
+        [
+            tool_call_response({"q": "x"}),
+            tool_call_response({"q": "x"}),
+            text_response("answered"),
+        ]
+    )
     mcp = FakeMCP()
     events = await collect("stall detection", llm, mcp, max_iterations=10)
     trs = tool_results(events)
-    check(mcp.call_count == 1, f"identical repeat NOT re-executed (got {mcp.call_count})")
+    check(
+        mcp.call_count == 1, f"identical repeat NOT re-executed (got {mcp.call_count})"
+    )
     check(len(trs) == 2, f"two tool results emitted (got {len(trs)})")
-    check(trs[1].is_error and _STALL_MESSAGE in trs[1].content,
-          "repeat returned the synthetic stall error")
+    check(
+        trs[1].is_error and _STALL_MESSAGE in trs[1].content,
+        "repeat returned the synthetic stall error",
+    )
     check(not trs[0].is_error, "the first (real) call was a normal result")
     check(done_reason(events) == "end_turn", "loop continued to a final answer")
 
+
 async def test_distinct_arguments_are_not_blocked() -> None:
-    llm = ScriptedLLM([
-        tool_call_response({"q": "x"}),
-        tool_call_response({"q": "y"}),
-        text_response("done"),
-    ])
+    llm = ScriptedLLM(
+        [
+            tool_call_response({"q": "x"}),
+            tool_call_response({"q": "y"}),
+            text_response("done"),
+        ]
+    )
     mcp = FakeMCP()
     events = await collect("distinct args not blocked", llm, mcp, max_iterations=10)
     trs = tool_results(events)
     check(mcp.call_count == 2, f"both distinct calls executed (got {mcp.call_count})")
     check(not any(_STALL_MESSAGE in t.content for t in trs), "no stall message emitted")
 
+
 async def test_consecutive_failure_nudge() -> None:
-    llm = ScriptedLLM([
-        tool_call_response({"i": 1}),
-        tool_call_response({"i": 2}),
-        tool_call_response({"i": 3}),
-        text_response("giving up"),
-    ])
+    llm = ScriptedLLM(
+        [
+            tool_call_response({"i": 1}),
+            tool_call_response({"i": 2}),
+            tool_call_response({"i": 3}),
+            text_response("giving up"),
+        ]
+    )
     mcp = FakeMCP(content="tool failed", is_error=True)
     events = await collect("consecutive-failure nudge", llm, mcp, max_iterations=10)
     trs = tool_results(events)
     check(len(trs) == 3 and all(t.is_error for t in trs), "three error results")
     check(_FAILURE_NUDGE not in trs[0].content, "no nudge on the 1st failure")
     check(_FAILURE_NUDGE not in trs[1].content, "no nudge on the 2nd failure")
-    check(_FAILURE_NUDGE in trs[2].content, "nudge appended on the 3rd consecutive failure")
+    check(
+        _FAILURE_NUDGE in trs[2].content,
+        "nudge appended on the 3rd consecutive failure",
+    )

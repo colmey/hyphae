@@ -27,6 +27,7 @@ from typing import Any, Literal, TypeAlias, Union
 
 class Role(str, Enum):
     """Roles in a conversation. `tool` is used for tool result messages."""
+
     USER = "user"
     ASSISTANT = "assistant"
     SYSTEM = "system"
@@ -46,6 +47,7 @@ CanonicalStopReason: TypeAlias = Literal[
 
 
 # ----- content blocks -----
+
 
 @dataclass
 class TextBlock:
@@ -69,6 +71,7 @@ class ToolUseBlock:
     `thought_signature` to be echoed back on function_call parts in
     conversation history. Other providers ignore this field.
     """
+
     id: str
     name: str
     input: dict[str, Any]
@@ -88,6 +91,7 @@ class ToolResultBlock:
     function_response requires the name. The agent loop populates both
     when constructing this from a tool call.
     """
+
     tool_use_id: str
     name: str
     content: str
@@ -108,6 +112,7 @@ class Usage:
     counted inside `total_tokens` where the provider includes them, so don't
     re-add them. `total_tokens` is the authoritative billed figure.
     """
+
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
@@ -141,6 +146,7 @@ class ModelProfile:
 
 # ----- messages -----
 
+
 @dataclass
 class Message:
     """One turn in a conversation.
@@ -149,6 +155,7 @@ class Message:
     Assistant messages can mix TextBlock and ToolUseBlock.
     Tool messages carry one or more ToolResultBlocks.
     """
+
     role: Role
     content: list[ContentBlock] = field(default_factory=list)
 
@@ -177,6 +184,7 @@ class AssistantMessage:
     diagnostics and later boundary mapping. Tool blocks remain authoritative
     when deciding whether dispatch is required.
     """
+
     content: list[ContentBlock]
     stop_reason: CanonicalStopReason | None = None
     model: str | None = None
@@ -199,6 +207,7 @@ class AssistantMessage:
 @dataclass
 class TextDelta:
     """A fragment of assistant text produced mid-generation."""
+
     text: str
     type: Literal["text_delta"] = "text_delta"
 
@@ -206,6 +215,7 @@ class TextDelta:
 @dataclass
 class StreamEnd:
     """Terminal stream chunk carrying the fully assembled assistant turn."""
+
     message: AssistantMessage
     type: Literal["stream_end"] = "stream_end"
 

@@ -111,12 +111,16 @@ async def run_scenario(
         elif isinstance(event, DoneEvent):
             done_reason = event.reason
             done_iterations = event.iterations
-            print(f"  [done]         reason={event.reason} iterations={event.iterations}")
+            print(
+                f"  [done]         reason={event.reason} iterations={event.iterations}"
+            )
 
     print()
-    print(f"  summary: {tool_calls} tool call(s), {tool_results} result(s), "
-          f"{errors} error(s); finished in {done_iterations} iter(s) "
-          f"with reason={done_reason}")
+    print(
+        f"  summary: {tool_calls} tool call(s), {tool_results} result(s), "
+        f"{errors} error(s); finished in {done_iterations} iter(s) "
+        f"with reason={done_reason}"
+    )
     print(f"  session {session.session_id}: {len(session.messages)} messages total")
     print()
 
@@ -139,14 +143,18 @@ async def test_configured_agent_scenarios() -> None:
         await run_scenario(
             label="trivial prompt, no tool calls expected",
             user_message="What is 2 + 2? Just give the number.",
-            llm=llm, mcp=mcp, store=store,
+            llm=llm,
+            mcp=mcp,
+            store=store,
         )
 
         # 2. Exactly one tool call expected.
         await run_scenario(
             label="single tool call",
             user_message="List the tables in the customer database.",
-            llm=llm, mcp=mcp, store=store,
+            llm=llm,
+            mcp=mcp,
+            store=store,
         )
 
         # 3. Multi-step: list tables, then describe one. Should be at least
@@ -158,7 +166,9 @@ async def test_configured_agent_scenarios() -> None:
                 "Then pick one that looks like it stores customer data "
                 "and describe its columns."
             ),
-            llm=llm, mcp=mcp, store=store,
+            llm=llm,
+            mcp=mcp,
+            store=store,
             max_iterations=8,
         )
 

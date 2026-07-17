@@ -1,4 +1,4 @@
-#mcp_layer/client.py
+# mcp_layer/client.py
 
 """Per-server MCP client wrapper; MCPManager handles aggregation/namespacing."""
 
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Tool:
     """A tool exposed by an MCP server (un-namespaced)."""
+
     name: str
     description: str
     input_schema: dict[str, Any]
@@ -30,6 +31,7 @@ class Tool:
 @dataclass
 class ToolCallResult:
     """Result of a tool call. `content` is the concatenated text output."""
+
     content: str
     is_error: bool
 
@@ -62,7 +64,11 @@ class MCPClient:
         connected = False
         try:
             if isinstance(self.config, StreamableHTTPServer):
-                logger.info("connecting to %r via streamable-http: %s", self.name, self.config.url)
+                logger.info(
+                    "connecting to %r via streamable-http: %s",
+                    self.name,
+                    self.config.url,
+                )
                 read, write, _ = await stack.enter_async_context(
                     streamablehttp_client(self.config.url)
                 )
@@ -72,7 +78,9 @@ class MCPClient:
                     sse_client(self.config.url)
                 )
             elif isinstance(self.config, StdioServer):
-                logger.info("connecting to %r via stdio: %s", self.name, self.config.command)
+                logger.info(
+                    "connecting to %r via stdio: %s", self.name, self.config.command
+                )
                 params = StdioServerParameters(
                     command=self.config.command,
                     args=self.config.args,
@@ -100,14 +108,18 @@ class MCPClient:
             self._session = session
             self._exit_stack = stack
             connected = True
-            logger.info("connected to %r: %d tool(s) available", self.name, len(self._tools))
+            logger.info(
+                "connected to %r: %d tool(s) available", self.name, len(self._tools)
+            )
         finally:
             # CancelledError from failed transports is BaseException, so cleanup
             # must live in finally rather than `except Exception`.
             if not connected:
                 await stack.aclose()
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> ToolCallResult:
+    async def call_tool(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> ToolCallResult:
         """Call a tool by its un-namespaced name."""
         if self._session is None:
             raise RuntimeError(f"MCPClient {self.name!r} is not connected")

@@ -190,7 +190,9 @@ class TurnRunner:
         )
         result = decision.result
         if decision.fallback_used:
-            context.logger.info("orchestration fallback in effect: %s", decision.fallback_reason)
+            context.logger.info(
+                "orchestration fallback in effect: %s", decision.fallback_reason
+            )
 
         if request.model_id is not None:
             resolved_id = request.model_id
@@ -252,9 +254,12 @@ class TurnRunner:
 
         if context.deadline_exceeded():
             context.logger.warning(
-                "turn deadline exhausted during routing (elapsed=%.3fs)", context.elapsed()
+                "turn deadline exhausted during routing (elapsed=%.3fs)",
+                context.elapsed(),
             )
-            yield await context.emit(DoneEvent(reason="deadline_exceeded", iterations=0))
+            yield await context.emit(
+                DoneEvent(reason="deadline_exceeded", iterations=0)
+            )
             return
 
         if request.persistence is PersistencePolicy.PERSISTENT:
@@ -310,12 +315,16 @@ class TurnRunner:
                     raise ValueError(
                         f"unsupported persistence policy: {request.persistence!r}"
                     )
-                tool_snapshot = ToolSnapshot.from_llm_tools(self.mcp.get_tools_for_llm())
+                tool_snapshot = ToolSnapshot.from_llm_tools(
+                    self.mcp.get_tools_for_llm()
+                )
                 staged_request = replace(
                     request,
                     session=source_session.staged_copy(),
                 )
-                routing = await self._resolve_routing(staged_request, tool_snapshot, context)
+                routing = await self._resolve_routing(
+                    staged_request, tool_snapshot, context
+                )
                 limits = self.limits.for_model(routing.model_entry)
                 metadata = TurnMetadata(
                     run_id=context.run_id,

@@ -39,7 +39,9 @@ async def _prompt_from_body(request: Request) -> str:
     """Read the native plain-text prompt body, rejecting empty requests."""
     prompt = (await request.body()).decode("utf-8").strip()
     if not prompt:
-        raise HTTPException(status_code=400, detail="empty body; send the prompt as plain text")
+        raise HTTPException(
+            status_code=400, detail="empty body; send the prompt as plain text"
+        )
     return prompt
 
 
@@ -57,7 +59,7 @@ async def _session_from_header(request: Request, store: SessionStore):
 @router.get("/health", response_model=HealthResponse)
 async def health(
     mcp: MCPManager = Depends(get_mcp),
-    settings = Depends(get_settings_obj),
+    settings=Depends(get_settings_obj),
     registry: Optional[LLMRegistry] = Depends(get_registry),
 ) -> HealthResponse:
     return HealthResponse(
@@ -71,7 +73,9 @@ async def health(
     )
 
 
-@router.post("/chat", response_class=PlainTextResponse, dependencies=[Depends(require_api_key)])
+@router.post(
+    "/chat", response_class=PlainTextResponse, dependencies=[Depends(require_api_key)]
+)
 async def chat(
     request: Request,
     store: SessionStore = Depends(get_store),
@@ -81,14 +85,19 @@ async def chat(
     prompt = await _prompt_from_body(request)
     session = await _session_from_header(request, store)
 
-    result = await runner.run(TurnRequest(
-        prompt=prompt,
-        session=session,
-        persistence=PersistencePolicy.PERSISTENT,
-    ))
+    result = await runner.run(
+        TurnRequest(
+            prompt=prompt,
+            session=session,
+            persistence=PersistencePolicy.PERSISTENT,
+        )
+    )
     return PlainTextResponse(
         result.answer,
-        headers={"X-Session-Id": session.session_id, "X-Done-Reason": result.done_reason},
+        headers={
+            "X-Session-Id": session.session_id,
+            "X-Done-Reason": result.done_reason,
+        },
     )
 
 
@@ -121,7 +130,9 @@ async def chat_stream(
                     step += 1
                     yield {
                         "data": json.dumps(
-                            event_record(event, run_id=execution.metadata.run_id, step=step)
+                            event_record(
+                                event, run_id=execution.metadata.run_id, step=step
+                            )
                         )
                     }
         except HTTPException as exc:

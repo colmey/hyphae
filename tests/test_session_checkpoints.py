@@ -37,9 +37,7 @@ from mcp_layer.client import ToolCallResult
 pytestmark = pytest.mark.anyio
 
 
-UNKNOWN_OUTCOME = (
-    "tool call outcome is unknown because execution was cancelled while the call was in flight"
-)
+UNKNOWN_OUTCOME = "tool call outcome is unknown because execution was cancelled while the call was in flight"
 CANCELLED_BEFORE_START = "tool call was not executed because execution was cancelled"
 
 
@@ -167,15 +165,19 @@ class ToolThenBlockingStreamLLM(LLMClient):
     async def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         if self.calls == 1:
-            yield StreamEnd(AssistantMessage(
-                content=[ToolUseBlock(
-                    id="first-tool",
-                    name="srv__tool_0",
-                    input={"index": 0},
-                )],
-                stop_reason="tool_use",
-                usage=Usage(total_tokens=1),
-            ))
+            yield StreamEnd(
+                AssistantMessage(
+                    content=[
+                        ToolUseBlock(
+                            id="first-tool",
+                            name="srv__tool_0",
+                            input={"index": 0},
+                        )
+                    ],
+                    stop_reason="tool_use",
+                    usage=Usage(total_tokens=1),
+                )
+            )
             return
         yield TextDelta("later partial")
         self.waiting.set()
@@ -224,11 +226,13 @@ def _tool_results(session: Session) -> list[ToolResultBlock]:
 
 async def _assert_reusable(store: CountingStore, session: Session) -> None:
     runner = _runner(AnswerLLM(), ToolMCP(), store)
-    result = await runner.run(TurnRequest(
-        "continue",
-        session,
-        PersistencePolicy.PERSISTENT,
-    ))
+    result = await runner.run(
+        TurnRequest(
+            "continue",
+            session,
+            PersistencePolicy.PERSISTENT,
+        )
+    )
     assert result.answer == "follow-up"
 
 
@@ -260,9 +264,9 @@ async def test_cancellation_before_first_model_output_publishes_nothing() -> Non
     runner = _runner(llm, ToolMCP(), store)
     before = list(original.messages)
 
-    task = asyncio.create_task(runner.run(TurnRequest(
-        "new prompt", original, PersistencePolicy.PERSISTENT
-    )))
+    task = asyncio.create_task(
+        runner.run(TurnRequest("new prompt", original, PersistencePolicy.PERSISTENT))
+    )
     await llm.started.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -281,9 +285,13 @@ async def test_cancellation_after_deltas_before_stream_end_publishes_nothing() -
     llm = BlockingAfterDeltaLLM()
     runner = _runner(llm, ToolMCP(), store)
 
-    task = asyncio.create_task(runner.run(TurnRequest(
-        "new prompt", original, PersistencePolicy.PERSISTENT, stream=True
-    )))
+    task = asyncio.create_task(
+        runner.run(
+            TurnRequest(
+                "new prompt", original, PersistencePolicy.PERSISTENT, stream=True
+            )
+        )
+    )
     await llm.waiting.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -294,15 +302,17 @@ async def test_cancellation_after_deltas_before_stream_end_publishes_nothing() -
     await _assert_reusable(store, original)
 
 
-async def test_visible_silent_exhaustion_is_abnormal_and_persisted_identically() -> None:
+async def test_visible_silent_exhaustion_is_abnormal_and_persisted_identically() -> (
+    None
+):
     store = CountingStore()
     original = await store.create()
     llm = ScriptedStreamLLM([[TextDelta("part "), TextDelta("one")]])
     runner = _runner(llm, ToolMCP(), store)
 
-    async with runner.open(TurnRequest(
-        "prompt", original, PersistencePolicy.PERSISTENT, stream=True
-    )) as execution:
+    async with runner.open(
+        TurnRequest("prompt", original, PersistencePolicy.PERSISTENT, stream=True)
+    ) as execution:
         events = [event async for event in execution.events]
 
     assert [event.text for event in events if isinstance(event, TextEvent)] == [
@@ -323,14 +333,16 @@ async def test_empty_silent_exhaustion_retries_without_prompt_duplication() -> N
     store = CountingStore()
     original = await store.create()
     answer = AssistantMessage(
-        content=[TextBlock("answer")], stop_reason="end_turn", usage=Usage(total_tokens=1)
+        content=[TextBlock("answer")],
+        stop_reason="end_turn",
+        usage=Usage(total_tokens=1),
     )
     llm = ScriptedStreamLLM([[], [TextDelta("answer"), StreamEnd(answer)]])
     runner = _runner(llm, ToolMCP(), store, retries=1)
 
-    result = await runner.run(TurnRequest(
-        "prompt", original, PersistencePolicy.PERSISTENT, stream=True
-    ))
+    result = await runner.run(
+        TurnRequest("prompt", original, PersistencePolicy.PERSISTENT, stream=True)
+    )
 
     assert result.answer == "answer"
     assert llm.calls == 2
@@ -338,7 +350,9 @@ async def test_empty_silent_exhaustion_retries_without_prompt_duplication() -> N
         sum(message.role is Role.USER for message in messages) == 1
         for messages in llm.messages_seen
     )
-    assert [message.role for message in (await store.get(original.session_id)).messages] == [
+    assert [
+        message.role for message in (await store.get(original.session_id)).messages
+    ] == [
         Role.USER,
         Role.ASSISTANT,
     ]
@@ -348,14 +362,16 @@ async def test_normal_stream_end_is_authoritative_without_delta_duplication() ->
     store = CountingStore()
     original = await store.create()
     answer = AssistantMessage(
-        content=[TextBlock("joined")], stop_reason="end_turn", usage=Usage(total_tokens=1)
+        content=[TextBlock("joined")],
+        stop_reason="end_turn",
+        usage=Usage(total_tokens=1),
     )
     llm = ScriptedStreamLLM([[TextDelta("join"), TextDelta("ed"), StreamEnd(answer)]])
     runner = _runner(llm, ToolMCP(), store)
 
-    result = await runner.run(TurnRequest(
-        "prompt", original, PersistencePolicy.PERSISTENT, stream=True
-    ))
+    result = await runner.run(
+        TurnRequest("prompt", original, PersistencePolicy.PERSISTENT, stream=True)
+    )
 
     assert result.answer == "joined"
     fetched = await store.get(original.session_id)
@@ -371,9 +387,9 @@ async def test_active_cancellation_during_each_tool_balances_checkpoint(
     mcp = ToolMCP(block_index=tool_index)
     runner = _runner(ToolBatchLLM(), mcp, store)
 
-    task = asyncio.create_task(runner.run(TurnRequest(
-        "tools", original, PersistencePolicy.PERSISTENT
-    )))
+    task = asyncio.create_task(
+        runner.run(TurnRequest("tools", original, PersistencePolicy.PERSISTENT))
+    )
     await mcp.started[tool_index].wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -390,8 +406,7 @@ async def test_active_cancellation_during_each_tool_balances_checkpoint(
     ]
     assert results[tool_index].content == UNKNOWN_OUTCOME
     assert all(
-        result.content == CANCELLED_BEFORE_START
-        for result in results[tool_index + 1:]
+        result.content == CANCELLED_BEFORE_START for result in results[tool_index + 1 :]
     )
     assert fetched.messages[-2].role is Role.ASSISTANT
     assert fetched.messages[-1].role is Role.TOOL
@@ -399,10 +414,17 @@ async def test_active_cancellation_during_each_tool_balances_checkpoint(
     await _assert_reusable(store, original)
 
 
-@pytest.mark.parametrize(("boundary", "tool_index"), [
-    ("before", 0), ("before", 1), ("before", 2),
-    ("after", 0), ("after", 1), ("after", 2),
-])
+@pytest.mark.parametrize(
+    ("boundary", "tool_index"),
+    [
+        ("before", 0),
+        ("before", 1),
+        ("before", 2),
+        ("after", 0),
+        ("after", 1),
+        ("after", 2),
+    ],
+)
 async def test_generator_close_before_and_after_each_tool_balances_checkpoint(
     boundary: str,
     tool_index: int,
@@ -412,9 +434,9 @@ async def test_generator_close_before_and_after_each_tool_balances_checkpoint(
     mcp = ToolMCP()
     runner = _runner(ToolBatchLLM(), mcp, store)
 
-    async with runner.open(TurnRequest(
-        "tools", original, PersistencePolicy.PERSISTENT
-    )) as execution:
+    async with runner.open(
+        TurnRequest("tools", original, PersistencePolicy.PERSISTENT)
+    ) as execution:
         async for event in execution.events:
             if boundary == "before" and isinstance(event, ToolCallEvent):
                 if event.id == f"batch-0-call-{tool_index}":
@@ -429,7 +451,9 @@ async def test_generator_close_before_and_after_each_tool_balances_checkpoint(
     assert [result.content for result in results[:completed]] == [
         f"result-{i}" for i in range(completed)
     ]
-    assert all(result.content == CANCELLED_BEFORE_START for result in results[completed:])
+    assert all(
+        result.content == CANCELLED_BEFORE_START for result in results[completed:]
+    )
     assert len(results) == 3
     assert store.save_count == 1
     await _assert_reusable(store, original)
@@ -440,9 +464,9 @@ async def test_intermediate_checkpoint_is_detached_from_later_tool_batch() -> No
     original = await store.create()
     runner = _runner(ToolBatchLLM(second_tool_batch=True), ToolMCP(), store)
 
-    async with runner.open(TurnRequest(
-        "tools", original, PersistencePolicy.PERSISTENT
-    )) as execution:
+    async with runner.open(
+        TurnRequest("tools", original, PersistencePolicy.PERSISTENT)
+    ) as execution:
         seen_second_batch = False
         async for event in execution.events:
             if isinstance(event, ToolCallEvent) and event.id == "batch-1-call-0":
@@ -466,15 +490,17 @@ async def test_later_incomplete_generation_retains_earlier_tool_checkpoint() -> 
     llm = ToolThenBlockingStreamLLM()
     runner = _runner(llm, ToolMCP(), store)
 
-    task = asyncio.create_task(runner.run(TurnRequest(
-        "tools", original, PersistencePolicy.PERSISTENT, stream=True
-    )))
+    task = asyncio.create_task(
+        runner.run(
+            TurnRequest("tools", original, PersistencePolicy.PERSISTENT, stream=True)
+        )
+    )
     await llm.waiting.wait()
     published_before_cancel = await store.get(original.session_id)
     assert len(published_before_cancel.messages) == 3
-    assert [result.tool_use_id for result in _tool_results(published_before_cancel)] == [
-        "first-tool"
-    ]
+    assert [
+        result.tool_use_id for result in _tool_results(published_before_cancel)
+    ] == ["first-tool"]
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -493,9 +519,9 @@ async def test_checkpoint_failure_does_not_replace_active_cancellation() -> None
     mcp = ToolMCP(block_index=0)
     runner = _runner(ToolBatchLLM(), mcp, store)
 
-    task = asyncio.create_task(runner.run(TurnRequest(
-        "tools", original, PersistencePolicy.PERSISTENT
-    )))
+    task = asyncio.create_task(
+        runner.run(TurnRequest("tools", original, PersistencePolicy.PERSISTENT))
+    )
     await mcp.started[0].wait()
     task.cancel()
 
@@ -510,12 +536,8 @@ async def test_persistent_turn_refreshes_a_stale_session_handle() -> None:
     original = await store.create()
     runner = _runner(AnswerLLM(), ToolMCP(), store)
 
-    await runner.run(TurnRequest(
-        "first", original, PersistencePolicy.PERSISTENT
-    ))
-    await runner.run(TurnRequest(
-        "second", original, PersistencePolicy.PERSISTENT
-    ))
+    await runner.run(TurnRequest("first", original, PersistencePolicy.PERSISTENT))
+    await runner.run(TurnRequest("second", original, PersistencePolicy.PERSISTENT))
 
     fetched = await store.get(original.session_id)
     assert [message.role for message in fetched.messages] == [
@@ -548,9 +570,9 @@ async def test_normal_native_turn_commits_once(stream: bool) -> None:
         llm = AnswerLLM()
     runner = _runner(llm, ToolMCP(), store)
 
-    await runner.run(TurnRequest(
-        "prompt", original, PersistencePolicy.PERSISTENT, stream=stream
-    ))
+    await runner.run(
+        TurnRequest("prompt", original, PersistencePolicy.PERSISTENT, stream=stream)
+    )
 
     assert store.save_count == 1
 
@@ -560,9 +582,9 @@ async def test_ephemeral_turn_never_saves_shared_store() -> None:
     original_ids = store.ids()
     runner = _runner(AnswerLLM(), ToolMCP(), store)
 
-    result = await runner.run(TurnRequest(
-        "prompt", Session(), PersistencePolicy.EPHEMERAL
-    ))
+    result = await runner.run(
+        TurnRequest("prompt", Session(), PersistencePolicy.EPHEMERAL)
+    )
 
     assert result.answer == "follow-up"
     assert store.save_count == 0

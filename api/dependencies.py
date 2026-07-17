@@ -83,7 +83,7 @@ def _presented_api_key(request: Request) -> Optional[str]:
         return xkey
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        return auth[len("Bearer "):].strip() or None
+        return auth[len("Bearer ") :].strip() or None
     return None
 
 

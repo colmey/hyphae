@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 class TokenUsage(BaseModel):
     """Token counts: what a request spent."""
+
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
@@ -30,6 +31,7 @@ class OrchestrationInfo(BaseModel):
 
     Retained until the planned boundary cleanup removes old API models.
     """
+
     model_id: str = Field(..., description="The model_id the orchestrator selected.")
     tools: list[str] = Field(
         default_factory=list,
@@ -46,12 +48,13 @@ class OrchestrationInfo(BaseModel):
     thinking_level: str | None = Field(
         default=None,
         description="Deliberation level (low/medium/high) the orchestrator chose. "
-                    "Null in legacy/fallback when unset.",
+        "Null in legacy/fallback when unset.",
     )
 
 
 class HealthResponse(BaseModel):
     """Body for GET /health."""
+
     status: str
     provider: str
     model: str

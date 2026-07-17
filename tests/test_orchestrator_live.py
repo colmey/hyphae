@@ -58,21 +58,34 @@ def _check_thinking_level_parsing() -> None:
     print("=" * 72)
     base = {"selected_model_id": "x", "generated_system_prompt": "y"}
 
-    assert OrchestrationResult.model_validate(base).thinking_level == "medium", \
+    assert OrchestrationResult.model_validate(base).thinking_level == "medium", (
         "omitted thinking_level should default to 'medium'"
-    assert OrchestrationResult.model_validate(
-        {**base, "thinking_level": "high"}
-    ).thinking_level == "high", "valid thinking_level should pass through"
-    assert OrchestrationResult.model_validate(
-        {**base, "thinking_level": "HIGH"}
-    ).thinking_level == "high", "casing should be normalized"
-    assert OrchestrationResult.model_validate(
-        {**base, "thinking_level": "extreme"}
-    ).thinking_level == "medium", "unknown thinking_level should coerce to 'medium'"
+    )
+    assert (
+        OrchestrationResult.model_validate(
+            {**base, "thinking_level": "high"}
+        ).thinking_level
+        == "high"
+    ), "valid thinking_level should pass through"
+    assert (
+        OrchestrationResult.model_validate(
+            {**base, "thinking_level": "HIGH"}
+        ).thinking_level
+        == "high"
+    ), "casing should be normalized"
+    assert (
+        OrchestrationResult.model_validate(
+            {**base, "thinking_level": "extreme"}
+        ).thinking_level
+        == "medium"
+    ), "unknown thinking_level should coerce to 'medium'"
     # Extra hallucinated fields are ignored (lenient schema), not rejected.
-    assert OrchestrationResult.model_validate(
-        {**base, "thinking_level": "low", "made_up": 1}
-    ).thinking_level == "low", "extra fields should be ignored"
+    assert (
+        OrchestrationResult.model_validate(
+            {**base, "thinking_level": "low", "made_up": 1}
+        ).thinking_level
+        == "low"
+    ), "extra fields should be ignored"
     print("  thinking_level parsing OK (default/passthrough/casing/coerce/extra)\n")
 
 
@@ -83,7 +96,9 @@ def _check_history_block(orch: Orchestrator) -> None:
     print("=" * 72)
     history = [
         Message.user("List the tables in the customer database."),
-        Message.assistant([TextBlock(text="The tables are: customers, orders, invoices.")]),
+        Message.assistant(
+            [TextBlock(text="The tables are: customers, orders, invoices.")]
+        ),
     ]
     tools = ToolSnapshot()
     with_hist = orch._build_prompt(
@@ -93,8 +108,9 @@ def _check_history_block(orch: Orchestrator) -> None:
     assert "customer database" in with_hist, "history content missing from prompt"
 
     without_hist = orch._build_prompt("hello", tools, history=None)
-    assert "CONVERSATION SO FAR" not in without_hist, \
+    assert "CONVERSATION SO FAR" not in without_hist, (
         "first-turn prompt should have no history block"
+    )
     print("  history block OK (present with history, absent without)\n")
 
 
@@ -220,7 +236,9 @@ async def test_configured_orchestration_decisions() -> None:
         print()
         if failures:
             print("=" * 72)
-            print(f"FAIL: {len(failures)} of {len(messages)} decisions used the fallback path.")
+            print(
+                f"FAIL: {len(failures)} of {len(messages)} decisions used the fallback path."
+            )
             print("=" * 72)
             for f in failures:
                 print(f"  - {f}")

@@ -78,6 +78,7 @@ _SUMMARY_HEADER = "Conversation summary so far:"
 # Token estimation
 # ---------------------------------------------------------------------------
 
+
 def _render_json(obj: object) -> str:
     """Render JSON-ish values for estimates/transcripts; repr on odd values."""
     try:
@@ -86,7 +87,9 @@ def _render_json(obj: object) -> str:
         return repr(obj)
 
 
-def clip_content(content: str, max_chars: int | None, *, marker: str = "truncated") -> str:
+def clip_content(
+    content: str, max_chars: int | None, *, marker: str = "truncated"
+) -> str:
     """Bound content while recording how many characters were omitted."""
     if not max_chars or max_chars <= 0 or len(content) <= max_chars:
         return content
@@ -152,7 +155,9 @@ def estimate_usage_tokens(
     double-counted — except that a missing total is filled from input+output
     (arithmetic on provider figures, not an estimate).
     """
-    if usage is not None and (usage.input_tokens or usage.output_tokens or usage.total_tokens):
+    if usage is not None and (
+        usage.input_tokens or usage.output_tokens or usage.total_tokens
+    ):
         if usage.total_tokens:
             return usage
         return Usage(
@@ -162,7 +167,9 @@ def estimate_usage_tokens(
             thinking_tokens=usage.thinking_tokens,
             cached_tokens=usage.cached_tokens,
         )
-    input_est = estimate_message_tokens(messages or []) + estimate_text_tokens(system or "")
+    input_est = estimate_message_tokens(messages or []) + estimate_text_tokens(
+        system or ""
+    )
     output_est = (
         estimate_message_tokens([response.to_message()])
         if response is not None and response.content
@@ -178,6 +185,7 @@ def estimate_usage_tokens(
 # ---------------------------------------------------------------------------
 # Budget
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class ContextBudget:
@@ -210,6 +218,7 @@ class AssembledContext:
 # ---------------------------------------------------------------------------
 # Assembly
 # ---------------------------------------------------------------------------
+
 
 async def assemble_context(
     messages: list[Message],
@@ -246,7 +255,8 @@ async def assemble_context(
     if strategy == "naive":
         logger.warning(
             "context over budget under 'naive' (est=%d > budget=%d); passing through",
-            estimated, budget.input_budget,
+            estimated,
+            budget.input_budget,
         )
         return AssembledContext(
             messages, estimated, budget, strategy, degraded_reason="over_budget"
@@ -255,7 +265,11 @@ async def assemble_context(
     if llm is None:
         logger.warning("compaction requested but no summarizer client; passing through")
         return AssembledContext(
-            messages, estimated, budget, strategy, degraded_reason="no_summarizer_client"
+            messages,
+            estimated,
+            budget,
+            strategy,
+            degraded_reason="no_summarizer_client",
         )
 
     try:
@@ -322,7 +336,11 @@ async def _compact(
             "history too short to compact (%d units); passing through", len(units)
         )
         return AssembledContext(
-            messages, estimated, budget, "compaction", degraded_reason="too_short_to_compact"
+            messages,
+            estimated,
+            budget,
+            "compaction",
+            degraded_reason="too_short_to_compact",
         )
 
     # Choose how many recent units survive verbatim: start from the configured
@@ -337,21 +355,32 @@ async def _compact(
         + _MESSAGE_OVERHEAD_TOKENS
         + summary_max_tokens
     )
-    while keep > 1 and fixed + estimate_message_tokens(
-        [m for unit in units[len(units) - keep:] for m in unit]
-    ) > budget.input_budget:
+    while (
+        keep > 1
+        and fixed
+        + estimate_message_tokens(
+            [m for unit in units[len(units) - keep :] for m in unit]
+        )
+        > budget.input_budget
+    ):
         keep -= 1
 
-    recent = [m for unit in units[len(units) - keep:] for m in unit]
-    middle = [m for unit in units[start:len(units) - keep] for m in unit]
+    recent = [m for unit in units[len(units) - keep :] for m in unit]
+    middle = [m for unit in units[start : len(units) - keep] for m in unit]
 
     if recent and recent[0].role == Role.TOOL:
         # Only possible on malformed history (a tool result with no prior
         # assistant tool_use formed its own unit). Refuse rather than send an
         # orphan the provider will reject.
-        logger.warning("compaction boundary would orphan a tool result; passing through")
+        logger.warning(
+            "compaction boundary would orphan a tool result; passing through"
+        )
         return AssembledContext(
-            messages, estimated, budget, "compaction", degraded_reason="malformed_history"
+            messages,
+            estimated,
+            budget,
+            "compaction",
+            degraded_reason="malformed_history",
         )
 
     summary_text = await _summarize(
@@ -362,7 +391,11 @@ async def _compact(
     )
     if summary_text is None:
         return AssembledContext(
-            messages, estimated, budget, "compaction", degraded_reason="summarizer_failed"
+            messages,
+            estimated,
+            budget,
+            "compaction",
+            degraded_reason="summarizer_failed",
         )
 
     # A plain user message, clearly marked — no new role or block type, and
@@ -375,11 +408,16 @@ async def _compact(
         logger.warning(
             "compacted context still over budget (est=%d > budget=%d); "
             "sending the smallest protocol-safe view",
-            assembled_estimate, budget.input_budget,
+            assembled_estimate,
+            budget.input_budget,
         )
     logger.info(
         "context compacted: %d -> %d messages (est %d -> %d tokens, budget %d)",
-        len(messages), len(assembled), estimated, assembled_estimate, budget.input_budget,
+        len(messages),
+        len(assembled),
+        estimated,
+        assembled_estimate,
+        budget.input_budget,
     )
     return AssembledContext(
         assembled, assembled_estimate, budget, "compaction", compacted=True
@@ -432,9 +470,13 @@ async def _summarize(
             b.text for b in response.content if isinstance(b, TextBlock) and b.text
         ).strip()
     except Exception:  # noqa: BLE001
-        logger.warning("history summarization failed; degrading to pass-through", exc_info=True)
+        logger.warning(
+            "history summarization failed; degrading to pass-through", exc_info=True
+        )
         return None
     if not text:
-        logger.warning("history summarization returned no text; degrading to pass-through")
+        logger.warning(
+            "history summarization returned no text; degrading to pass-through"
+        )
         return None
     return text

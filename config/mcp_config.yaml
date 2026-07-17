@@ -20,12 +20,6 @@
 # `disabled: false` (and start the server) to re-enable. With both disabled the
 # harness runs tool-less; the model answers from its own knowledge.
 mcpServers:
-  google-toolbox:
-    transport: streamable-http
-    url: ${GOOGLE_TOOLBOX_URL}
-    disabled: true
-    disabled_tools: []
-
   open-websearch:
     transport: streamable-http
     url: ${OPEN_WEBSEARCH_URL}

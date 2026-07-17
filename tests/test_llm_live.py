@@ -77,10 +77,12 @@ async def scenario_2_with_tools(llm: LLMClient, mcp: MCPManager) -> None:
     # We don't know exactly which tools your servers expose, but listing
     # database tables is a common, low-risk capability for a database toolbox.
     response = await llm.complete(
-        messages=[Message.user(
-            "List the tables available in the customer database. "
-            "Use the appropriate tool."
-        )],
+        messages=[
+            Message.user(
+                "List the tables available in the customer database. "
+                "Use the appropriate tool."
+            )
+        ],
         tools=tools,
         system=(
             "You are a database assistant with access to tools. "
@@ -124,14 +126,20 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
         print(f"  executing tool: {tu.name} args={tu.input}")
         result = await mcp.call_tool(tu.name, tu.input)
         # Truncate noisy output for the smoke test.
-        preview = result.content if len(result.content) < 400 else result.content[:397] + "..."
+        preview = (
+            result.content
+            if len(result.content) < 400
+            else result.content[:397] + "..."
+        )
         print(f"    result (is_error={result.is_error}): {preview}")
-        results.append(ToolResultBlock(
-            tool_use_id=tu.id,
-            name=tu.name,
-            content=result.content,
-            is_error=result.is_error,
-        ))
+        results.append(
+            ToolResultBlock(
+                tool_use_id=tu.id,
+                name=tu.name,
+                content=result.content,
+                is_error=result.is_error,
+            )
+        )
     history.append(Message.tool_results(results))
 
     # Turn 2: model produces a final answer using the tool output.

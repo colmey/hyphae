@@ -58,7 +58,8 @@ class RunLimits:
         return replace(
             self,
             max_tokens=getattr(model_entry, "max_tokens", None) or self.max_tokens,
-            context_window=getattr(model_entry, "context_window", None) or self.context_window,
+            context_window=getattr(model_entry, "context_window", None)
+            or self.context_window,
         )
 
 
@@ -124,7 +125,9 @@ class RunContext:
         if self.tracer is not None:
             self.trace_step += 1
             try:
-                self.tracer.emit(event_record(event, run_id=self.run_id, step=self.trace_step))
+                self.tracer.emit(
+                    event_record(event, run_id=self.run_id, step=self.trace_step)
+                )
             except Exception:  # noqa: BLE001 -- tracing must never break a run.
                 self.logger.warning("trace emit failed", exc_info=True)
         return event

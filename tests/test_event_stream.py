@@ -19,8 +19,15 @@ class FakeToolLLM(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         self.calls += 1
         if self.calls == 1:
             return AssistantMessage(
@@ -38,8 +45,15 @@ class FakeToolLLM(LLMClient):
 
 
 class FakePlainLLM(LLMClient):
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         return AssistantMessage(
             content=[TextBlock(text="Just an answer.")],
             stop_reason="end_turn",
@@ -58,11 +72,16 @@ class FakeMCP:
     connected_servers: list[str] = []
 
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
-        return [{
-            "name": "echo",
-            "description": "echo back the value",
-            "input_schema": {"type": "object", "properties": {"value": {"type": "string"}}},
-        }]
+        return [
+            {
+                "name": "echo",
+                "description": "echo back the value",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                },
+            }
+        ]
 
     def list_tools(self) -> list[Any]:
         return ["echo"]
@@ -94,8 +113,12 @@ async def test_tool_turn_emits_call_result_text_and_done_in_order(asgi_client) -
     types = [event["type"] for event in events]
     assert types.index("tool_call") < types.index("tool_result")
     assert next(e for e in events if e["type"] == "tool_call")["name"] == "echo"
-    assert next(e for e in events if e["type"] == "tool_result")["content"] == "echo: hi"
-    assert "".join(e["text"] for e in events if e["type"] == "text") == "The tool said hi."
+    assert (
+        next(e for e in events if e["type"] == "tool_result")["content"] == "echo: hi"
+    )
+    assert (
+        "".join(e["text"] for e in events if e["type"] == "text") == "The tool said hi."
+    )
     assert [e["reason"] for e in events if e["type"] == "done"] == ["end_turn"]
     assert types[-1] == "done"
     assert headers.get("x-session-id")
@@ -107,7 +130,9 @@ async def test_plain_turn_emits_only_text_usage_and_done(asgi_client) -> None:
 
     types = [event["type"] for event in events]
     assert "tool_call" not in types and "tool_result" not in types
-    assert "".join(e["text"] for e in events if e["type"] == "text") == "Just an answer."
+    assert (
+        "".join(e["text"] for e in events if e["type"] == "text") == "Just an answer."
+    )
     assert types[-1] == "done"
 
 

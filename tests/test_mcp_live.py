@@ -52,7 +52,9 @@ async def test_configured_mcp_inventory() -> None:
         for server, entries in by_server.items():
             print(f"--- {server} ({len(entries)} tools) ---")
             for namespaced, desc in entries:
-                first_line = desc.strip().splitlines()[0] if desc.strip() else "(no description)"
+                first_line = (
+                    desc.strip().splitlines()[0] if desc.strip() else "(no description)"
+                )
                 # Truncate long descriptions for readable output.
                 if len(first_line) > 80:
                     first_line = first_line[:77] + "..."
@@ -67,6 +69,7 @@ async def test_configured_mcp_inventory() -> None:
             print("Sample tool schema as it would be sent to the LLM:")
             print("=" * 70)
             import json
+
             print(json.dumps(llm_tools[0], indent=2)[:800])
             print()
 

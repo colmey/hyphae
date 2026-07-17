@@ -14,6 +14,7 @@ from .contracts import NAMESPACE_SEP
 
 logger = logging.getLogger(__name__)
 
+
 class MCPManager:
     """Aggregates MCPClient instances and presents a unified tool registry."""
 
@@ -53,7 +54,9 @@ class MCPManager:
 
         logger.info(
             "MCP startup complete: %d/%d servers connected, %d tools available",
-            len(self._clients), len(enabled), len(self._tool_index),
+            len(self._clients),
+            len(enabled),
+            len(self._tool_index),
         )
 
     async def shutdown(self) -> None:
@@ -89,7 +92,9 @@ class MCPManager:
             for namespaced, tool in self.list_tools()
         ]
 
-    async def call_tool(self, namespaced_name: str, arguments: dict[str, Any]) -> ToolCallResult:
+    async def call_tool(
+        self, namespaced_name: str, arguments: dict[str, Any]
+    ) -> ToolCallResult:
         """Route a namespaced tool call to the appropriate server."""
         if namespaced_name not in self._tool_index:
             return ToolCallResult(

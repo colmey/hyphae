@@ -69,7 +69,11 @@ def isolate_dotenv(
     request: pytest.FixtureRequest,
 ) -> Iterator[None]:
     """Isolate settings and prevent hermetic tests from loading developer secrets."""
-    loader = _REAL_LOAD_SECRETS if request.node.get_closest_marker("live") else _ignore_dotenv
+    loader = (
+        _REAL_LOAD_SECRETS
+        if request.node.get_closest_marker("live")
+        else _ignore_dotenv
+    )
     monkeypatch.setattr(config, "load_secrets", loader)
     reset_settings()
     yield

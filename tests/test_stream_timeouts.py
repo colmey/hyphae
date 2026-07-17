@@ -89,7 +89,9 @@ def _answer(text: str) -> AssistantMessage:
 
 
 def _done_reason(events: list[Any]) -> str:
-    return next(event.reason for event in reversed(events) if isinstance(event, DoneEvent))
+    return next(
+        event.reason for event in reversed(events) if isinstance(event, DoneEvent)
+    )
 
 
 @pytest.mark.anyio
@@ -119,7 +121,9 @@ async def test_each_blocked_stream_read_is_timed_and_closed(
         max_retries=1,
     )
 
-    assert [event.text for event in events if isinstance(event, TextEvent)] == expected_text
+    assert [
+        event.text for event in events if isinstance(event, TextEvent)
+    ] == expected_text
     assert _done_reason(events) == "llm_error"
     assert sum(isinstance(event, ErrorEvent) for event in events) == 1
     assert llm.calls == expected_calls
@@ -166,7 +170,9 @@ async def test_pre_visible_timeout_can_retry_after_closing_first_stream(
         max_retries=1,
     )
 
-    assert [event.text for event in events if isinstance(event, TextEvent)] == ["recovered"]
+    assert [event.text for event in events if isinstance(event, TextEvent)] == [
+        "recovered"
+    ]
     assert _done_reason(events) == "end_turn"
     assert not any(isinstance(event, ErrorEvent) for event in events)
     assert llm.calls == 2
@@ -186,7 +192,11 @@ async def test_per_read_timeout_resets_after_each_chunk(
         max_retries=0,
     )
 
-    assert [event.text for event in events if isinstance(event, TextEvent)] == ["a", "b", "c"]
+    assert [event.text for event in events if isinstance(event, TextEvent)] == [
+        "a",
+        "b",
+        "c",
+    ]
     assert _done_reason(events) == "end_turn"
 
 

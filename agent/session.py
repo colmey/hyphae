@@ -60,6 +60,7 @@ from llm.schemas import (
 # Session
 # ---------------------------------------------------------------------------
 
+
 def _new_session_id() -> str:
     """Generate a fresh session ID. Short UUID; collisions are not a concern at our scale."""
     return f"sess_{uuid.uuid4().hex[:16]}"
@@ -153,6 +154,7 @@ class Session:
 # Store
 # ---------------------------------------------------------------------------
 
+
 class SessionNotFoundError(KeyError):
     """Raised when get() is called with an unknown session_id."""
 
@@ -207,7 +209,9 @@ class InMemorySessionStore(SessionStore):
         """Drop expired then surplus sessions. Cheap; called on create()."""
         if self._ttl_seconds > 0:
             cutoff = _utc_now() - timedelta(seconds=self._ttl_seconds)
-            expired = [sid for sid, s in self._sessions.items() if s.updated_at < cutoff]
+            expired = [
+                sid for sid, s in self._sessions.items() if s.updated_at < cutoff
+            ]
             for sid in expired:
                 del self._sessions[sid]
 
@@ -251,6 +255,7 @@ class InMemorySessionStore(SessionStore):
 # ---------------------------------------------------------------------------
 # Concurrency guard
 # ---------------------------------------------------------------------------
+
 
 class SessionBusyError(Exception):
     """Raised when a session already has a request in flight."""

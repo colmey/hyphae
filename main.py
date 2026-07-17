@@ -4,9 +4,6 @@
 
 from __future__ import annotations
 
-from config import load_secrets
-load_secrets()
-
 import logging
 from contextlib import asynccontextmanager
 
@@ -18,14 +15,24 @@ from api.openai_compatible import openai_auth_exception_handler
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from llm import build_llm_client
 from mcp_layer import MCPManager
-from config import get_settings, load_mcp_config, load_models_config, load_orchestrator_prompt
+from config import (
+    get_settings,
+    load_mcp_config,
+    load_models_config,
+    load_orchestrator_prompt,
+    load_secrets,
+)
 from llm.client import supported_providers
 from orchestrator import LLMRegistry, Orchestrator
+
+load_secrets()
 
 logger = logging.getLogger(__name__)
 
 
-def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | None, Orchestrator | None]:
+def _try_build_orchestration(
+    settings, mcp: MCPManager
+) -> tuple[LLMRegistry | None, Orchestrator | None]:
     """Attempt to construct (LLMRegistry, Orchestrator). Returns (None, None) on any failure.
 
     Orchestration is optional; load/build errors degrade to no-orchestration mode.
@@ -35,7 +42,9 @@ def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | N
         return None, None
 
     try:
-        models_config = load_models_config(settings.models_config_path, known_providers=supported_providers())
+        models_config = load_models_config(
+            settings.models_config_path, known_providers=supported_providers()
+        )
     except FileNotFoundError:
         logger.warning(
             "orchestration enabled but models config not found at %s; "
@@ -46,7 +55,8 @@ def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | N
     except Exception as e:
         logger.warning(
             "orchestration enabled but models config failed to load: %s; "
-            "running in legacy mode.", e,
+            "running in legacy mode.",
+            e,
         )
         return None, None
 
@@ -80,7 +90,9 @@ def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | N
     except Exception as e:
         logger.warning(
             "could not build LLM client for orchestrator_model_id=%r: %s; "
-            "running in legacy mode.", orch_model_id, e,
+            "running in legacy mode.",
+            orch_model_id,
+            e,
         )
         return None, None
 
@@ -91,7 +103,8 @@ def _try_build_orchestration(settings, mcp: MCPManager) -> tuple[LLMRegistry | N
     )
     logger.info(
         "orchestration enabled: %d models registered, orchestrator_model_id=%s",
-        len(registry.model_ids), orch_model_id,
+        len(registry.model_ids),
+        orch_model_id,
     )
     return registry, orchestrator
 
@@ -128,8 +141,11 @@ async def lifespan(app: FastAPI):
         level=settings.log_level,
         format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
     )
-    logger.info("starting harness: provider=%s model=%s",
-                settings.llm_provider, settings.llm_model)
+    logger.info(
+        "starting harness: provider=%s model=%s",
+        settings.llm_provider,
+        settings.llm_model,
+    )
 
     llm = build_llm_client(settings)
 

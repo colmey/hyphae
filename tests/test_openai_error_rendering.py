@@ -11,7 +11,12 @@ import pytest
 from fastapi import HTTPException
 
 from agent import DoneEvent, ErrorEvent, Session, TextEvent
-from api.openai_compatible import _FINISH_REASONS, _finish_reason, _stream, chat_completions
+from api.openai_compatible import (
+    _FINISH_REASONS,
+    _finish_reason,
+    _stream,
+    chat_completions,
+)
 from api.schemas import TokenUsage
 from api.turn import (
     PersistencePolicy,
@@ -85,11 +90,16 @@ def _collect_stream(runner: _EventsRunner) -> list[dict]:
 
 
 def _decoded(items: list[dict]) -> list[dict | str]:
-    return [json.loads(item["data"]) if item["data"] != "[DONE]" else "[DONE]" for item in items]
+    return [
+        json.loads(item["data"]) if item["data"] != "[DONE]" else "[DONE]"
+        for item in items
+    ]
 
 
 @pytest.mark.parametrize("done_reason, expected", sorted(_FINISH_REASONS.items()))
-def test_finish_reason_maps_only_supported_success_reasons(done_reason: str, expected: str) -> None:
+def test_finish_reason_maps_only_supported_success_reasons(
+    done_reason: str, expected: str
+) -> None:
     assert _finish_reason(done_reason) == expected
 
 
@@ -102,8 +112,16 @@ def test_finish_reason_fails_closed(done_reason: str) -> None:
 @pytest.mark.parametrize(
     "events",
     [
-        [ErrorEvent("backend unavailable"), TextEvent("must be ignored"), DoneEvent("end_turn", 1)],
-        [TextEvent("partial"), ErrorEvent("backend unavailable"), DoneEvent("llm_error", 1)],
+        [
+            ErrorEvent("backend unavailable"),
+            TextEvent("must be ignored"),
+            DoneEvent("end_turn", 1),
+        ],
+        [
+            TextEvent("partial"),
+            ErrorEvent("backend unavailable"),
+            DoneEvent("llm_error", 1),
+        ],
     ],
 )
 def test_sse_error_event_is_terminal_and_emitted_once(events) -> None:
@@ -123,22 +141,28 @@ def test_sse_error_event_is_terminal_and_emitted_once(events) -> None:
         if isinstance(frame, dict) and frame.get("choices")
     ]
 
-    assert errors == [{
-        "error": {
-            "message": "backend unavailable",
-            "type": "server_error",
-            "param": None,
-            "code": None,
+    assert errors == [
+        {
+            "error": {
+                "message": "backend unavailable",
+                "type": "server_error",
+                "param": None,
+                "code": None,
+            }
         }
-    }]
+    ]
     assert "must be ignored" not in content
     assert finish_frames == []
     assert frames[-1] == "[DONE]"
 
 
 @pytest.mark.parametrize("reason", ["llm_error", "unexpected_reason"])
-def test_sse_invalid_done_reason_becomes_error_without_success_finish(reason: str) -> None:
-    frames = _decoded(_collect_stream(_EventsRunner([TextEvent("partial"), DoneEvent(reason, 1)])))
+def test_sse_invalid_done_reason_becomes_error_without_success_finish(
+    reason: str,
+) -> None:
+    frames = _decoded(
+        _collect_stream(_EventsRunner([TextEvent("partial"), DoneEvent(reason, 1)]))
+    )
 
     assert sum(isinstance(frame, dict) and "error" in frame for frame in frames) == 1
     assert not any(
@@ -151,10 +175,19 @@ def test_sse_invalid_done_reason_becomes_error_without_success_finish(reason: st
 
 
 def test_sse_renderer_exception_uses_error_envelope_and_done_sentinel() -> None:
-    frames = _decoded(_collect_stream(_EventsRunner([TextEvent("partial")], failure=RuntimeError("boom"))))
+    frames = _decoded(
+        _collect_stream(
+            _EventsRunner([TextEvent("partial")], failure=RuntimeError("boom"))
+        )
+    )
 
     assert frames[-2] == {
-        "error": {"message": "boom", "type": "server_error", "param": None, "code": None}
+        "error": {
+            "message": "boom",
+            "type": "server_error",
+            "param": None,
+            "code": None,
+        }
     }
     assert frames[-1] == "[DONE]"
 
@@ -175,11 +208,13 @@ def test_sse_missing_terminal_event_fails_instead_of_defaulting_to_stop() -> Non
 
 @pytest.mark.parametrize("reason", ["llm_error", "unexpected_reason"])
 def test_nonstream_invalid_done_reason_returns_openai_500(reason: str) -> None:
-    response = asyncio.run(chat_completions(
-        _Request(),
-        settings=SimpleNamespace(llm_model="test-model"),
-        runner=_RunRunner(reason),
-    ))
+    response = asyncio.run(
+        chat_completions(
+            _Request(),
+            settings=SimpleNamespace(llm_model="test-model"),
+            runner=_RunRunner(reason),
+        )
+    )
 
     assert response.status_code == 500
     body = json.loads(response.body)
@@ -189,11 +224,13 @@ def test_nonstream_invalid_done_reason_returns_openai_500(reason: str) -> None:
 
 
 def test_nonstream_http_exception_preserves_status_and_openai_envelope() -> None:
-    response = asyncio.run(chat_completions(
-        _Request(),
-        settings=SimpleNamespace(llm_model="test-model"),
-        runner=_HTTPErrorRunner("end_turn"),
-    ))
+    response = asyncio.run(
+        chat_completions(
+            _Request(),
+            settings=SimpleNamespace(llm_model="test-model"),
+            runner=_HTTPErrorRunner("end_turn"),
+        )
+    )
 
     assert response.status_code == 409
     assert json.loads(response.body) == {

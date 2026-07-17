@@ -24,8 +24,15 @@ class ScriptedLLM(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         self.calls += 1
         if self.calls == 1:
             return AssistantMessage(
@@ -79,7 +86,11 @@ async def _drive(tracer) -> list:
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
 
 
 async def test_jsonl_trace_is_exact_serialized_event_log(tmp_path: Path) -> None:
@@ -98,8 +109,12 @@ async def test_jsonl_trace_is_exact_serialized_event_log(tmp_path: Path) -> None
 
     usage_records = [record for record in records if record["type"] == "usage"]
     tool_records = [record for record in records if record["type"] == "tool_result"]
-    assert usage_records and all(isinstance(r["latency_ms"], (int, float)) for r in usage_records)
-    assert tool_records and all(isinstance(r["latency_ms"], (int, float)) for r in tool_records)
+    assert usage_records and all(
+        isinstance(r["latency_ms"], (int, float)) for r in usage_records
+    )
+    assert tool_records and all(
+        isinstance(r["latency_ms"], (int, float)) for r in tool_records
+    )
     args = next(record["args"] for record in records if record["type"] == "tool_call")
     assert args["query"] == "weather"
     assert isinstance(args["blob"], str)
@@ -109,7 +124,9 @@ async def test_jsonl_trace_is_exact_serialized_event_log(tmp_path: Path) -> None
     assert isinstance(events[-1], DoneEvent) and events[-1].reason == "end_turn"
 
 
-async def test_none_tracer_does_not_change_event_stream_or_write(tmp_path: Path) -> None:
+async def test_none_tracer_does_not_change_event_stream_or_write(
+    tmp_path: Path,
+) -> None:
     traced_path = tmp_path / "trace.jsonl"
     tracer = JSONLTracer(traced_path)
     traced_events = await _drive(tracer)
@@ -119,4 +136,6 @@ async def test_none_tracer_does_not_change_event_stream_or_write(tmp_path: Path)
     noop_events = await _drive(None)
 
     assert not noop_path.exists()
-    assert [event.type for event in noop_events] == [event.type for event in traced_events]
+    assert [event.type for event in noop_events] == [
+        event.type for event in traced_events
+    ]

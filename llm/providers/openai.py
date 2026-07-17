@@ -55,7 +55,7 @@ def _split_reasoning(text: str | None) -> tuple[str | None, str]:
     if not m:
         return None, text
     reasoning = re.sub(r"</?think>", "", m.group(0)).strip() or None
-    return reasoning, text[m.end():]
+    return reasoning, text[m.end() :]
 
 
 class _ReasoningStreamStripper:
@@ -111,7 +111,7 @@ class _ReasoningStreamStripper:
         if not candidate:
             return ""
         if candidate.startswith(self._OPEN):
-            rest = candidate[len(self._OPEN):]
+            rest = candidate[len(self._OPEN) :]
             self._pending = ""
             self._state = "reasoning"
             return self._feed_reasoning(rest)
@@ -134,7 +134,7 @@ class _ReasoningStreamStripper:
             return ""
 
         self._reasoning_parts.append(self._pending[:close_at])
-        rest = self._pending[close_at + len(self._CLOSE):]
+        rest = self._pending[close_at + len(self._CLOSE) :]
         self._pending = ""
         self._state = "after_reasoning"
         return self._feed_after_reasoning(rest)
@@ -187,7 +187,9 @@ class OpenAILLMClient(LLMClient):
 
         logger.debug(
             "openai complete: model=%s messages=%d tools=%d schema=%s",
-            self._model, len(request["messages"]), len(request.get("tools") or []),
+            self._model,
+            len(request["messages"]),
+            len(request.get("tools") or []),
             response_schema.__name__ if response_schema else None,
         )
 
@@ -215,7 +217,9 @@ class OpenAILLMClient(LLMClient):
 
         logger.debug(
             "openai stream: model=%s messages=%d tools=%d",
-            self._model, len(request["messages"]), len(request.get("tools") or []),
+            self._model,
+            len(request["messages"]),
+            len(request.get("tools") or []),
         )
 
         stripper = _ReasoningStreamStripper()
@@ -247,7 +251,9 @@ class OpenAILLMClient(LLMClient):
 
                 for tc in getattr(delta, "tool_calls", None) or []:
                     index = int(getattr(tc, "index", 0) or 0)
-                    acc = tool_accs.setdefault(index, {"id": "", "name": "", "args": ""})
+                    acc = tool_accs.setdefault(
+                        index, {"id": "", "name": "", "args": ""}
+                    )
                     if getattr(tc, "id", None):
                         acc["id"] = tc.id
                     fn = getattr(tc, "function", None)
@@ -391,11 +397,13 @@ class OpenAILLMClient(LLMClient):
             if msg.role == Role.TOOL:
                 for block in msg.content:
                     if isinstance(block, ToolResultBlock):
-                        out.append({
-                            "role": "tool",
-                            "tool_call_id": block.tool_use_id,
-                            "content": block.content,
-                        })
+                        out.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": block.tool_use_id,
+                                "content": block.content,
+                            }
+                        )
                 continue
 
             if msg.role == Role.ASSISTANT:
@@ -406,14 +414,16 @@ class OpenAILLMClient(LLMClient):
                         if block.text:
                             text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
-                        tool_calls.append({
-                            "id": block.id,
-                            "type": "function",
-                            "function": {
-                                "name": block.name,
-                                "arguments": json.dumps(block.input or {}),
-                            },
-                        })
+                        tool_calls.append(
+                            {
+                                "id": block.id,
+                                "type": "function",
+                                "function": {
+                                    "name": block.name,
+                                    "arguments": json.dumps(block.input or {}),
+                                },
+                            }
+                        )
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": "".join(text_parts) or None,
@@ -440,7 +450,8 @@ class OpenAILLMClient(LLMClient):
                 "function": {
                     "name": t["name"],
                     "description": t.get("description", ""),
-                    "parameters": t.get("input_schema") or {
+                    "parameters": t.get("input_schema")
+                    or {
                         "type": "object",
                         "properties": {},
                     },
@@ -470,7 +481,9 @@ class OpenAILLMClient(LLMClient):
         choices = getattr(response, "choices", None) or []
         if not choices:
             return AssistantMessage(
-                content=[], stop_reason="empty", model=self._model,
+                content=[],
+                stop_reason="empty",
+                model=self._model,
                 usage=self._usage_from_response(response),
                 reasoning=None,
             )

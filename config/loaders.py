@@ -30,6 +30,7 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 def _interpolate_env(value: Any) -> Any:
     """Recursively replace ${ENV_VAR} in strings. Raises if a var is unset."""
     if isinstance(value, str):
+
         def repl(match: re.Match[str]) -> str:
             var = match.group(1)
             if var not in os.environ:
@@ -37,6 +38,7 @@ def _interpolate_env(value: Any) -> Any:
                     f"environment variable {var!r} referenced in config is not set"
                 )
             return os.environ[var]
+
         return _ENV_PATTERN.sub(repl, value)
     if isinstance(value, dict):
         return {k: _interpolate_env(v) for k, v in value.items()}
@@ -84,7 +86,9 @@ def load_mcp_config(path: Path | str) -> MCPConfig:
     cfg = _load_yaml_model(path, MCPConfig, what="MCP config", interpolate=True)
     logger.info(
         "loaded MCP config: %d servers (%d enabled), tool_policy=%s",
-        len(cfg.mcp_servers), len(cfg.enabled_servers()), cfg.tool_policy.mode,
+        len(cfg.mcp_servers),
+        len(cfg.enabled_servers()),
+        cfg.tool_policy.mode,
     )
     return cfg
 
@@ -115,7 +119,8 @@ def load_models_config(
                 )
     logger.info(
         "loaded models config: %d entries (default=%s)",
-        len(cfg.models), cfg.default_id(),
+        len(cfg.models),
+        cfg.default_id(),
     )
     return cfg
 

@@ -25,7 +25,9 @@ def _cpu_seconds() -> float:
     [
         (
             "streamable-http",
-            StreamableHTTPServer(transport="streamable-http", url="http://127.0.0.1:5999/mcp"),
+            StreamableHTTPServer(
+                transport="streamable-http", url="http://127.0.0.1:5999/mcp"
+            ),
         ),
         ("sse", SSEServer(transport="sse", url="http://127.0.0.1:5998/sse")),
     ],

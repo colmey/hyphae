@@ -13,7 +13,7 @@ from typing import Any, AsyncIterator
 import pytest
 from fastapi import HTTPException
 
-from agent import DoneEvent, OrchestrationDecisionEvent, Session, SessionGuard, Tracer
+from agent import OrchestrationDecisionEvent, Session, SessionGuard, Tracer
 from api.turn import PersistencePolicy, TurnRequest, TurnRunner
 from config import Settings
 from llm.client import LLMClient
@@ -36,11 +36,13 @@ class CountingMCP:
     connected_servers: list[str] = []
 
     def __init__(self, tools: list[dict[str, Any]] | None = None) -> None:
-        self.tools = tools or [{
-            "name": "srv__one",
-            "description": "the first tool",
-            "input_schema": {"type": "object"},
-        }]
+        self.tools = tools or [
+            {
+                "name": "srv__one",
+                "description": "the first tool",
+                "input_schema": {"type": "object"},
+            }
+        ]
         self.inventory_reads = 0
         self.fail_next_inventory = False
 
@@ -61,8 +63,15 @@ class AnswerLLM(LLMClient):
         self.calls = 0
         self.tools_seen: list[list[dict[str, Any]] | None] = []
 
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         self.calls += 1
         self.tools_seen.append(tools)
         return AssistantMessage(
@@ -80,12 +89,18 @@ class RoutingLLM(LLMClient):
         self.calls = 0
         self.prompt = ""
 
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         self.calls += 1
         self.prompt = "".join(
-            block.text for block in messages[-1].content
-            if isinstance(block, TextBlock)
+            block.text for block in messages[-1].content if isinstance(block, TextBlock)
         )
         if self.delay is None:
             await asyncio.Event().wait()
@@ -130,11 +145,13 @@ class FakeOrchestrator:
         self, prompt, tools, preferences=None, history=None, timeout=None, log=None
     ):
         self.calls += 1
-        return OrchestrationDecision(result=OrchestrationResult(
-            selected_model_id="agent",
-            selected_tools=[tool.name for tool in tools.tools],
-            generated_system_prompt="routed system",
-        ))
+        return OrchestrationDecision(
+            result=OrchestrationResult(
+                selected_model_id="agent",
+                selected_tools=[tool.name for tool in tools.tools],
+                generated_system_prompt="routed system",
+            )
+        )
 
 
 class RecordingTracer(Tracer):
@@ -190,7 +207,9 @@ async def test_busy_session_rejects_before_inventory_or_routing() -> None:
 
     async with runner.open(TurnRequest("first", session, PersistencePolicy.PERSISTENT)):
         with pytest.raises(HTTPException) as exc_info:
-            await runner.run(TurnRequest("second", session, PersistencePolicy.PERSISTENT))
+            await runner.run(
+                TurnRequest("second", session, PersistencePolicy.PERSISTENT)
+            )
         assert exc_info.value.status_code == 409
 
     assert orchestrator.calls == 1
@@ -209,18 +228,25 @@ async def test_distinct_sessions_execute_concurrently() -> None:
                 self.both_started.set()
             await self.both_started.wait()
             return AssistantMessage(
-                content=[TextBlock("done")], stop_reason="end_turn", usage=Usage(total_tokens=1)
+                content=[TextBlock("done")],
+                stop_reason="end_turn",
+                usage=Usage(total_tokens=1),
             )
 
     agent = BarrierLLM()
-    runner = _runner(agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False))
+    runner = _runner(
+        agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False)
+    )
     first = await runner.store.create()
     second = await runner.store.create()
 
-    results = await asyncio.wait_for(asyncio.gather(
-        runner.run(TurnRequest("one", first, PersistencePolicy.PERSISTENT)),
-        runner.run(TurnRequest("two", second, PersistencePolicy.PERSISTENT)),
-    ), timeout=0.5)
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            runner.run(TurnRequest("one", first, PersistencePolicy.PERSISTENT)),
+            runner.run(TurnRequest("two", second, PersistencePolicy.PERSISTENT)),
+        ),
+        timeout=0.5,
+    )
 
     assert [result.answer for result in results] == ["done", "done"]
     assert agent.calls == 2
@@ -246,7 +272,9 @@ async def test_routing_timeout_falls_back_while_turn_budget_remains() -> None:
     session = await runner.store.create()
 
     started = time.perf_counter()
-    result = await runner.run(TurnRequest("hello", session, PersistencePolicy.PERSISTENT))
+    result = await runner.run(
+        TurnRequest("hello", session, PersistencePolicy.PERSISTENT)
+    )
     elapsed = time.perf_counter() - started
 
     assert result.answer == "done"
@@ -276,7 +304,9 @@ async def test_routing_consumes_absolute_deadline_and_skips_agent_model() -> Non
     )
     session = await runner.store.create()
 
-    result = await runner.run(TurnRequest("hello", session, PersistencePolicy.PERSISTENT))
+    result = await runner.run(
+        TurnRequest("hello", session, PersistencePolicy.PERSISTENT)
+    )
 
     assert result.done_reason == "deadline_exceeded"
     assert agent.calls == 0
@@ -286,11 +316,14 @@ async def test_routing_consumes_absolute_deadline_and_skips_agent_model() -> Non
 
 async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> None:
     agent = AnswerLLM()
-    router = RoutingLLM({
-        "selected_model_id": "unknown-model",
-        "selected_tools": ["srv__one", "srv__unknown"],
-        "generated_system_prompt": "use the selected tool",
-    }, delay=0)
+    router = RoutingLLM(
+        {
+            "selected_model_id": "unknown-model",
+            "selected_tools": ["srv__one", "srv__unknown"],
+            "generated_system_prompt": "use the selected tool",
+        },
+        delay=0,
+    )
     registry = RegistryStub(agent, router)
     orchestrator = Orchestrator(
         registry=registry,  # type: ignore[arg-type]
@@ -298,14 +331,12 @@ async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> 
         model_id="router",
     )
     mcp = CountingMCP()
-    runner = _runner(
-        agent=agent, mcp=mcp, orchestrator=orchestrator, registry=registry
-    )
+    runner = _runner(agent=agent, mcp=mcp, orchestrator=orchestrator, registry=registry)
     session = await runner.store.create()
 
-    result = await runner.run(TurnRequest(
-        "use a tool", session, PersistencePolicy.PERSISTENT
-    ))
+    result = await runner.run(
+        TurnRequest("use a tool", session, PersistencePolicy.PERSISTENT)
+    )
 
     assert mcp.inventory_reads == 1
     assert "srv__one" in router.prompt
@@ -318,7 +349,9 @@ async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> 
 async def test_guard_releases_after_normal_completion_and_exception() -> None:
     agent = AnswerLLM()
     mcp = CountingMCP()
-    runner = _runner(agent=agent, mcp=mcp, settings=_settings(orchestration_enabled=False))
+    runner = _runner(
+        agent=agent, mcp=mcp, settings=_settings(orchestration_enabled=False)
+    )
     session = await runner.store.create()
 
     await runner.run(TurnRequest("normal", session, PersistencePolicy.PERSISTENT))
@@ -329,9 +362,9 @@ async def test_guard_releases_after_normal_completion_and_exception() -> None:
         await runner.run(TurnRequest("raises", session, PersistencePolicy.PERSISTENT))
     assert runner.guard.in_flight() == set()
 
-    await runner.run(TurnRequest(
-        "after exception", session, PersistencePolicy.PERSISTENT
-    ))
+    await runner.run(
+        TurnRequest("after exception", session, PersistencePolicy.PERSISTENT)
+    )
     assert agent.calls == 2
 
 
@@ -341,8 +374,14 @@ async def test_guard_releases_when_stream_is_closed_early() -> None:
             super().__init__()
             self.closed = False
 
-        async def stream(self, messages: list[Message], tools=None, system=None,
-                         max_tokens=None, thinking_level=None) -> AsyncIterator[StreamChunk]:
+        async def stream(
+            self,
+            messages: list[Message],
+            tools=None,
+            system=None,
+            max_tokens=None,
+            thinking_level=None,
+        ) -> AsyncIterator[StreamChunk]:
             try:
                 yield TextDelta("partial")
                 await asyncio.Event().wait()
@@ -350,12 +389,14 @@ async def test_guard_releases_when_stream_is_closed_early() -> None:
                 self.closed = True
 
     agent = ClosingStreamLLM()
-    runner = _runner(agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False))
+    runner = _runner(
+        agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False)
+    )
     session = await runner.store.create()
 
-    async with runner.open(TurnRequest(
-        "stream", session, PersistencePolicy.PERSISTENT, stream=True
-    )) as execution:
+    async with runner.open(
+        TurnRequest("stream", session, PersistencePolicy.PERSISTENT, stream=True)
+    ) as execution:
         event = await anext(execution.events)
         assert event.type == "text"
 
@@ -386,9 +427,9 @@ async def test_active_task_cancellation_releases_guard() -> None:
         registry=RegistryStub(agent),
     )
     session = await runner.store.create()
-    task = asyncio.create_task(runner.run(TurnRequest(
-        "cancel", session, PersistencePolicy.PERSISTENT
-    )))
+    task = asyncio.create_task(
+        runner.run(TurnRequest("cancel", session, PersistencePolicy.PERSISTENT))
+    )
     await orchestrator.started.wait()
 
     task.cancel()
@@ -425,7 +466,9 @@ async def test_native_sse_trace_and_logs_share_one_run_id(
 
 async def test_legacy_metadata_reports_executing_model_without_decision() -> None:
     agent = AnswerLLM()
-    runner = _runner(agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False))
+    runner = _runner(
+        agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False)
+    )
     session = await runner.store.create()
 
     request = TurnRequest(
@@ -437,12 +480,14 @@ async def test_legacy_metadata_reports_executing_model_without_decision() -> Non
     async with runner.open(request) as execution:
         events = [event async for event in execution.events]
 
-    result = await runner.run(TurnRequest(
-        "again",
-        session,
-        PersistencePolicy.PERSISTENT,
-        model_id="legacy-executing-model",
-    ))
+    result = await runner.run(
+        TurnRequest(
+            "again",
+            session,
+            PersistencePolicy.PERSISTENT,
+            model_id="legacy-executing-model",
+        )
+    )
 
     assert not any(isinstance(event, OrchestrationDecisionEvent) for event in events)
     assert result.metadata.model_id == "legacy-executing-model"
@@ -479,12 +524,14 @@ async def test_explicit_unknown_model_is_rejected_before_turn_setup() -> None:
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await runner.run(TurnRequest(
-            "hello",
-            Session(),
-            PersistencePolicy.EPHEMERAL,
-            model_id="unknown",
-        ))
+        await runner.run(
+            TurnRequest(
+                "hello",
+                Session(),
+                PersistencePolicy.EPHEMERAL,
+                model_id="unknown",
+            )
+        )
 
     assert exc_info.value.status_code == 400
     assert mcp.inventory_reads == 0
@@ -501,11 +548,13 @@ async def test_ephemeral_turn_does_not_publish_session_to_store() -> None:
     )
     original_ids = runner.store.ids()  # type: ignore[attr-defined]
 
-    result = await runner.run(TurnRequest(
-        "hello",
-        Session(),
-        PersistencePolicy.EPHEMERAL,
-    ))
+    result = await runner.run(
+        TurnRequest(
+            "hello",
+            Session(),
+            PersistencePolicy.EPHEMERAL,
+        )
+    )
 
     assert result.answer == "done"
     assert runner.store.ids() == original_ids  # type: ignore[attr-defined]

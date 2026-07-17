@@ -43,7 +43,9 @@ class Settings(BaseSettings):
 
     # Provider validation lives in llm.client to keep this layer import-light.
     llm_provider: str = Field(default="gemini", description="LLM provider name")
-    llm_model: str = Field(default="gemini-3-flash-preview", description="Model name to use")
+    llm_model: str = Field(
+        default="gemini-3-flash-preview", description="Model name to use"
+    )
     llm_max_tokens: int = Field(default=4096)
 
     # Agent-loop timeouts/retries; <= 0 disables the respective bound.
@@ -149,7 +151,7 @@ class Settings(BaseSettings):
 
     # Harness paths. All runtime config lives under config/ by convention.
     mcp_config_path: Path = Field(default=_CONFIG_DIR / "mcp_config.yaml")
-    max_loop_iterations: int = Field(default=10) # was 25, find a good balance
+    max_loop_iterations: int = Field(default=10)  # was 25, find a good balance
     log_level: str = Field(default="INFO")
 
     # Optional API-key gate for /chat, /chat/stream, and /v1/*; /health stays open.

@@ -53,7 +53,9 @@ def test_prompt_includes_history_only_when_present() -> None:
     ]
 
     tools = ToolSnapshot()
-    with_history = orchestrator._build_prompt("now do last month", tools, history=history)
+    with_history = orchestrator._build_prompt(
+        "now do last month", tools, history=history
+    )
     without_history = orchestrator._build_prompt("hello", tools, history=None)
 
     assert "CONVERSATION SO FAR" in with_history

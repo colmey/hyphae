@@ -52,7 +52,9 @@ class ScriptedLLM(LLMClient):
         return isinstance(exc, self._transient_types)
 
 
-ToolHandler = Callable[[str, dict[str, Any]], ToolCallResult | Awaitable[ToolCallResult]]
+ToolHandler = Callable[
+    [str, dict[str, Any]], ToolCallResult | Awaitable[ToolCallResult]
+]
 
 
 class ScriptedMCP:
@@ -67,9 +69,11 @@ class ScriptedMCP:
         delay: float = 0,
         handler: ToolHandler | None = None,
     ) -> None:
-        self._tools = tools if tools is not None else [
-            {"name": "srv__tool", "description": "test tool", "input_schema": {}}
-        ]
+        self._tools = (
+            tools
+            if tools is not None
+            else [{"name": "srv__tool", "description": "test tool", "input_schema": {}}]
+        )
         self._content = content
         self._is_error = is_error
         self._delay = delay

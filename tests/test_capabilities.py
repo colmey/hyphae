@@ -25,7 +25,6 @@ from agent.events import ReasoningEvent, ToolResultEvent
 from agent.loop import run_agent
 from agent.session import InMemorySessionStore
 from agent.tracing import event_record
-from llm.client import LLMClient
 from llm.providers.openai import OpenAILLMClient
 from llm.schemas import AssistantMessage, Message, ModelProfile, TextBlock, ToolUseBlock
 from config import ModelsConfig
@@ -34,7 +33,9 @@ from llm.client import profile_from_entry
 
 ROOT = Path(__file__).resolve().parents[1]
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s"
+)
 pytestmark = pytest.mark.anyio
 
 
@@ -139,7 +140,10 @@ def test_model_config_defaults() -> None:
     model_id = cfg.default_id()
     profile = profile_from_entry(cfg.models[model_id])
     check(isinstance(profile, ModelProfile), "default model resolves to ModelProfile")
-    check(profile == ModelProfile.default(), "unprofiled current config keeps default profile")
+    check(
+        profile == ModelProfile.default(),
+        "unprofiled current config keeps default profile",
+    )
 
 
 def test_bad_profile_errors() -> None:
@@ -158,7 +162,10 @@ def test_bad_profile_errors() -> None:
         ModelsConfig.model_validate(unknown)
     except Exception as exc:  # pydantic version can vary; assert on text.
         text = str(exc)
-        check("bad-openai" in text and "surprise" in text, "unknown field error names model id + field")
+        check(
+            "bad-openai" in text and "surprise" in text,
+            "unknown field error names model id + field",
+        )
     else:
         check(False, "unknown field rejected")
 
@@ -176,7 +183,10 @@ def test_bad_profile_errors() -> None:
         ModelsConfig.model_validate(too_hot)
     except Exception as exc:
         text = str(exc)
-        check("bad-openai" in text and "temperature" in text, "temperature range error names model id + field")
+        check(
+            "bad-openai" in text and "temperature" in text,
+            "temperature range error names model id + field",
+        )
     else:
         check(False, "temperature=9 rejected")
 
@@ -206,7 +216,10 @@ async def test_openai_request_capture() -> None:
     check(request.get("temperature") == 0.7, "temperature reaches OpenAI request")
     check(request.get("top_p") == 0.91, "top_p reaches OpenAI request")
     check(request.get("top_k") == 42, "top_k reaches OpenAI-compatible request")
-    check(request.get("reasoning_effort") == "high", "hint-param thinking maps to reasoning_effort")
+    check(
+        request.get("reasoning_effort") == "high",
+        "hint-param thinking maps to reasoning_effort",
+    )
 
     none_profile = ModelProfile(thinking="none")
     inert = OpenAILLMClient(
@@ -233,18 +246,29 @@ async def test_reasoning_routing() -> None:
         base_url="http://127.0.0.1:9/v1",
         profile=ModelProfile(thinking="think-tags"),
     )
-    response = client._from_openai_response(fake_openai_response(
-        content="<think>private chain</think>\nvisible answer",
-        model="think-tags-model",
-    ))
+    response = client._from_openai_response(
+        fake_openai_response(
+            content="<think>private chain</think>\nvisible answer",
+            model="think-tags-model",
+        )
+    )
 
-    check(response.reasoning == "private chain", "AssistantMessage.reasoning carries think text")
-    check(text_of(response).strip() == "visible answer", "visible text excludes think block")
+    check(
+        response.reasoning == "private chain",
+        "AssistantMessage.reasoning carries think text",
+    )
+    check(
+        text_of(response).strip() == "visible answer",
+        "visible text excludes think block",
+    )
     replay = response.to_message()
     replay_text = "".join(
         block.text for block in replay.content if isinstance(block, TextBlock)
     )
-    check("<think>" not in replay_text and "private chain" not in replay_text, "replay content excludes reasoning")
+    check(
+        "<think>" not in replay_text and "private chain" not in replay_text,
+        "replay content excludes reasoning",
+    )
 
     llm = CapturingScriptedLLM([response])
     mcp = ScriptedMCP(tools=[], results=[])
@@ -256,9 +280,15 @@ async def test_reasoning_routing() -> None:
         events.append(event)
 
     rs = reasoning_events(events)
-    check(len(rs) == 1 and rs[0].text == "private chain", "run_agent emits ReasoningEvent")
+    check(
+        len(rs) == 1 and rs[0].text == "private chain", "run_agent emits ReasoningEvent"
+    )
     record = event_record(rs[0], run_id="phase5", step=1) if rs else {}
-    check(record.get("type") == "reasoning" and record.get("reasoning") == "private chain", "trace record carries reasoning")
+    check(
+        record.get("type") == "reasoning"
+        and record.get("reasoning") == "private chain",
+        "trace record carries reasoning",
+    )
 
 
 async def test_malformed_args_error_signal() -> None:
@@ -270,18 +300,24 @@ async def test_malformed_args_error_signal() -> None:
         base_url="http://127.0.0.1:9/v1",
         profile=ModelProfile.default(),
     )
-    bad_tool_response = client._from_openai_response(fake_openai_response(
-        content=None,
-        finish_reason="tool_calls",
-        tool_calls=[fake_tool_call("call_bad", "srv__lookup", '{"query": ')],
-        model="bad-json-model",
-    ))
+    bad_tool_response = client._from_openai_response(
+        fake_openai_response(
+            content=None,
+            finish_reason="tool_calls",
+            tool_calls=[fake_tool_call("call_bad", "srv__lookup", '{"query": ')],
+            model="bad-json-model",
+        )
+    )
     tool_uses = [b for b in bad_tool_response.content if isinstance(b, ToolUseBlock)]
     check(len(tool_uses) == 1, "malformed OpenAI tool call still becomes ToolUseBlock")
     check(tool_uses[0].input == {}, "malformed arguments are kept as empty input")
-    check(bool(tool_uses[0].parse_error), "ToolUseBlock.parse_error records JSON failure")
+    check(
+        bool(tool_uses[0].parse_error), "ToolUseBlock.parse_error records JSON failure"
+    )
 
-    final = AssistantMessage(content=[TextBlock(text="recovered")], stop_reason="end_turn")
+    final = AssistantMessage(
+        content=[TextBlock(text="recovered")], stop_reason="end_turn"
+    )
     llm = CapturingScriptedLLM([bad_tool_response, final])
     mcp = ScriptedMCP(
         tools=[{"name": "srv__lookup", "description": "lookup", "input_schema": {}}],
@@ -295,16 +331,26 @@ async def test_malformed_args_error_signal() -> None:
         events.append(event)
 
     trs = tool_results(events)
-    check(len(trs) == 1 and trs[0].is_error, "parse_error turns into ToolResultEvent(is_error=True)")
-    check("valid JSON" in trs[0].content or "not valid JSON" in trs[0].content, "tool result teaches JSON repair")
+    check(
+        len(trs) == 1 and trs[0].is_error,
+        "parse_error turns into ToolResultEvent(is_error=True)",
+    )
+    check(
+        "valid JSON" in trs[0].content or "not valid JSON" in trs[0].content,
+        "tool result teaches JSON repair",
+    )
     check(mcp.call_count == 0, "malformed tool call is not dispatched to MCP")
 
-    second_seen_tool_results = [
-        block
-        for msg in llm.messages_seen[1]
-        for block in msg.content
-        if getattr(block, "type", None) == "tool_result"
-    ] if len(llm.messages_seen) > 1 else []
+    second_seen_tool_results = (
+        [
+            block
+            for msg in llm.messages_seen[1]
+            for block in msg.content
+            if getattr(block, "type", None) == "tool_result"
+        ]
+        if len(llm.messages_seen) > 1
+        else []
+    )
     check(
         len(second_seen_tool_results) == 1 and second_seen_tool_results[0].is_error,
         "next model turn sees model-facing is_error tool result",

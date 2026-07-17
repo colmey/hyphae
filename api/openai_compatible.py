@@ -119,9 +119,13 @@ def _tool_details(event: ToolResultEvent, args: Any, max_chars: int) -> str:
     """
     icon = "❌" if event.is_error else "✅"
     ms = f" · {event.latency_ms:.0f} ms" if event.latency_ms is not None else ""
-    out = [f"\n\n<details>\n<summary>{_TOOL_SUMMARY_MARK}{event.name} {icon}{ms}</summary>\n"]
+    out = [
+        f"\n\n<details>\n<summary>{_TOOL_SUMMARY_MARK}{event.name} {icon}{ms}</summary>\n"
+    ]
     if args:
-        out.append(f"\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```\n")
+        out.append(
+            f"\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```\n"
+        )
     result = event.content
     if len(result) > max_chars:
         result = result[:max_chars] + "\n…[truncated]"
@@ -176,10 +180,14 @@ def _completion_id() -> str:
 
 def _error_payload(message: str, *, err_type: str) -> dict[str, Any]:
     """Build the shared OpenAI error envelope for JSON and SSE responses."""
-    return {"error": {"message": message, "type": err_type, "param": None, "code": None}}
+    return {
+        "error": {"message": message, "type": err_type, "param": None, "code": None}
+    }
 
 
-def _error_response(message: str, *, status: int = 400, err_type: str = "invalid_request_error") -> JSONResponse:
+def _error_response(
+    message: str, *, status: int = 400, err_type: str = "invalid_request_error"
+) -> JSONResponse:
     """Return an OpenAI-style error response."""
     return JSONResponse(
         status_code=status,
@@ -189,13 +197,13 @@ def _error_response(message: str, *, status: int = 400, err_type: str = "invalid
 
 def _http_error_response(exc: StarletteHTTPException) -> JSONResponse:
     """Preserve an HTTP exception in the OpenAI-compatible error envelope."""
-    err_type = (
-        "server_error" if exc.status_code >= 500 else "invalid_request_error"
-    )
+    err_type = "server_error" if exc.status_code >= 500 else "invalid_request_error"
     return _error_response(str(exc.detail), status=exc.status_code, err_type=err_type)
 
 
-async def openai_auth_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+async def openai_auth_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
     """Reshape a /v1 401 into the OpenAI error envelope; delegate everything else.
 
     Registered app-wide but scoped to /v1 401s, leaving native /chat untouched.
@@ -211,11 +219,13 @@ def _completion_body(answer: str, model: str, usage, done_reason: str) -> dict:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": answer},
-            "finish_reason": _finish_reason(done_reason),
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": answer},
+                "finish_reason": _finish_reason(done_reason),
+            }
+        ],
         "usage": {
             "prompt_tokens": usage.input_tokens,
             "completion_tokens": usage.output_tokens,
@@ -224,7 +234,9 @@ def _completion_body(answer: str, model: str, usage, done_reason: str) -> dict:
     }
 
 
-def _chunk(cid: str, created: int, model: str, delta: dict, finish_reason: str | None) -> dict:
+def _chunk(
+    cid: str, created: int, model: str, delta: dict, finish_reason: str | None
+) -> dict:
     return {
         "id": cid,
         "object": "chat.completion.chunk",
@@ -258,19 +270,31 @@ async def _stream(
     try:
         async with runner.open(turn) as execution:
             model = execution.metadata.model_id
-            yield {"data": json.dumps(
-                _chunk(cid, created, model, {"role": "assistant"}, None)
-            )}
+            yield {
+                "data": json.dumps(
+                    _chunk(cid, created, model, {"role": "assistant"}, None)
+                )
+            }
             async for event in execution.events:
                 if failed:
                     continue
                 if isinstance(event, TextEvent):
-                    yield {"data": json.dumps(_chunk(cid, created, model, {"content": event.text}, None))}
+                    yield {
+                        "data": json.dumps(
+                            _chunk(cid, created, model, {"content": event.text}, None)
+                        )
+                    }
                 elif isinstance(event, ToolCallEvent):
                     pending_args[event.id] = event.input
                 elif isinstance(event, ToolResultEvent):
-                    block = _tool_details(event, pending_args.pop(event.id, None), tool_block_max_chars)
-                    yield {"data": json.dumps(_chunk(cid, created, model, {"content": block}, None))}
+                    block = _tool_details(
+                        event, pending_args.pop(event.id, None), tool_block_max_chars
+                    )
+                    yield {
+                        "data": json.dumps(
+                            _chunk(cid, created, model, {"content": block}, None)
+                        )
+                    }
                 elif isinstance(event, ErrorEvent):
                     failed = True
                     yield server_error(event.message)
@@ -293,14 +317,18 @@ async def _stream(
             yield server_error("completion stream ended without a terminal event")
         else:
             assert model is not None
-            yield {"data": json.dumps(_chunk(cid, created, model, {}, _finish_reason(done_reason)))}
+            yield {
+                "data": json.dumps(
+                    _chunk(cid, created, model, {}, _finish_reason(done_reason))
+                )
+            }
     yield {"data": "[DONE]"}
 
 
 @router.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_completions(
     request: Request,
-    settings = Depends(get_settings_obj),
+    settings=Depends(get_settings_obj),
     runner: TurnRunner = Depends(get_turn_runner),
 ):
     try:
@@ -365,7 +393,9 @@ async def chat_completions(
         _finish_reason(result.done_reason)
     except ValueError:
         return _error_response(
-            _terminal_error_message(result.done_reason), status=500, err_type="server_error"
+            _terminal_error_message(result.done_reason),
+            status=500,
+            err_type="server_error",
         )
 
     return JSONResponse(

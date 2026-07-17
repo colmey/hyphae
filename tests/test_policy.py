@@ -26,20 +26,28 @@ from agent import (
     DoneEvent,
     InMemorySessionStore,
     RunLimits,
-    TextEvent,
     ToolPolicy,
     ToolResultEvent,
     run_agent,
 )
 from llm.client import LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock, Usage
+from llm.schemas import (
+    AssistantMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    Usage,
+)
 from mcp_layer.client import ToolCallResult
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s"
+)
 pytestmark = pytest.mark.anyio
 
 
 # --- scripted fakes --------------------------------------------------------
+
 
 class ScriptedLLM(LLMClient):
     """Replays a fixed script of AssistantMessages."""
@@ -48,8 +56,15 @@ class ScriptedLLM(LLMClient):
         self._script = list(script)
         self.calls = 0
 
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         self.calls += 1
         if not self._script:
             raise AssertionError("ScriptedLLM ran out of scripted responses")
@@ -76,18 +91,24 @@ class CountingMCP:
         return ToolCallResult(content="tool ran", is_error=False)
 
 
-def tool_call(name: str, args: dict[str, Any], call_id: str = "call_1") -> AssistantMessage:
+def tool_call(
+    name: str, args: dict[str, Any], call_id: str = "call_1"
+) -> AssistantMessage:
     return AssistantMessage(
         content=[ToolUseBlock(id=call_id, name=name, input=args)],
-        stop_reason="tool_use", usage=Usage(),
+        stop_reason="tool_use",
+        usage=Usage(),
     )
 
 
 def text(text_: str) -> AssistantMessage:
-    return AssistantMessage(content=[TextBlock(text=text_)], stop_reason="end_turn", usage=Usage())
+    return AssistantMessage(
+        content=[TextBlock(text=text_)], stop_reason="end_turn", usage=Usage()
+    )
 
 
 # --- harness ---------------------------------------------------------------
+
 
 def check(cond: bool, msg: str) -> None:
     assert cond, msg
@@ -129,35 +150,63 @@ async def test_allow_all_default_executes_tool() -> None:
     check(done_reason(events) == "end_turn", "run ended normally")
     check(not tool_results(events)[0].is_error, "tool result is not an error")
 
+
 async def test_allow_list_denies_unlisted_tool_and_persists_error() -> None:
     policy = ToolPolicy(mode="allow_list", allow=["srv__allowed"])
     llm = ScriptedLLM([tool_call("srv__denied", {}), text("adapted")])
     mcp = CountingMCP()
     events, session = await collect("allow_list deny", llm, mcp, policy=policy)
-    check(mcp.call_count == 0, f"denied tool never reached MCP (call_count={mcp.call_count})")
+    check(
+        mcp.call_count == 0,
+        f"denied tool never reached MCP (call_count={mcp.call_count})",
+    )
     results = tool_results(events)
-    check(len(results) == 1 and results[0].is_error, "denied call emitted an is_error ToolResultEvent")
+    check(
+        len(results) == 1 and results[0].is_error,
+        "denied call emitted an is_error ToolResultEvent",
+    )
     check("policy" in results[0].content.lower(), "teaching message mentions policy")
-    persisted = [b for m in session.messages for b in getattr(m, "content", [])
-                 if isinstance(b, ToolResultBlock)]
-    check(len(persisted) == 1 and persisted[0].is_error,
-          "denied call persisted a ToolResultBlock(is_error=True)")
+    persisted = [
+        b
+        for m in session.messages
+        for b in getattr(m, "content", [])
+        if isinstance(b, ToolResultBlock)
+    ]
+    check(
+        len(persisted) == 1 and persisted[0].is_error,
+        "denied call persisted a ToolResultBlock(is_error=True)",
+    )
     check(done_reason(events) == "end_turn", "run continued and ended normally")
+
 
 async def test_allow_list_executes_listed_tool() -> None:
     policy = ToolPolicy(mode="allow_list", allow=["srv__allowed"])
     llm = ScriptedLLM([tool_call("srv__allowed", {}), text("done")])
     mcp = CountingMCP()
     events, _ = await collect("allow_list allow", llm, mcp, policy=policy)
-    check(mcp.call_count == 1, f"allowed tool executed under allow_list (call_count={mcp.call_count})")
+    check(
+        mcp.call_count == 1,
+        f"allowed tool executed under allow_list (call_count={mcp.call_count})",
+    )
     check(done_reason(events) == "end_turn", "run ended normally")
+
 
 async def test_repeated_denials_terminate_no_progress() -> None:
     # Distinct args keep stall detection from short-circuiting the policy path.
     policy = ToolPolicy(mode="allow_list", allow=["srv__allowed"])
-    llm = ScriptedLLM([tool_call("srv__denied", {"n": i}, call_id=f"c{i}") for i in range(5)])
+    llm = ScriptedLLM(
+        [tool_call("srv__denied", {"n": i}, call_id=f"c{i}") for i in range(5)]
+    )
     mcp = CountingMCP()
-    events, _ = await collect("repeated denies -> no_progress", llm, mcp,
-                              policy=policy, abort_after_consecutive_tool_failures=3)
-    check(mcp.call_count == 0, f"no denied call ever reached MCP (call_count={mcp.call_count})")
+    events, _ = await collect(
+        "repeated denies -> no_progress",
+        llm,
+        mcp,
+        policy=policy,
+        abort_after_consecutive_tool_failures=3,
+    )
+    check(
+        mcp.call_count == 0,
+        f"no denied call ever reached MCP (call_count={mcp.call_count})",
+    )
     check(done_reason(events) == "no_progress", "repeated denies ended no_progress")

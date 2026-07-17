@@ -27,7 +27,12 @@ from llm.schemas import (
 )
 from mcp_layer import MCPManager
 
-from .context import ContextBudget, assemble_context, clip_content, estimate_usage_tokens
+from .context import (
+    ContextBudget,
+    assemble_context,
+    clip_content,
+    estimate_usage_tokens,
+)
 from .events import (
     DoneEvent,
     ErrorEvent,
@@ -75,9 +80,7 @@ _SKIPPED_TOOL_DEADLINE_MESSAGE = (
 _SKIPPED_TOOL_BUDGET_MESSAGE = (
     "tool call skipped because the run token budget was exceeded"
 )
-_CANCELLED_TOOL_UNKNOWN_MESSAGE = (
-    "tool call outcome is unknown because execution was cancelled while the call was in flight"
-)
+_CANCELLED_TOOL_UNKNOWN_MESSAGE = "tool call outcome is unknown because execution was cancelled while the call was in flight"
 _CANCELLED_TOOL_NOT_STARTED_MESSAGE = (
     "tool call was not executed because execution was cancelled"
 )
@@ -114,7 +117,7 @@ class _ActiveToolBatch:
         self._in_flight = None
 
     def complete_remaining(self, results: list[ToolResultBlock]) -> None:
-        remaining = self.tool_uses[self._next_index:]
+        remaining = self.tool_uses[self._next_index :]
         expected = [(tool_use.id, tool_use.name) for tool_use in remaining]
         actual = [(result.tool_use_id, result.name) for result in results]
         if actual != expected:
@@ -127,21 +130,25 @@ class _ActiveToolBatch:
         if self._appended:
             return
         if self._in_flight is not None:
-            self._results.append(ToolResultBlock(
-                tool_use_id=self._in_flight.id,
-                name=self._in_flight.name,
-                content=_CANCELLED_TOOL_UNKNOWN_MESSAGE,
-                is_error=True,
-            ))
+            self._results.append(
+                ToolResultBlock(
+                    tool_use_id=self._in_flight.id,
+                    name=self._in_flight.name,
+                    content=_CANCELLED_TOOL_UNKNOWN_MESSAGE,
+                    is_error=True,
+                )
+            )
             self._next_index += 1
             self._in_flight = None
-        for tool_use in self.tool_uses[self._next_index:]:
-            self._results.append(ToolResultBlock(
-                tool_use_id=tool_use.id,
-                name=tool_use.name,
-                content=_CANCELLED_TOOL_NOT_STARTED_MESSAGE,
-                is_error=True,
-            ))
+        for tool_use in self.tool_uses[self._next_index :]:
+            self._results.append(
+                ToolResultBlock(
+                    tool_use_id=tool_use.id,
+                    name=tool_use.name,
+                    content=_CANCELLED_TOOL_NOT_STARTED_MESSAGE,
+                    is_error=True,
+                )
+            )
         self._next_index = len(self.tool_uses)
 
     def append_to(self, session: Session) -> None:
@@ -187,7 +194,9 @@ def _validate_tool_args(
             f"Expected shape: {json.dumps(exc.schema, ensure_ascii=False)}"
         )
     except jsonschema.SchemaError:
-        log.warning("tool input_schema is invalid; skipping arg validation", exc_info=True)
+        log.warning(
+            "tool input_schema is invalid; skipping arg validation", exc_info=True
+        )
         return None
     return None
 
@@ -252,7 +261,10 @@ async def _complete_with_retry(
             delay = _backoff_delay(base_delay, attempt)
             log.warning(
                 "transient LLM error (attempt %d/%d), retrying in %.2fs: %s",
-                attempt + 1, attempts, delay, exc,
+                attempt + 1,
+                attempts,
+                delay,
+                exc,
             )
             if remaining_seconds is not None:
                 remaining = remaining_seconds()
@@ -269,7 +281,9 @@ async def _complete_with_retry(
             delay = _backoff_delay(base_delay, attempt)
             log.warning(
                 "empty LLM response (attempt %d/%d), retrying in %.2fs",
-                attempt + 1, attempts, delay,
+                attempt + 1,
+                attempts,
+                delay,
             )
             if remaining_seconds is not None:
                 remaining = remaining_seconds()
@@ -312,7 +326,7 @@ async def _close_stream(
 
 def _backoff_delay(base_delay: float, attempt: int) -> float:
     """Jittered exponential backoff, capped."""
-    return min(_RETRY_BACKOFF_CAP_SECONDS, base_delay * (2 ** attempt)) + random.uniform(
+    return min(_RETRY_BACKOFF_CAP_SECONDS, base_delay * (2**attempt)) + random.uniform(
         0, base_delay
     )
 
@@ -467,19 +481,23 @@ async def run_agent(
         results: list[ToolResultBlock] = []
         for index, skipped in enumerate(skipped_tools):
             if not (first_call_already_emitted and index == 0):
-                events.append(ToolCallEvent(
+                events.append(
+                    ToolCallEvent(
+                        id=skipped.id,
+                        name=skipped.name,
+                        input=skipped.input,
+                    )
+                )
+            result = _skipped_result(skipped, content)
+            events.append(
+                ToolResultEvent(
                     id=skipped.id,
                     name=skipped.name,
-                    input=skipped.input,
-                ))
-            result = _skipped_result(skipped, content)
-            events.append(ToolResultEvent(
-                id=skipped.id,
-                name=skipped.name,
-                content=result.content,
-                is_error=result.is_error,
-                latency_ms=None,
-            ))
+                    content=result.content,
+                    is_error=result.is_error,
+                    latency_ms=None,
+                )
+            )
             results.append(result)
         return events, results
 
@@ -487,13 +505,19 @@ async def run_agent(
         # Bounded-run guards before spending another LLM call.
         if _deadline_exceeded():
             elapsed = context.elapsed()
-            run_log.warning("run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
-                           max_run_seconds, elapsed)
+            run_log.warning(
+                "run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
+                max_run_seconds,
+                elapsed,
+            )
             yield await _emit(_done(reason="deadline_exceeded"))
             return
         if _token_budget_exceeded():
-            run_log.warning("run exceeded max_run_tokens=%d (used=%d)",
-                           max_run_tokens, cumulative.total_tokens)
+            run_log.warning(
+                "run exceeded max_run_tokens=%d (used=%d)",
+                max_run_tokens,
+                cumulative.total_tokens,
+            )
             yield await _emit(_done(reason="budget_exceeded"))
             return
 
@@ -508,9 +532,13 @@ async def run_agent(
             effective_system = system
             effective_tools = tools
 
-        run_log.debug("agent loop iteration %d (history=%d msgs, tools=%d, final=%s)",
-                     iteration, len(session.messages),
-                     len(effective_tools) if effective_tools else 0, is_final_iteration)
+        run_log.debug(
+            "agent loop iteration %d (history=%d msgs, tools=%d, final=%s)",
+            iteration,
+            len(session.messages),
+            len(effective_tools) if effective_tools else 0,
+            is_final_iteration,
+        )
 
         # Reassemble the view each call; context failures degrade to full history.
         messages_for_llm: list[Message] = session.messages
@@ -537,7 +565,9 @@ async def run_agent(
                 else:
                     messages_for_llm = (await assembly).messages
             except Exception:  # noqa: BLE001
-                run_log.warning("context assembly failed; sending full history", exc_info=True)
+                run_log.warning(
+                    "context assembly failed; sending full history", exc_info=True
+                )
 
         # LLM call with per-attempt timeout and bounded retry.
         llm_started = time.perf_counter()
@@ -608,7 +638,9 @@ async def run_agent(
                             delay = _backoff_delay(retry_base_delay, attempt)
                             run_log.warning(
                                 "empty LLM stream (attempt %d/%d), retrying in %.2fs",
-                                attempt + 1, attempts, delay,
+                                attempt + 1,
+                                attempts,
+                                delay,
                             )
                             remaining = _remaining_run_seconds()
                             if remaining is not None:
@@ -624,13 +656,18 @@ async def run_agent(
                             raise
                         if _deadline_exceeded():
                             raise _RunDeadlineExceeded() from exc
-                        transient = isinstance(exc, TimeoutError) or llm.is_transient_error(exc)
+                        transient = isinstance(
+                            exc, TimeoutError
+                        ) or llm.is_transient_error(exc)
                         if visible_deltas or not transient or attempt == attempts - 1:
                             raise
                         delay = _backoff_delay(retry_base_delay, attempt)
                         run_log.warning(
                             "transient LLM stream error (attempt %d/%d), retrying in %.2fs: %s",
-                            attempt + 1, attempts, delay, exc,
+                            attempt + 1,
+                            attempts,
+                            delay,
+                            exc,
                         )
                         remaining = _remaining_run_seconds()
                         if remaining is not None:
@@ -661,8 +698,11 @@ async def run_agent(
                 )
         except _RunDeadlineExceeded:
             elapsed = context.elapsed()
-            run_log.warning("run exceeded max_run_seconds=%.1f during LLM call (elapsed=%.1fs)",
-                           max_run_seconds, elapsed)
+            run_log.warning(
+                "run exceeded max_run_seconds=%.1f during LLM call (elapsed=%.1fs)",
+                max_run_seconds,
+                elapsed,
+            )
             yield await _emit(_done(reason="deadline_exceeded"))
             return
         except Exception as e:
@@ -691,15 +731,17 @@ async def run_agent(
                 response=response,
             )
             cumulative = cumulative + usage
-            yield await _emit(UsageEvent(
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                total_tokens=usage.total_tokens,
-                thinking_tokens=usage.thinking_tokens,
-                cached_tokens=usage.cached_tokens,
-                iteration=iteration,
-                latency_ms=llm_latency_ms,
-            ))
+            yield await _emit(
+                UsageEvent(
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    total_tokens=usage.total_tokens,
+                    thinking_tokens=usage.thinking_tokens,
+                    cached_tokens=usage.cached_tokens,
+                    iteration=iteration,
+                    latency_ms=llm_latency_ms,
+                )
+            )
 
             if response.reasoning:
                 yield await _emit(ReasoningEvent(text=response.reasoning))
@@ -709,9 +751,11 @@ async def run_agent(
                     yield await _emit(TextEvent(text=block.text))
 
             if response.stop_reason == "incomplete_stream":
-                yield await _emit(ErrorEvent(
-                    message="LLM stream ended without a terminal provider message"
-                ))
+                yield await _emit(
+                    ErrorEvent(
+                        message="LLM stream ended without a terminal provider message"
+                    )
+                )
                 yield await _emit(_done(reason="incomplete_stream"))
                 return
 
@@ -795,7 +839,8 @@ async def run_agent(
                 tool_latency_ms: float | None = None
                 if call_key in seen_calls:
                     run_log.info(
-                        "stall: repeat call to %s with identical args; skipping", tu.name
+                        "stall: repeat call to %s with identical args; skipping",
+                        tu.name,
                     )
                     content = _STALL_MESSAGE
                     is_error = True
@@ -817,7 +862,9 @@ async def run_agent(
                         else None
                     )
                     if validation_error is not None:
-                        run_log.info("invalid args for %s: %s", tu.name, validation_error)
+                        run_log.info(
+                            "invalid args for %s: %s", tu.name, validation_error
+                        )
                         content = validation_error
                         is_error = True
                     elif decision is not None and decision.verdict is Verdict.DENY:
@@ -828,7 +875,9 @@ async def run_agent(
                         tool_started = time.perf_counter()
                         active_tool_batch.start_dispatch(tu)
                         try:
-                            effective_tool_timeout = _effective_timeout(tool_timeout_seconds)
+                            effective_tool_timeout = _effective_timeout(
+                                tool_timeout_seconds
+                            )
                             if effective_tool_timeout and effective_tool_timeout > 0:
                                 async with asyncio.timeout(effective_tool_timeout):
                                     call_result = await mcp.call_tool(tu.name, tu.input)
@@ -861,7 +910,9 @@ async def run_agent(
                                 yield await _emit(_done(reason="deadline_exceeded"))
                                 return
                             run_log.warning(
-                                "tool %s timed out after %ss", tu.name, tool_timeout_seconds
+                                "tool %s timed out after %ss",
+                                tu.name,
+                                tool_timeout_seconds,
                             )
                             content = f"tool {tu.name!r} timed out after {tool_timeout_seconds}s"
                             is_error = True
@@ -888,13 +939,15 @@ async def run_agent(
                     is_error=is_error,
                 )
                 active_tool_batch.complete(result)
-                yield await _emit(ToolResultEvent(
-                    id=tu.id,
-                    name=tu.name,
-                    content=content,
-                    is_error=is_error,
-                    latency_ms=tool_latency_ms,
-                ))
+                yield await _emit(
+                    ToolResultEvent(
+                        id=tu.id,
+                        name=tu.name,
+                        content=content,
+                        is_error=is_error,
+                        latency_ms=tool_latency_ms,
+                    )
+                )
 
                 if (
                     is_error
@@ -903,7 +956,7 @@ async def run_agent(
                     and consecutive_tool_errors >= abort_after_consecutive_tool_failures
                 ):
                     events, skipped_results = _skipped_tool_events(
-                        tool_uses[tool_index + 1:],
+                        tool_uses[tool_index + 1 :],
                         _SKIPPED_TOOL_ABORT_MESSAGE,
                     )
                     active_tool_batch.complete_remaining(skipped_results)
@@ -934,6 +987,5 @@ async def run_agent(
             raise
 
     # Structural fallback: the generator must always end on a DoneEvent.
-    run_log.warning("agent loop hit max_iterations=%d without end_turn",
-                   max_iterations)
+    run_log.warning("agent loop hit max_iterations=%d without end_turn", max_iterations)
     yield await _emit(_done(reason="max_iterations"))

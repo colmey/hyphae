@@ -50,7 +50,9 @@ async def test_session_round_trip_preserves_all_message_kinds() -> None:
     pending = session.last_assistant_tool_uses()
     assert len(pending) == 1
     assert pending[0].id == "call_demo_1"
-    assert pending[0].provider_metadata["thought_signature"] == b"<fake-signature-bytes>"
+    assert (
+        pending[0].provider_metadata["thought_signature"] == b"<fake-signature-bytes>"
+    )
 
     session.append_tool_results(
         [

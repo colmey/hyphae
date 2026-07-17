@@ -35,8 +35,15 @@ class FakeLLM(LLMClient):
         self.messages_seen: list[list[Any]] = []
         self.systems_seen: list[str | None] = []
 
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         self.complete_calls += 1
         self.messages_seen.append(list(messages))
         self.systems_seen.append(system)
@@ -47,20 +54,23 @@ class FakeLLM(LLMClient):
             usage=Usage(input_tokens=11, output_tokens=3, total_tokens=14),
         )
 
-    async def stream(self, messages, tools=None, system=None, max_tokens=None,
-                     thinking_level=None) -> AsyncIterator[StreamChunk]:
+    async def stream(
+        self, messages, tools=None, system=None, max_tokens=None, thinking_level=None
+    ) -> AsyncIterator[StreamChunk]:
         self.stream_calls += 1
         self.messages_seen.append(list(messages))
         self.systems_seen.append(system)
         yield TextDelta(text="Hello")
         yield TextDelta(text=", ")
         yield TextDelta(text="world")
-        yield StreamEnd(AssistantMessage(
-            content=[TextBlock(text="Hello, world")],
-            stop_reason="end_turn",
-            model="fake",
-            usage=Usage(input_tokens=11, output_tokens=3, total_tokens=14),
-        ))
+        yield StreamEnd(
+            AssistantMessage(
+                content=[TextBlock(text="Hello, world")],
+                stop_reason="end_turn",
+                model="fake",
+                usage=Usage(input_tokens=11, output_tokens=3, total_tokens=14),
+            )
+        )
 
 
 class CountingMCP:
@@ -105,14 +115,17 @@ class SelectingOrchestrator:
         self.selected_model_id = selected_model_id
         self.calls = 0
 
-    async def decide(self, prompt, tools, preferences=None, history=None,
-                     timeout=None, log=None) -> OrchestrationDecision:
+    async def decide(
+        self, prompt, tools, preferences=None, history=None, timeout=None, log=None
+    ) -> OrchestrationDecision:
         self.calls += 1
-        return OrchestrationDecision(result=OrchestrationResult(
-            selected_model_id=self.selected_model_id,
-            selected_tools=[],
-            generated_system_prompt="routed system",
-        ))
+        return OrchestrationDecision(
+            result=OrchestrationResult(
+                selected_model_id=self.selected_model_id,
+                selected_tools=[],
+                generated_system_prompt="routed system",
+            )
+        )
 
 
 def _registry(settings) -> LLMRegistry:
@@ -181,11 +194,17 @@ async def test_non_stream_completion_shape_and_usage(asgi_client) -> None:
     choice = body["choices"][0]
     assert choice["message"] == {"role": "assistant", "content": "Hello, world"}
     assert choice["finish_reason"] == "stop"
-    assert body["usage"] == {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
+    assert body["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 3,
+        "total_tokens": 14,
+    }
     assert llm.complete_calls == 1
 
 
-async def test_stream_completion_emits_deltas_finish_and_done(asgi_client, parse_sse) -> None:
+async def test_stream_completion_emits_deltas_finish_and_done(
+    asgi_client, parse_sse
+) -> None:
     llm = FakeLLM()
     with wired_app(llm) as (app, _settings):
         async with asgi_client(app).stream(
@@ -198,7 +217,9 @@ async def test_stream_completion_emits_deltas_finish_and_done(asgi_client, parse
             },
         ) as response:
             assert response.status_code == 200
-            payloads = parse_sse("".join([chunk async for chunk in response.aiter_text()]))
+            payloads = parse_sse(
+                "".join([chunk async for chunk in response.aiter_text()])
+            )
 
     assert payloads[-1] == "[DONE]"
     frames = [payload for payload in payloads if payload != "[DONE]"]
@@ -214,7 +235,9 @@ async def test_stream_completion_emits_deltas_finish_and_done(asgi_client, parse
 
 async def test_empty_messages_returns_openai_error(asgi_client) -> None:
     with wired_app(FakeLLM()) as (app, _settings):
-        response = await asgi_client(app).post("/v1/chat/completions", json={"messages": []})
+        response = await asgi_client(app).post(
+            "/v1/chat/completions", json={"messages": []}
+        )
 
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
@@ -238,9 +261,9 @@ async def test_repeated_v1_calls_never_publish_sessions(
                     "POST", "/v1/chat/completions", json=payload
                 ) as response:
                     assert response.status_code == 200
-                    events = parse_sse("".join([
-                        chunk async for chunk in response.aiter_text()
-                    ]))
+                    events = parse_sse(
+                        "".join([chunk async for chunk in response.aiter_text()])
+                    )
                     assert events[-1] == "[DONE]"
             else:
                 response = await client.post("/v1/chat/completions", json=payload)
@@ -336,7 +359,9 @@ async def test_unknown_model_is_rejected_before_session_inventory_or_execution(
         return real_session()
 
     monkeypatch.setattr(openai_compatible, "Session", counting_session)
-    registry = RegistryStub({"selected": llm, "requested": llm}) if orchestrated else None
+    registry = (
+        RegistryStub({"selected": llm, "requested": llm}) if orchestrated else None
+    )
     orchestrator = SelectingOrchestrator() if orchestrated else None
     with wired_app(llm, mcp=mcp, registry=registry) as (app, settings):
         app.state.orchestrator = orchestrator
@@ -369,11 +394,12 @@ async def test_unknown_model_is_rejected_before_session_inventory_or_execution(
     assert llm.stream_calls == 0
 
 
-async def test_ordered_history_replays_without_altering_user_content(asgi_client) -> None:
+async def test_ordered_history_replays_without_altering_user_content(
+    asgi_client,
+) -> None:
     llm = FakeLLM()
     tool_block = (
-        "\n<details>\n<summary>🔧 web__search ✅</summary>\n"
-        "tool output\n</details>\n"
+        "\n<details>\n<summary>🔧 web__search ✅</summary>\ntool output\n</details>\n"
     )
     user_text = f"user-authored block stays{tool_block}after"
     with wired_app(llm) as (app, _settings):

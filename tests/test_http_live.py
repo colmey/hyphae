@@ -70,7 +70,6 @@ async def test_configured_http_surface() -> None:
         async with httpx.AsyncClient(
             transport=transport, base_url=base_url, timeout=120.0
         ) as client:
-
             # ----- /health -----
             print("=" * 72)
             print("Scenario 1: GET /health")

@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from agent import ToolResultEvent
-from api.openai_compatible import _ChatMessage, _prepare, _strip_tool_blocks, _tool_details
+from api.openai_compatible import (
+    _ChatMessage,
+    _prepare,
+    _strip_tool_blocks,
+    _tool_details,
+)
 
 
 def _result(
@@ -14,7 +19,11 @@ def _result(
     latency_ms: float | None = 12.0,
 ) -> ToolResultEvent:
     return ToolResultEvent(
-        id="call_1", name=name, content=content, is_error=is_error, latency_ms=latency_ms
+        id="call_1",
+        name=name,
+        content=content,
+        is_error=is_error,
+        latency_ms=latency_ms,
     )
 
 
@@ -30,7 +39,9 @@ def test_render_then_strip_roundtrips() -> None:
 
 
 def test_error_result_uses_error_icon() -> None:
-    assert "🔧 web__search ❌" in _tool_details(_result("boom", is_error=True), {"q": "x"}, 2000)
+    assert "🔧 web__search ❌" in _tool_details(
+        _result("boom", is_error=True), {"q": "x"}, 2000
+    )
 
 
 def test_strip_preserves_model_authored_details() -> None:
@@ -39,7 +50,9 @@ def test_strip_preserves_model_authored_details() -> None:
 
 
 def test_tool_result_cannot_close_details_early() -> None:
-    block = _tool_details(_result("snippet with </details> inside it"), {"q": "html"}, 2000)
+    block = _tool_details(
+        _result("snippet with </details> inside it"), {"q": "html"}, 2000
+    )
     assert block.count("</details>") == 1
     assert "<\u200b/details>" in block
     assert _strip_tool_blocks(f"before{block}after") == "beforeafter"
@@ -58,5 +71,7 @@ def test_prepare_strips_assistant_history_but_not_prompt() -> None:
 
     assert system_override == "be terse"
     assert prompt == "follow-up question"
-    assert [text for role, text in history if role == "assistant"] == ["I checked.Done."]
+    assert [text for role, text in history if role == "assistant"] == [
+        "I checked.Done."
+    ]
     assert all("<details>" not in text for _role, text in history)

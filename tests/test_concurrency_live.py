@@ -70,15 +70,13 @@ async def test_configured_request_concurrency() -> None:
         async with httpx.AsyncClient(
             transport=transport, base_url=base_url, timeout=120.0
         ) as client:
-
             # ----- Scenario 1: distinct sessions stay isolated -----
             print("=" * 72)
             print("Scenario 1: concurrent /chat on DISTINCT sessions -> isolated")
             print("=" * 72)
-            responses = await asyncio.gather(*(
-                client.post("/chat", content=p)
-                for p in DISTINCT_PROMPTS
-            ))
+            responses = await asyncio.gather(
+                *(client.post("/chat", content=p) for p in DISTINCT_PROMPTS)
+            )
             for r in responses:
                 r.raise_for_status()
 
@@ -111,14 +109,16 @@ async def test_configured_request_concurrency() -> None:
             session_id = seed.headers["X-Session-Id"]
             print(f"  seeded session: {session_id}")
 
-            overlapping = await asyncio.gather(*(
-                client.post(
-                    "/chat",
-                    content=f"What is {i} + {i}? Reply with just the number.",
-                    headers={"X-Session-Id": session_id},
+            overlapping = await asyncio.gather(
+                *(
+                    client.post(
+                        "/chat",
+                        content=f"What is {i} + {i}? Reply with just the number.",
+                        headers={"X-Session-Id": session_id},
+                    )
+                    for i in range(SAME_SESSION_FANOUT)
                 )
-                for i in range(SAME_SESSION_FANOUT)
-            ))
+            )
             statuses = [r.status_code for r in overlapping]
             n_ok = statuses.count(200)
             n_busy = statuses.count(409)

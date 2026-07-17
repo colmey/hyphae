@@ -14,9 +14,6 @@ dataset.
 
 from __future__ import annotations
 
-import config
-config.load_secrets()
-
 import asyncio
 import logging
 import os
@@ -27,6 +24,7 @@ from typing import Any
 
 import yaml
 
+import config
 from agent import (
     DoneEvent,
     ErrorEvent,
@@ -44,6 +42,8 @@ from llm.client import LLMClient, build_llm_client
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
 from mcp_layer.client import ToolCallResult
 from orchestrator.schemas import OrchestrationDecision, OrchestrationResult
+
+config.load_secrets()
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,8 +103,16 @@ class ScriptedMCP:
         results: list[dict[str, Any]] | None = None,
     ) -> None:
         self._tools = tools or [
-            {"name": "srv__lookup", "description": "scripted lookup", "input_schema": {}},
-            {"name": "srv__web", "description": "scripted web lookup", "input_schema": {}},
+            {
+                "name": "srv__lookup",
+                "description": "scripted lookup",
+                "input_schema": {},
+            },
+            {
+                "name": "srv__web",
+                "description": "scripted web lookup",
+                "input_schema": {},
+            },
         ]
         self._results = list(results or [])
         self.call_count = 0
@@ -130,7 +138,9 @@ class ScriptedMCP:
             raise RuntimeError(str(item["raises"]))
 
         content = _result_content(item)
-        return ToolCallResult(content=content, is_error=bool(item.get("is_error", False)))
+        return ToolCallResult(
+            content=content, is_error=bool(item.get("is_error", False))
+        )
 
 
 class EmptyMCP(ScriptedMCP):
@@ -229,18 +239,22 @@ def _assistant_message(raw: dict[str, Any]) -> AssistantMessage | BaseException:
     if "text" in raw:
         content.append(TextBlock(text=str(raw["text"])))
     for call in raw.get("tool_calls", []):
-        content.append(ToolUseBlock(
-            id=str(call["id"]),
-            name=str(call["name"]),
-            input=dict(call.get("input", {})),
-        ))
+        content.append(
+            ToolUseBlock(
+                id=str(call["id"]),
+                name=str(call["name"]),
+                input=dict(call.get("input", {})),
+            )
+        )
     if "content" in raw and raw["content"] == []:
         content = []
 
     stop_reason = raw.get("stop_reason")
     if stop_reason is None:
         stop_reason = "tool_use" if raw.get("tool_calls") else "end_turn"
-    return AssistantMessage(content=content, stop_reason=stop_reason, usage=_usage(raw.get("usage")))
+    return AssistantMessage(
+        content=content, stop_reason=stop_reason, usage=_usage(raw.get("usage"))
+    )
 
 
 def _build_llm(case: dict[str, Any]) -> ScriptedLLM:
@@ -298,24 +312,28 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
             tool_timeout_seconds=(case.get("run") or {}).get("tool_timeout_seconds", 0),
             llm_max_retries=(case.get("run") or {}).get("max_retries", 0),
             llm_retry_base_delay=(case.get("run") or {}).get("retry_base_delay", 0.0),
-            tool_result_max_chars=(case.get("run") or {}).get("tool_result_max_chars", 0),
+            tool_result_max_chars=(case.get("run") or {}).get(
+                "tool_result_max_chars", 0
+            ),
             max_run_tokens=(case.get("run") or {}).get("max_run_tokens", 0),
             max_run_seconds=(case.get("run") or {}).get("max_run_seconds", 0),
-            abort_after_consecutive_tool_failures=(
-                case.get("run") or {}
-            ).get("abort_after_consecutive_tool_failures", 0),
+            abort_after_consecutive_tool_failures=(case.get("run") or {}).get(
+                "abort_after_consecutive_tool_failures", 0
+            ),
             llm_max_tokens=(case.get("run") or {}).get("max_tokens", 4096),
             context_strategy=(case.get("run") or {}).get("context_strategy", "naive"),
-            context_default_window_tokens=(
-                case.get("run") or {}
-            ).get("context_default_window_tokens", 32768),
-            context_safety_margin_tokens=(
-                case.get("run") or {}
-            ).get("context_safety_margin_tokens", 1024),
-            context_recent_messages=(case.get("run") or {}).get("context_recent_messages", 6),
-            context_summary_max_tokens=(
-                case.get("run") or {}
-            ).get("context_summary_max_tokens", 512),
+            context_default_window_tokens=(case.get("run") or {}).get(
+                "context_default_window_tokens", 32768
+            ),
+            context_safety_margin_tokens=(case.get("run") or {}).get(
+                "context_safety_margin_tokens", 1024
+            ),
+            context_recent_messages=(case.get("run") or {}).get(
+                "context_recent_messages", 6
+            ),
+            context_summary_max_tokens=(case.get("run") or {}).get(
+                "context_summary_max_tokens", 512
+            ),
         )
         orch_cfg = case.get("orchestration") or {}
         runner = TurnRunner(
@@ -354,7 +372,9 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
 
     answer = "".join(e.text for e in events if isinstance(e, TextEvent)).strip()
     done = next((e.reason for e in events if isinstance(e, DoneEvent)), None)
-    return RunArtifacts(events=events, answer=answer, done_reason=done, llm=llm, mcp=mcp)
+    return RunArtifacts(
+        events=events, answer=answer, done_reason=done, llm=llm, mcp=mcp
+    )
 
 
 async def _run_live(case: dict[str, Any]) -> RunArtifacts:
@@ -381,16 +401,22 @@ async def _run_live(case: dict[str, Any]) -> RunArtifacts:
         events.append(event)
     answer = "".join(e.text for e in events if isinstance(e, TextEvent)).strip()
     done = next((e.reason for e in events if isinstance(e, DoneEvent)), None)
-    return RunArtifacts(events=events, answer=answer, done_reason=done, llm=llm, mcp=mcp)
+    return RunArtifacts(
+        events=events, answer=answer, done_reason=done, llm=llm, mcp=mcp
+    )
 
 
-def _check_contains(haystack: str, needles: list[str], label: str, failures: list[str]) -> None:
+def _check_contains(
+    haystack: str, needles: list[str], label: str, failures: list[str]
+) -> None:
     for needle in needles:
         if needle not in haystack:
             failures.append(f"{label} missing {needle!r}")
 
 
-def _check_not_contains(haystack: str, needles: list[str], label: str, failures: list[str]) -> None:
+def _check_not_contains(
+    haystack: str, needles: list[str], label: str, failures: list[str]
+) -> None:
     for needle in needles:
         if needle in haystack:
             failures.append(f"{label} unexpectedly contained {needle!r}")
@@ -401,10 +427,16 @@ def _evaluate(case: dict[str, Any], art: RunArtifacts) -> list[str]:
     failures: list[str] = []
 
     if "done_reason" in expect and art.done_reason != expect["done_reason"]:
-        failures.append(f"done_reason expected {expect['done_reason']!r}, got {art.done_reason!r}")
+        failures.append(
+            f"done_reason expected {expect['done_reason']!r}, got {art.done_reason!r}"
+        )
     if "answer_exact" in expect and art.answer != expect["answer_exact"]:
-        failures.append(f"answer_exact expected {expect['answer_exact']!r}, got {art.answer!r}")
-    _check_contains(art.answer, list(expect.get("answer_contains", [])), "answer", failures)
+        failures.append(
+            f"answer_exact expected {expect['answer_exact']!r}, got {art.answer!r}"
+        )
+    _check_contains(
+        art.answer, list(expect.get("answer_contains", [])), "answer", failures
+    )
 
     tool_names = [e.name for e in art.tool_calls]
     for name in expect.get("tool_called", []):
@@ -414,12 +446,21 @@ def _evaluate(case: dict[str, Any], art: RunArtifacts) -> list[str]:
         if name in tool_names:
             failures.append(f"tool {name!r} was called")
     if "tool_call_count" in expect and len(art.tool_calls) != expect["tool_call_count"]:
-        failures.append(f"tool_call_count expected {expect['tool_call_count']}, got {len(art.tool_calls)}")
+        failures.append(
+            f"tool_call_count expected {expect['tool_call_count']}, got {len(art.tool_calls)}"
+        )
     if "mcp_call_count" in expect and art.mcp.call_count != expect["mcp_call_count"]:
-        failures.append(f"mcp_call_count expected {expect['mcp_call_count']}, got {art.mcp.call_count}")
+        failures.append(
+            f"mcp_call_count expected {expect['mcp_call_count']}, got {art.mcp.call_count}"
+        )
 
     result_text = "\n".join(e.content for e in art.tool_results)
-    _check_contains(result_text, list(expect.get("tool_result_contains", [])), "tool_result", failures)
+    _check_contains(
+        result_text,
+        list(expect.get("tool_result_contains", [])),
+        "tool_result",
+        failures,
+    )
     _check_not_contains(
         result_text,
         list(expect.get("tool_result_not_contains", [])),
@@ -429,41 +470,62 @@ def _evaluate(case: dict[str, Any], art: RunArtifacts) -> list[str]:
     if "tool_result_error_count" in expect:
         errors = sum(1 for e in art.tool_results if e.is_error)
         if errors != expect["tool_result_error_count"]:
-            failures.append(f"tool_result_error_count expected {expect['tool_result_error_count']}, got {errors}")
+            failures.append(
+                f"tool_result_error_count expected {expect['tool_result_error_count']}, got {errors}"
+            )
     if "max_tool_result_chars" in expect:
         longest = max((len(e.content) for e in art.tool_results), default=0)
         if longest > expect["max_tool_result_chars"]:
-            failures.append(f"max_tool_result_chars expected <= {expect['max_tool_result_chars']}, got {longest}")
+            failures.append(
+                f"max_tool_result_chars expected <= {expect['max_tool_result_chars']}, got {longest}"
+            )
 
     error_text = "\n".join(e.message for e in art.errors)
-    _check_contains(error_text, list(expect.get("error_event_contains", [])), "error_event", failures)
+    _check_contains(
+        error_text,
+        list(expect.get("error_event_contains", [])),
+        "error_event",
+        failures,
+    )
     if "error_event_count" in expect and len(art.errors) != expect["error_event_count"]:
-        failures.append(f"error_event_count expected {expect['error_event_count']}, got {len(art.errors)}")
+        failures.append(
+            f"error_event_count expected {expect['error_event_count']}, got {len(art.errors)}"
+        )
 
     if "llm_calls" in expect and getattr(art.llm, "calls", None) != expect["llm_calls"]:
-        failures.append(f"llm_calls expected {expect['llm_calls']}, got {getattr(art.llm, 'calls', None)}")
+        failures.append(
+            f"llm_calls expected {expect['llm_calls']}, got {getattr(art.llm, 'calls', None)}"
+        )
     if "max_iterations" in expect:
         done = art.done
         if done is None:
             failures.append("missing DoneEvent for max_iterations check")
         elif done.iterations > expect["max_iterations"]:
-            failures.append(f"iterations expected <= {expect['max_iterations']}, got {done.iterations}")
+            failures.append(
+                f"iterations expected <= {expect['max_iterations']}, got {done.iterations}"
+            )
 
     for call_num in expect.get("tools_seen_none_on_calls", []):
         index = int(call_num) - 1
         seen = getattr(art.llm, "tools_seen", [])
         if index >= len(seen) or seen[index] is not None:
-            failures.append(f"tools on LLM call {call_num} expected None, got {seen[index] if index < len(seen) else '<missing>'!r}")
+            failures.append(
+                f"tools on LLM call {call_num} expected None, got {seen[index] if index < len(seen) else '<missing>'!r}"
+            )
     for item in expect.get("system_contains_on_calls", []):
         index = int(item["call"]) - 1
         systems = getattr(art.llm, "systems", [])
         system = systems[index] if index < len(systems) else None
         if item["substring"] not in (system or ""):
-            failures.append(f"system on LLM call {item['call']} missing {item['substring']!r}")
+            failures.append(
+                f"system on LLM call {item['call']} missing {item['substring']!r}"
+            )
     if "selected_thinking_level" in expect:
         seen = getattr(art.llm, "thinking_seen", [])
         if expect["selected_thinking_level"] not in seen:
-            failures.append(f"thinking_level {expect['selected_thinking_level']!r} not observed in {seen!r}")
+            failures.append(
+                f"thinking_level {expect['selected_thinking_level']!r} not observed in {seen!r}"
+            )
 
     return failures
 
@@ -475,7 +537,9 @@ async def _run_case(case: dict[str, Any]) -> CaseResult:
         art = await (_run_live(case) if tier == "live" else _run_hermetic(case))
         failures = _evaluate(case, art)
     except Exception as exc:  # noqa: BLE001
-        return CaseResult(case_id, tier, False, f"runner error: {type(exc).__name__}: {exc}")
+        return CaseResult(
+            case_id, tier, False, f"runner error: {type(exc).__name__}: {exc}"
+        )
     if failures:
         return CaseResult(case_id, tier, False, "; ".join(failures), failures)
     return CaseResult(case_id, tier, True, "ok")

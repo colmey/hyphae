@@ -41,11 +41,16 @@ class FakeMCP:
         self.call_count = 0
 
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
-        return [{
-            "name": "srv__echo",
-            "description": "echo",
-            "input_schema": {"type": "object", "properties": {"value": {"type": "string"}}},
-        }]
+        return [
+            {
+                "name": "srv__echo",
+                "description": "echo",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                },
+            }
+        ]
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
         self.call_count += 1
@@ -53,27 +58,49 @@ class FakeMCP:
 
 
 class NativeStreamingLLM(LLMClient):
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         raise AssertionError("complete() should not be used in native stream test")
 
-    async def stream(self, messages: list[Message], tools=None, system=None,
-                     max_tokens=None, thinking_level=None) -> AsyncIterator[StreamChunk]:
+    async def stream(
+        self,
+        messages: list[Message],
+        tools=None,
+        system=None,
+        max_tokens=None,
+        thinking_level=None,
+    ) -> AsyncIterator[StreamChunk]:
         yield TextDelta("Hel")
         yield TextDelta("lo")
-        yield StreamEnd(AssistantMessage(
-            content=[TextBlock("Hello")],
-            stop_reason="end_turn",
-            usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
-        ))
+        yield StreamEnd(
+            AssistantMessage(
+                content=[TextBlock("Hello")],
+                stop_reason="end_turn",
+                usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+        )
 
 
 class CompleteOnlyLLM(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         self.calls += 1
         return AssistantMessage(
             content=[TextBlock("fallback text")],
@@ -86,35 +113,69 @@ class ToolStreamingLLM(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         raise AssertionError("complete() should not be used in stream mode")
 
-    async def stream(self, messages: list[Message], tools=None, system=None,
-                     max_tokens=None, thinking_level=None) -> AsyncIterator[StreamChunk]:
+    async def stream(
+        self,
+        messages: list[Message],
+        tools=None,
+        system=None,
+        max_tokens=None,
+        thinking_level=None,
+    ) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         if self.calls == 1:
-            yield StreamEnd(AssistantMessage(
-                content=[ToolUseBlock(id="call_1", name="srv__echo", input={"value": "hi"})],
-                stop_reason="tool_use",
-                usage=Usage(total_tokens=2),
-            ))
+            yield StreamEnd(
+                AssistantMessage(
+                    content=[
+                        ToolUseBlock(
+                            id="call_1", name="srv__echo", input={"value": "hi"}
+                        )
+                    ],
+                    stop_reason="tool_use",
+                    usage=Usage(total_tokens=2),
+                )
+            )
             return
         yield TextDelta("done")
-        yield StreamEnd(AssistantMessage(
-            content=[TextBlock("done")],
-            stop_reason="end_turn",
-            usage=Usage(total_tokens=2),
-        ))
+        yield StreamEnd(
+            AssistantMessage(
+                content=[TextBlock("done")],
+                stop_reason="end_turn",
+                usage=Usage(total_tokens=2),
+            )
+        )
 
 
 class ErrorAfterDeltaLLM(LLMClient):
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         raise AssertionError("complete() should not be used in stream mode")
 
-    async def stream(self, messages: list[Message], tools=None, system=None,
-                     max_tokens=None, thinking_level=None) -> AsyncIterator[StreamChunk]:
+    async def stream(
+        self,
+        messages: list[Message],
+        tools=None,
+        system=None,
+        max_tokens=None,
+        thinking_level=None,
+    ) -> AsyncIterator[StreamChunk]:
         yield TextDelta("partial")
         raise RuntimeError("stream broke")
 
@@ -158,12 +219,14 @@ async def test_native_streaming_emits_incremental_text() -> None:
     assert "".join(text_events(events)) == "Hello"
     assert done_reason(events) == "end_turn"
 
+
 async def test_complete_fallback_streams_coarse_text() -> None:
     fallback = CompleteOnlyLLM()
     events = await collect(fallback)
     assert fallback.calls == 1
     assert text_events(events) == ["fallback text"]
     assert done_reason(events) == "end_turn"
+
 
 async def test_streamed_tool_call_reaches_dispatch() -> None:
     mcp = FakeMCP()
@@ -173,11 +236,13 @@ async def test_streamed_tool_call_reaches_dispatch() -> None:
     assert text_events(events) == ["done"]
     assert done_reason(events) == "end_turn"
 
+
 async def test_error_after_first_delta_surfaces_partial_text() -> None:
     events = await collect(ErrorAfterDeltaLLM())
     assert text_events(events) == ["partial"]
     assert any(isinstance(event, ErrorEvent) for event in events)
     assert done_reason(events) == "llm_error"
+
 
 @pytest.mark.parametrize(
     ("pieces", "expected_visible", "expected_reasoning", "assert_no_tags"),
@@ -185,14 +250,22 @@ async def test_error_after_first_delta_surfaces_partial_text() -> None:
         (["<think>secret</think>Hello"], "Hello", "secret", True),
         (["<thi", "nk>secret</think>Hello"], "Hello", "secret", True),
         (["<think>sec", "ret</thi", "nk>Hello"], "Hello", "secret", True),
-        (["Hello <think>not leading</think>"], "Hello <think>not leading</think>", None, False),
+        (
+            ["Hello <think>not leading</think>"],
+            "Hello <think>not leading</think>",
+            None,
+            False,
+        ),
         (["   <think>secret</think>  Hello"], "Hello", "secret", True),
         (["plain"], "plain", None, True),
         (["<think>unfinished"], "<think>unfinished", None, False),
     ],
 )
 def test_reasoning_stripper_boundaries(
-    pieces: list[str], expected_visible: str, expected_reasoning: str | None, assert_no_tags: bool
+    pieces: list[str],
+    expected_visible: str,
+    expected_reasoning: str | None,
+    assert_no_tags: bool,
 ) -> None:
     visible, reasoning = run_stripper(pieces)
     assert visible == expected_visible

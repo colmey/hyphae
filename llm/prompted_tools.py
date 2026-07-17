@@ -194,7 +194,9 @@ class PromptedToolLLMClient(LLMClient):
         usage = first.usage
         repair_messages = list(messages)
         repair_messages.append(Message.assistant(first.content))
-        repair_messages.append(Message.user(_REPAIR_INSTRUCTIONS.format(error=last_error)))
+        repair_messages.append(
+            Message.user(_REPAIR_INSTRUCTIONS.format(error=last_error))
+        )
 
         repair: AssistantMessage | None = None
         for _ in range(self._max_repairs):
@@ -209,15 +211,21 @@ class PromptedToolLLMClient(LLMClient):
             usage = _combine_usage(usage, repair.usage)
             parsed = parse_prompted_action(_visible_text(repair), allowed_tools)
             if parsed.action is not None:
-                return _action_message(repair, parsed.action, model=self._model, usage=usage)
+                return _action_message(
+                    repair, parsed.action, model=self._model, usage=usage
+                )
             if parsed.error is not None and parsed.error_tool_name is not None:
-                return _parse_error_tool_message(repair, parsed, model=self._model, usage=usage)
+                return _parse_error_tool_message(
+                    repair, parsed, model=self._model, usage=usage
+                )
             if parsed.error is None:
                 repair.usage = usage
                 return repair
             last_error = parsed.error
             repair_messages.append(Message.assistant(repair.content))
-            repair_messages.append(Message.user(_REPAIR_INSTRUCTIONS.format(error=last_error)))
+            repair_messages.append(
+                Message.user(_REPAIR_INSTRUCTIONS.format(error=last_error))
+            )
 
         source = repair or first
         return _parse_failure_message(source, last_error, self._model, usage=usage)

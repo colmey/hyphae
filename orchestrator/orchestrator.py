@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
 
 from pydantic import ValidationError
 
@@ -112,9 +111,7 @@ class Orchestrator:
             "Return the JSON decision now."
         )
 
-    def _describe_history_for_prompt(
-        self, history: list[Message] | None
-    ) -> str:
+    def _describe_history_for_prompt(self, history: list[Message] | None) -> str:
         """Render a compact text-only history tail, or "" when there's none."""
         if not history:
             return ""
@@ -122,13 +119,12 @@ class Orchestrator:
         lines: list[str] = []
         for msg in history[-_HISTORY_MAX_MESSAGES:]:
             text = " ".join(
-                b.text for b in msg.content
-                if isinstance(b, TextBlock) and b.text
+                b.text for b in msg.content if isinstance(b, TextBlock) and b.text
             ).strip()
             if not text:
                 continue
             if len(text) > _HISTORY_MAX_CHARS_PER_MSG:
-                text = text[:_HISTORY_MAX_CHARS_PER_MSG - 1] + "…"
+                text = text[: _HISTORY_MAX_CHARS_PER_MSG - 1] + "…"
             label = "User" if msg.role == Role.USER else "Assistant"
             lines.append(f"{label}: {text}")
 
@@ -222,7 +218,8 @@ class Orchestrator:
         if result.selected_model_id not in known_models:
             log.warning(
                 "orchestrator picked unknown model_id %r; correcting to %r",
-                result.selected_model_id, self._registry.default_id(),
+                result.selected_model_id,
+                self._registry.default_id(),
             )
             model_id = self._registry.default_id()
         else:
@@ -240,9 +237,7 @@ class Orchestrator:
         if preferences:
             for t in preferences.preferred_tools:
                 if t not in known_tools:
-                    log.warning(
-                        "preferred tool %r not in MCP inventory; ignoring", t
-                    )
+                    log.warning("preferred tool %r not in MCP inventory; ignoring", t)
                 elif t not in valid_tools:
                     valid_tools.append(t)
 

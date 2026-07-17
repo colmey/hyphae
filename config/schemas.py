@@ -59,7 +59,9 @@ class ToolPolicyConfig(BaseModel):
         # An allow_list with no usable patterns would silently deny every tool.
         if self.mode == "allow_list":
             if not self.allow:
-                raise ValueError("tool_policy.mode 'allow_list' requires a non-empty 'allow' list")
+                raise ValueError(
+                    "tool_policy.mode 'allow_list' requires a non-empty 'allow' list"
+                )
             if any(not p.strip() for p in self.allow):
                 raise ValueError("tool_policy.allow patterns must be non-empty strings")
         return self
@@ -120,26 +122,26 @@ class ModelEntry(BaseModel):
     context_window: int | None = Field(
         default=None,
         description="Total context window in tokens, used for the agent loop's "
-                    "context budget. Falls back to "
-                    "Settings.context_default_window_tokens when None. "
-                    "Provider-agnostic: a plain size, no vendor branching.",
+        "context budget. Falls back to "
+        "Settings.context_default_window_tokens when None. "
+        "Provider-agnostic: a plain size, no vendor branching.",
     )
     default: bool = Field(
         default=False,
         description="At most one entry should be marked default. Used as the "
-                    "registry-wide fallback and as the orchestrator's own model "
-                    "unless overridden by Settings.orchestrator_model_id.",
+        "registry-wide fallback and as the orchestrator's own model "
+        "unless overridden by Settings.orchestrator_model_id.",
     )
     supports_native_tools: bool = Field(
         default=True,
         description="Whether the served endpoint supports native tool/function calling. "
-                    "Declared only in Phase 5; prompted-tool fallback is Phase 6.",
+        "Declared only in Phase 5; prompted-tool fallback is Phase 6.",
     )
     thinking: Literal["none", "hint-param", "think-tags"] = Field(
         default="none",
         description="How this model exposes a thinking control. 'none': no knob; "
-                    "'hint-param': a request field like reasoning_effort; "
-                    "'think-tags': self-emits <think> inline.",
+        "'hint-param': a request field like reasoning_effort; "
+        "'think-tags': self-emits <think> inline.",
     )
     sampling: SamplingParams | None = Field(
         default=None,
@@ -169,7 +171,9 @@ class ModelsConfig(BaseModel):
         for mid in self.models:
             if not mid:
                 raise ValueError("model_id may not be empty")
-            allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+            allowed = set(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+            )
             bad = set(mid) - allowed
             if bad:
                 raise ValueError(

@@ -14,8 +14,15 @@ API_KEY = "s3cret-test-key"
 
 
 class FakeLLM(LLMClient):
-    async def complete(self, messages, tools=None, system=None, max_tokens=None,
-                       response_schema=None, thinking_level=None) -> AssistantMessage:
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
         return AssistantMessage(
             content=[TextBlock(text="ok")],
             stop_reason="end_turn",
@@ -30,7 +37,8 @@ async def test_auth_disabled_leaves_protected_routes_open(asgi_client) -> None:
         client = asgi_client(app)
         assert (await client.post("/chat", content="hello")).status_code == 200
         response = await client.post(
-            "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]}
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
         )
         assert response.status_code == 200
         assert (await client.get("/health")).status_code == 200
@@ -46,7 +54,9 @@ async def test_auth_disabled_leaves_protected_routes_open(asgi_client) -> None:
     ],
     ids=["missing", "wrong-x-api-key", "non-ascii", "wrong-bearer"],
 )
-async def test_auth_enabled_rejects_invalid_credentials(asgi_client, route, headers) -> None:
+async def test_auth_enabled_rejects_invalid_credentials(
+    asgi_client, route, headers
+) -> None:
     with wired_app(FakeLLM()) as (app, settings):
         settings.harness_api_key = API_KEY
         client = asgi_client(app)
@@ -72,7 +82,9 @@ async def test_auth_enabled_rejects_invalid_credentials(asgi_client, route, head
         ("/v1/chat/completions", {"Authorization": f"Bearer {API_KEY}"}),
     ],
 )
-async def test_auth_enabled_accepts_valid_credentials(asgi_client, route, headers) -> None:
+async def test_auth_enabled_accepts_valid_credentials(
+    asgi_client, route, headers
+) -> None:
     with wired_app(FakeLLM()) as (app, settings):
         settings.harness_api_key = API_KEY
         client = asgi_client(app)

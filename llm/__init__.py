@@ -1,4 +1,5 @@
 """LLM integration layer for the harness."""
+
 from .schemas import (
     AssistantMessage,
     Message,

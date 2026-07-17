@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
 from tests._app_support import wired_app
 
@@ -19,15 +19,7 @@ class FakeToolLLM(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
         if self.calls == 1:
             return AssistantMessage(
@@ -45,15 +37,7 @@ class FakeToolLLM(LLMClient):
 
 
 class FakePlainLLM(LLMClient):
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         return AssistantMessage(
             content=[TextBlock(text="Just an answer.")],
             stop_reason="end_turn",
@@ -66,15 +50,7 @@ class FakeOutcomeLLM(LLMClient):
     def __init__(self, stop_reason: str) -> None:
         self.stop_reason = stop_reason
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         return AssistantMessage(
             content=[
                 TextBlock(

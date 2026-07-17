@@ -19,7 +19,7 @@ from agent import (
 )
 from api.turn import PersistencePolicy, TurnRequest, TurnRunner
 from config import Settings
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     Message,
@@ -81,7 +81,7 @@ class ToolMCP:
 
 
 class AnswerLLM(LLMClient):
-    async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         return AssistantMessage(
             content=[TextBlock("follow-up")],
             stop_reason="end_turn",
@@ -93,7 +93,7 @@ class BlockingLLM(LLMClient):
     def __init__(self) -> None:
         self.started = asyncio.Event()
 
-    async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.started.set()
         await asyncio.Event().wait()
 
@@ -102,10 +102,12 @@ class BlockingAfterDeltaLLM(LLMClient):
     def __init__(self) -> None:
         self.waiting = asyncio.Event()
 
-    async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() expected")
 
-    async def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[StreamChunk]:
+    async def stream(
+        self, request: GenerationRequest
+    ) -> AsyncIterator[StreamChunk]:
         yield TextDelta("visible")
         self.waiting.set()
         await asyncio.Event().wait()
@@ -117,13 +119,13 @@ class ScriptedStreamLLM(LLMClient):
         self.calls = 0
         self.messages_seen: list[list[Message]] = []
 
-    async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() expected")
 
     async def stream(
-        self, messages: list[Message], *args: Any, **kwargs: Any
+        self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
-        self.messages_seen.append(list(messages))
+        self.messages_seen.append(list(request.messages))
         chunks = self.attempts[self.calls]
         self.calls += 1
         for chunk in chunks:
@@ -135,7 +137,7 @@ class ToolBatchLLM(LLMClient):
         self.calls = 0
         self.second_tool_batch = second_tool_batch
 
-    async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
         if self.calls == 1 or self.second_tool_batch:
             batch = self.calls - 1
@@ -159,10 +161,12 @@ class ToolThenBlockingStreamLLM(LLMClient):
         self.calls = 0
         self.waiting = asyncio.Event()
 
-    async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() expected")
 
-    async def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[StreamChunk]:
+    async def stream(
+        self, request: GenerationRequest
+    ) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         if self.calls == 1:
             yield StreamEnd(

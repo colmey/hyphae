@@ -6,10 +6,9 @@ from typing import Any, AsyncIterator
 import pytest
 
 from agent import DoneEvent, ErrorEvent, TextEvent
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
-    Message,
     StreamChunk,
     StreamEnd,
     TextBlock,
@@ -25,16 +24,11 @@ class StallingLLM(LLMClient):
         self.calls = 0
         self.closed = 0
 
-    async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() must be used")
 
     async def stream(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-        max_tokens: int | None = None,
-        thinking_level: str | None = None,
+        self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         call = self.calls
@@ -57,16 +51,11 @@ class StallingLLM(LLMClient):
 
 
 class PacedLLM(LLMClient):
-    async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() must be used")
 
     async def stream(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-        max_tokens: int | None = None,
-        thinking_level: str | None = None,
+        self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
         for text in ("a", "b", "c"):
             await asyncio.sleep(0.02)
@@ -75,7 +64,7 @@ class PacedLLM(LLMClient):
 
 
 class BlockingCompleteLLM(LLMClient):
-    async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 

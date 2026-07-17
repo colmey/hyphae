@@ -33,7 +33,7 @@ from agent import (
     run_agent,
 )
 from agent.loop import _FAILURE_NUDGE, _FINAL_ITERATION_WRAPUP, _STALL_MESSAGE
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
 from mcp_layer.client import ToolCallResult
 
@@ -49,32 +49,16 @@ pytestmark = pytest.mark.anyio
 
 
 class ScriptedLLM(LLMClient):
-    """Replays a fixed script of responses, recording each call's system/tools.
-
-    The recorded `systems`/`tools_seen` lists let the final-iteration wrap-up
-    test assert that the final iteration withheld tools and injected the note.
-    """
+    """Replay responses while recording each provider-neutral request."""
 
     def __init__(self, script: list[Any]) -> None:
         self._script = list(script)
         self.calls = 0
-        self.systems: list[str | None] = []
-        self.tools_seen: list[Any] = []
-        self.thinking_seen: list[str | None] = []
+        self.requests_seen: list[GenerationRequest] = []
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
-        self.systems.append(system)
-        self.tools_seen.append(tools)
-        self.thinking_seen.append(thinking_level)
+        self.requests_seen.append(request)
         if not self._script:
             raise AssertionError("ScriptedLLM ran out of scripted responses")
         return self._script.pop(0)
@@ -169,14 +153,14 @@ async def test_final_iteration_wrap_up() -> None:
         "final-iteration wrap-up", llm, mcp, system="You are helpful.", max_iterations=2
     )
     check(llm.calls == 2, f"two iterations ran (got {llm.calls})")
-    check(llm.tools_seen[0] is not None, "iteration 1 saw tools")
-    check(llm.tools_seen[1] is None, "final iteration withheld tools")
+    check(llm.requests_seen[0].tools is not None, "iteration 1 saw tools")
+    check(llm.requests_seen[1].tools is None, "final iteration withheld tools")
     check(
-        _FINAL_ITERATION_WRAPUP in (llm.systems[1] or ""),
+        _FINAL_ITERATION_WRAPUP in (llm.requests_seen[1].system or ""),
         "final iteration system prompt carries the wrap-up note",
     )
     check(
-        _FINAL_ITERATION_WRAPUP not in (llm.systems[0] or ""),
+        _FINAL_ITERATION_WRAPUP not in (llm.requests_seen[0].system or ""),
         "earlier iteration system prompt is untouched",
     )
     check(done_reason(events) == "max_iterations", "done_reason == max_iterations")

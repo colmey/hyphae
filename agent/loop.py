@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator, Callable
 
 import jsonschema
 
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     Message,
@@ -211,14 +211,10 @@ def _with_wrapup(system: str | None) -> str:
 async def _complete_with_retry(
     llm: LLMClient,
     *,
-    messages: list[Any],
-    tools: list[dict[str, Any]] | None,
-    system: str | None,
-    max_tokens: int | None,
+    request: GenerationRequest,
     timeout: float | None,
     max_retries: int,
     base_delay: float,
-    thinking_level: str | None = None,
     deadline_expired: Callable[[], bool] | None = None,
     remaining_seconds: Callable[[], float | None] | None = None,
     log: logging.Logger | logging.LoggerAdapter = logger,
@@ -237,21 +233,9 @@ async def _complete_with_retry(
         try:
             if timeout and timeout > 0:
                 async with asyncio.timeout(timeout):
-                    response = await llm.complete(
-                        messages=messages,
-                        tools=tools,
-                        system=system,
-                        max_tokens=max_tokens,
-                        thinking_level=thinking_level,
-                    )
+                    response = await llm.complete(request)
             else:
-                response = await llm.complete(
-                    messages=messages,
-                    tools=tools,
-                    system=system,
-                    max_tokens=max_tokens,
-                    thinking_level=thinking_level,
-                )
+                response = await llm.complete(request)
         except Exception as exc:
             if deadline_expired is not None and deadline_expired():
                 raise _RunDeadlineExceeded() from exc
@@ -570,6 +554,13 @@ async def run_agent(
                 )
 
         # LLM call with per-attempt timeout and bounded retry.
+        generation_request = GenerationRequest(
+            messages=tuple(messages_for_llm),
+            tools=effective_tools or None,
+            system=effective_system,
+            max_tokens=max_tokens,
+            thinking_level=thinking_level,
+        )
         llm_started = time.perf_counter()
         try:
             if stream:
@@ -582,13 +573,7 @@ async def run_agent(
                     visible_deltas: list[str] = []
                     chunks: AsyncIterator[Any] | None = None
                     try:
-                        chunks = llm.stream(
-                            messages=messages_for_llm,
-                            tools=effective_tools or None,
-                            system=effective_system,
-                            max_tokens=max_tokens,
-                            thinking_level=thinking_level,
-                        )
+                        chunks = llm.stream(generation_request)
                         while True:
                             if _deadline_exceeded():
                                 raise _RunDeadlineExceeded()
@@ -684,14 +669,10 @@ async def run_agent(
             else:
                 response = await _complete_with_retry(
                     llm,
-                    messages=messages_for_llm,
-                    tools=effective_tools or None,
-                    system=effective_system,
-                    max_tokens=max_tokens,
+                    request=generation_request,
                     timeout=_effective_timeout(llm_timeout_seconds),
                     max_retries=max_retries,
                     base_delay=retry_base_delay,
-                    thinking_level=thinking_level,
                     deadline_expired=_deadline_exceeded,
                     remaining_seconds=_remaining_run_seconds,
                     log=run_log,

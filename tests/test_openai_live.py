@@ -30,6 +30,7 @@ import pytest
 
 from config import get_settings, load_mcp_config, reset_settings
 from llm import (
+    GenerationRequest,
     LLMClient,
     Message,
     ToolResultBlock,
@@ -69,7 +70,9 @@ async def scenario_1_no_tools(llm: LLMClient) -> None:
     print("Scenario 1: tool-less completion")
     print("=" * 70)
     response = await llm.complete(
-        messages=[Message.user("What is 2 + 2? Answer with just the number.")],
+        GenerationRequest(
+            messages=[Message.user("What is 2 + 2? Answer with just the number.")]
+        )
     )
     _print_response_summary("response", response)
 
@@ -82,17 +85,19 @@ async def scenario_2_with_tools(llm: LLMClient, mcp: MCPManager) -> None:
     print(f"  attached {len(tools)} tools from MCP manager")
 
     response = await llm.complete(
-        messages=[
-            Message.user(
-                "List the tables available in the customer database. "
-                "Use the appropriate tool."
-            )
-        ],
-        tools=tools,
-        system=(
-            "You are a database assistant with access to tools. "
-            "When the user asks about data, use the available tools to fetch it."
-        ),
+        GenerationRequest(
+            messages=[
+                Message.user(
+                    "List the tables available in the customer database. "
+                    "Use the appropriate tool."
+                )
+            ],
+            tools=tools,
+            system=(
+                "You are a database assistant with access to tools. "
+                "When the user asks about data, use the available tools to fetch it."
+            ),
+        )
     )
     _print_response_summary("response", response)
     return response
@@ -115,7 +120,9 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
         "Use them when needed, then summarize results clearly."
     )
 
-    first = await llm.complete(messages=history, tools=tools, system=system)
+    first = await llm.complete(
+        GenerationRequest(messages=history, tools=tools, system=system)
+    )
     _print_response_summary("turn 1", first)
     history.append(first.to_message())
 
@@ -144,7 +151,9 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
         )
     history.append(Message.tool_results(results))
 
-    second = await llm.complete(messages=history, tools=tools, system=system)
+    second = await llm.complete(
+        GenerationRequest(messages=history, tools=tools, system=system)
+    )
     _print_response_summary("turn 2 (final)", second)
 
 

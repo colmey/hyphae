@@ -9,7 +9,7 @@ import pytest
 
 from agent import InMemorySessionStore, Session
 from api import openai_compatible
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     Role,
@@ -32,21 +32,11 @@ class FakeLLM(LLMClient):
     def __init__(self) -> None:
         self.complete_calls = 0
         self.stream_calls = 0
-        self.messages_seen: list[list[Any]] = []
-        self.systems_seen: list[str | None] = []
+        self.requests_seen: list[GenerationRequest] = []
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.complete_calls += 1
-        self.messages_seen.append(list(messages))
-        self.systems_seen.append(system)
+        self.requests_seen.append(request)
         return AssistantMessage(
             content=[TextBlock(text="Hello"), TextBlock(text=", world")],
             stop_reason="end_turn",
@@ -55,11 +45,10 @@ class FakeLLM(LLMClient):
         )
 
     async def stream(
-        self, messages, tools=None, system=None, max_tokens=None, thinking_level=None
+        self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
         self.stream_calls += 1
-        self.messages_seen.append(list(messages))
-        self.systems_seen.append(system)
+        self.requests_seen.append(request)
         yield TextDelta(text="Hello")
         yield TextDelta(text=", ")
         yield TextDelta(text="world")
@@ -77,15 +66,7 @@ class OutcomeLLM(LLMClient):
     def __init__(self, stop_reason: str) -> None:
         self.stop_reason = stop_reason
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         return AssistantMessage(
             content=[
                 TextBlock(
@@ -505,12 +486,12 @@ async def test_ordered_history_replays_without_altering_user_content(
         )
 
     response.raise_for_status()
-    seen = llm.messages_seen[0]
+    seen = llm.requests_seen[0].messages
     assert [message.role for message in seen] == [Role.USER, Role.ASSISTANT, Role.USER]
     assert seen[0].content[0].text == user_text
     assert seen[1].content[0].text == "checkeddone"
     assert seen[2].content[0].text == "active prompt"
-    assert llm.systems_seen == ["system one\n\nsystem two"]
+    assert llm.requests_seen[0].system == "system one\n\nsystem two"
 
 
 async def test_trailing_assistant_is_rejected_instead_of_reordered(asgi_client) -> None:

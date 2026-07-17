@@ -8,6 +8,7 @@ from typing import Any
 import openai
 import pytest
 
+from llm.client import GenerationRequest
 from llm.providers.openai import OpenAILLMClient, _merge_extra_body
 from llm.schemas import Message, ModelProfile, StreamEnd, TextBlock, ToolUseBlock, Usage
 
@@ -206,12 +207,10 @@ def test_usage_coercion_degrades_malformed_values_to_zero() -> None:
 def test_real_openai_request_uses_supported_shape() -> None:
     profile = ModelProfile(temperature=0.2, top_p=0.8, top_k=40)
     request = _client(profile=profile)._build_request(
-        messages=[Message.user("hello")],
-        tools=None,
-        system=None,
-        max_tokens=77,
-        response_schema=None,
-        thinking_level=None,
+        GenerationRequest(
+            messages=[Message.user("hello")],
+            max_tokens=77,
+        )
     )
 
     assert request["max_completion_tokens"] == 77
@@ -225,12 +224,7 @@ def test_real_openai_request_uses_supported_shape() -> None:
 def test_compatible_request_uses_extension_shape() -> None:
     profile = ModelProfile(temperature=0.2, top_p=0.8, top_k=40)
     request = _client(compatible=True, profile=profile)._build_request(
-        messages=[Message.user("hello")],
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
+        GenerationRequest(messages=[Message.user("hello")])
     )
 
     assert request["max_tokens"] == 123
@@ -254,8 +248,11 @@ def test_extra_body_merge_preserves_existing_extensions() -> None:
 class _StreamingCompletions:
     def __init__(self, chunks: list[Any]) -> None:
         self._chunks = chunks
+        self.requests: list[dict[str, Any]] = []
 
-    async def create(self, **_request: Any):
+    async def create(self, **request: Any):
+        self.requests.append(request)
+
         async def stream():
             for chunk in self._chunks:
                 yield chunk
@@ -269,6 +266,25 @@ def _stream_client(chunks: list[Any]) -> OpenAILLMClient:
         chat=SimpleNamespace(completions=_StreamingCompletions(chunks))
     )
     return client
+
+
+@pytest.mark.anyio
+async def test_stream_rejects_response_schema_before_sdk_call() -> None:
+    completions = _StreamingCompletions([])
+    client = _client(compatible=True)
+    client._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=completions)
+    )
+
+    with pytest.raises(ValueError, match="response_schema"):
+        _ = [
+            chunk
+            async for chunk in client.stream(
+                GenerationRequest(messages=[], response_schema=dict)
+            )
+        ]
+
+    assert completions.requests == []
 
 
 @pytest.mark.anyio
@@ -287,7 +303,12 @@ async def test_streamed_refusal_is_visible_and_canonical() -> None:
         )
     ]
 
-    emitted = [chunk async for chunk in _stream_client(chunks).stream([])]
+    emitted = [
+        chunk
+        async for chunk in _stream_client(chunks).stream(
+            GenerationRequest(messages=[])
+        )
+    ]
     end = next(chunk for chunk in emitted if isinstance(chunk, StreamEnd))
 
     assert end.message.stop_reason == "refusal"
@@ -309,7 +330,12 @@ async def test_stream_with_no_choices_is_retryable_empty() -> None:
         )
     ]
 
-    emitted = [chunk async for chunk in _stream_client(chunks).stream([])]
+    emitted = [
+        chunk
+        async for chunk in _stream_client(chunks).stream(
+            GenerationRequest(messages=[])
+        )
+    ]
     end = next(chunk for chunk in emitted if isinstance(chunk, StreamEnd))
 
     assert end.message.stop_reason == "empty"
@@ -333,7 +359,12 @@ async def test_streamed_legacy_function_call_is_normalized() -> None:
         )
     ]
 
-    emitted = [chunk async for chunk in _stream_client(chunks).stream([])]
+    emitted = [
+        chunk
+        async for chunk in _stream_client(chunks).stream(
+            GenerationRequest(messages=[])
+        )
+    ]
     end = next(chunk for chunk in emitted if isinstance(chunk, StreamEnd))
     tool_use = end.message.tool_uses()[0]
 
@@ -384,7 +415,12 @@ async def test_streamed_missing_tool_id_is_minted_once_and_stable() -> None:
     ]
     client = _stream_client(chunks)
 
-    emitted = [chunk async for chunk in client.stream([Message.user("go")])]
+    emitted = [
+        chunk
+        async for chunk in client.stream(
+            GenerationRequest(messages=[Message.user("go")])
+        )
+    ]
     end = next(chunk for chunk in emitted if isinstance(chunk, StreamEnd))
     tool_use = end.message.tool_uses()[0]
 

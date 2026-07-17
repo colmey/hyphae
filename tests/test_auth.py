@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, Usage
 from tests._app_support import wired_app
 
@@ -14,15 +14,7 @@ API_KEY = "s3cret-test-key"
 
 
 class FakeLLM(LLMClient):
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         return AssistantMessage(
             content=[TextBlock(text="ok")],
             stop_reason="end_turn",

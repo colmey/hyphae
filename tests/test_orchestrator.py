@@ -6,7 +6,8 @@ from typing import Any
 
 import pytest
 
-from llm.schemas import Message, TextBlock
+from llm.client import GenerationRequest, LLMClient
+from llm.schemas import AssistantMessage, Message, TextBlock
 from mcp_layer import ToolSnapshot
 from orchestrator import Orchestrator
 from orchestrator.schemas import OrchestrationResult
@@ -40,6 +41,36 @@ class _RegistryStub:
 
     def describe_for_prompt(self) -> str:
         return "model: test model"
+
+
+class _RecordingLLM(LLMClient):
+    def __init__(self) -> None:
+        self.requests: list[GenerationRequest] = []
+
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        self.requests.append(request)
+        return AssistantMessage(
+            content=[TextBlock("{\"selected_model_id\":\"model\"}")],
+            stop_reason="end_turn",
+        )
+
+
+@pytest.mark.anyio
+async def test_orchestration_constructs_structured_generation_request() -> None:
+    orchestrator = Orchestrator(
+        registry=_RegistryStub(),  # type: ignore[arg-type]
+        system_prompt="route requests",
+    )
+    llm = _RecordingLLM()
+
+    raw = await orchestrator._call_orchestrator_llm(llm, "choose a model")
+
+    assert raw == '{"selected_model_id":"model"}'
+    request = llm.requests[0]
+    assert request.messages == [Message.user("choose a model")]
+    assert request.tools is None
+    assert request.system == "route requests"
+    assert request.response_schema is OrchestrationResult
 
 
 def test_prompt_includes_history_only_when_present() -> None:

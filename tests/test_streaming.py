@@ -19,11 +19,10 @@ from agent import (
     ToolCallEvent,
     run_agent,
 )
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.providers.openai import _ReasoningStreamStripper
 from llm.schemas import (
     AssistantMessage,
-    Message,
     StreamChunk,
     StreamEnd,
     TextBlock,
@@ -58,25 +57,16 @@ class FakeMCP:
 
 
 class NativeStreamingLLM(LLMClient):
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    def __init__(self) -> None:
+        self.requests: list[GenerationRequest] = []
+
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("complete() should not be used in native stream test")
 
     async def stream(
-        self,
-        messages: list[Message],
-        tools=None,
-        system=None,
-        max_tokens=None,
-        thinking_level=None,
+        self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
+        self.requests.append(request)
         yield TextDelta("Hel")
         yield TextDelta("lo")
         yield StreamEnd(
@@ -91,17 +81,11 @@ class NativeStreamingLLM(LLMClient):
 class CompleteOnlyLLM(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
+        self.requests: list[GenerationRequest] = []
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
+        self.requests.append(request)
         return AssistantMessage(
             content=[TextBlock("fallback text")],
             stop_reason="end_turn",
@@ -113,24 +97,11 @@ class ToolStreamingLLM(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("complete() should not be used in stream mode")
 
     async def stream(
-        self,
-        messages: list[Message],
-        tools=None,
-        system=None,
-        max_tokens=None,
-        thinking_level=None,
+        self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         if self.calls == 1:
@@ -157,24 +128,11 @@ class ToolStreamingLLM(LLMClient):
 
 
 class ErrorAfterDeltaLLM(LLMClient):
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("complete() should not be used in stream mode")
 
     async def stream(
-        self,
-        messages: list[Message],
-        tools=None,
-        system=None,
-        max_tokens=None,
-        thinking_level=None,
+        self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
         yield TextDelta("partial")
         raise RuntimeError("stream broke")
@@ -226,6 +184,23 @@ async def test_complete_fallback_streams_coarse_text() -> None:
     assert fallback.calls == 1
     assert text_events(events) == ["fallback text"]
     assert done_reason(events) == "end_turn"
+
+
+async def test_agent_buffered_and_streaming_generation_fields_match() -> None:
+    native = NativeStreamingLLM()
+    buffered = CompleteOnlyLLM()
+
+    await collect(native)
+    await collect(buffered)
+
+    native_request = native.requests[0]
+    buffered_request = buffered.requests[0]
+    assert native_request.messages == buffered_request.messages
+    assert native_request.tools == buffered_request.tools
+    assert native_request.system == buffered_request.system
+    assert native_request.max_tokens == buffered_request.max_tokens
+    assert native_request.response_schema == buffered_request.response_schema
+    assert native_request.thinking_level == buffered_request.thinking_level
 
 
 async def test_streamed_tool_call_reaches_dispatch() -> None:

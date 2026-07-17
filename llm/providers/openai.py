@@ -14,9 +14,10 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Mapping, Sequence
 from typing import Any, AsyncIterator
 
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     CanonicalStopReason,
@@ -255,59 +256,34 @@ class OpenAILLMClient(LLMClient):
         self._profile = profile or ModelProfile.default()
         self._warned_inert_thinking = False
 
-    async def complete(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-        max_tokens: int | None = None,
-        response_schema: type | None = None,
-        thinking_level: str | None = None,
-    ) -> AssistantMessage:
-        request = self._build_request(
-            messages=messages,
-            tools=tools,
-            system=system,
-            max_tokens=max_tokens,
-            response_schema=response_schema,
-            thinking_level=thinking_level,
-        )
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        sdk_request = self._build_request(request)
 
         logger.debug(
             "openai complete: model=%s messages=%d tools=%d schema=%s",
             self._model,
-            len(request["messages"]),
-            len(request.get("tools") or []),
-            response_schema.__name__ if response_schema else None,
+            len(sdk_request["messages"]),
+            len(sdk_request.get("tools") or []),
+            request.response_schema.__name__ if request.response_schema else None,
         )
 
-        response = await self._client.chat.completions.create(**request)
+        response = await self._client.chat.completions.create(**sdk_request)
         return self._from_openai_response(response)
 
     async def stream(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-        max_tokens: int | None = None,
-        thinking_level: str | None = None,
+        self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
-        request = self._build_request(
-            messages=messages,
-            tools=tools,
-            system=system,
-            max_tokens=max_tokens,
-            response_schema=None,
-            thinking_level=thinking_level,
-        )
-        request["stream"] = True
-        request["stream_options"] = {"include_usage": True}
+        if request.response_schema is not None:
+            raise ValueError("response_schema is not supported for streaming")
+        sdk_request = self._build_request(request)
+        sdk_request["stream"] = True
+        sdk_request["stream_options"] = {"include_usage": True}
 
         logger.debug(
             "openai stream: model=%s messages=%d tools=%d",
             self._model,
-            len(request["messages"]),
-            len(request.get("tools") or []),
+            len(sdk_request["messages"]),
+            len(sdk_request.get("tools") or []),
         )
 
         stripper = _ReasoningStreamStripper()
@@ -320,7 +296,7 @@ class OpenAILLMClient(LLMClient):
         raw_usage: Any = None
         response_model: str | None = None
 
-        sdk_stream = await self._client.chat.completions.create(**request)
+        sdk_stream = await self._client.chat.completions.create(**sdk_request)
         async for chunk in sdk_stream:
             response_model = getattr(chunk, "model", None) or response_model
             if getattr(chunk, "usage", None) is not None:
@@ -411,23 +387,17 @@ class OpenAILLMClient(LLMClient):
             )
         )
 
-    def _build_request(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None,
-        system: str | None,
-        max_tokens: int | None,
-        response_schema: type | None,
-        thinking_level: str | None,
-    ) -> dict[str, Any]:
-        oai_messages = self._to_openai_messages(messages, system)
-        oai_tools = self._to_openai_tools(tools) if tools else None
+    def _build_request(self, generation: GenerationRequest) -> dict[str, Any]:
+        oai_messages = self._to_openai_messages(
+            generation.messages, generation.system
+        )
+        oai_tools = self._to_openai_tools(generation.tools) if generation.tools else None
 
         request: dict[str, Any] = {
             "model": self._model,
             "messages": oai_messages,
         }
-        token_limit = max_tokens or self._default_max_tokens
+        token_limit = generation.max_tokens or self._default_max_tokens
         if self._compatible_endpoint:
             request["max_tokens"] = token_limit
         else:
@@ -444,7 +414,7 @@ class OpenAILLMClient(LLMClient):
             request["tool_choice"] = "auto"
 
         # Structured output and tools are typically mutually exclusive.
-        if response_schema is not None:
+        if generation.response_schema is not None:
             if oai_tools:
                 logger.warning(
                     "OpenAI call received both tools and response_schema; "
@@ -452,16 +422,18 @@ class OpenAILLMClient(LLMClient):
                 )
                 request.pop("tools", None)
                 request.pop("tool_choice", None)
-            request["response_format"] = self._response_format(response_schema)
+            request["response_format"] = self._response_format(
+                generation.response_schema
+            )
 
-        if thinking_level is not None:
+        if generation.thinking_level is not None:
             if p.thinking == "hint-param":
-                request["reasoning_effort"] = thinking_level
+                request["reasoning_effort"] = generation.thinking_level
             elif p.thinking == "none" and not self._warned_inert_thinking:
                 logger.info(
                     "thinking_level=%r requested but model %s declares thinking:none; "
                     "the knob is inert for this model",
-                    thinking_level,
+                    generation.thinking_level,
                     self._model,
                 )
                 self._warned_inert_thinking = True
@@ -490,7 +462,7 @@ class OpenAILLMClient(LLMClient):
         return False
 
     def _to_openai_messages(
-        self, messages: list[Message], system: str | None
+        self, messages: Sequence[Message], system: str | None
     ) -> list[dict[str, Any]]:
         """Translate internal Message list to OpenAI's chat message list.
 
@@ -556,7 +528,9 @@ class OpenAILLMClient(LLMClient):
 
         return out
 
-    def _to_openai_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _to_openai_tools(
+        self, tools: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Translate generic tools into OpenAI function-tool dicts."""
         return [
             {

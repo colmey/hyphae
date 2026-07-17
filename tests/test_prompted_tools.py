@@ -21,7 +21,7 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from llm.client import LLMClient, build_llm_client_from_entry
+from llm.client import GenerationRequest, LLMClient, build_llm_client_from_entry
 from llm.prompted_tools import (
     PromptedToolLLMClient,
     parse_prompted_action,
@@ -69,25 +69,11 @@ class ScriptedLLM(LLMClient):
     def __init__(self, script: list[AssistantMessage]) -> None:
         self._script = list(script)
         self.calls = 0
-        self.messages_seen: list[list[Message]] = []
-        self.tools_seen: list[list[dict[str, Any]] | None] = []
-        self.systems_seen: list[str | None] = []
-        self.response_schemas_seen: list[type | None] = []
+        self.requests_seen: list[GenerationRequest] = []
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
-        self.messages_seen.append(list(messages))
-        self.tools_seen.append(tools)
-        self.systems_seen.append(system)
-        self.response_schemas_seen.append(response_schema)
+        self.requests_seen.append(request)
         if not self._script:
             raise AssertionError("ScriptedLLM ran out of scripted responses")
         return self._script.pop(0)
@@ -177,20 +163,22 @@ async def test_wrapper_basic() -> None:
     print("--- wrapper sends prompted tools, not native tools ---")
     inner = ScriptedLLM([text_response(action_text("gamma"))])
     wrapper = PromptedToolLLMClient(inner, model="wrapped-model")
-    response = await wrapper.complete(
-        messages=[Message.user("lookup gamma")],
-        tools=[TOOL],
-        system="base system",
+    original = GenerationRequest(
+        messages=[Message.user("lookup gamma")], tools=[TOOL], system="base system"
     )
+    response = await wrapper.complete(original)
 
-    check(inner.tools_seen == [None], "inner client saw tools=None")
+    check(inner.requests_seen[0].tools is None, "inner client saw tools=None")
     check(
-        "base system" in (inner.systems_seen[0] or ""), "original system is preserved"
+        "base system" in (inner.requests_seen[0].system or ""),
+        "original system is preserved",
     )
     check(
-        "Available tools:" in (inner.systems_seen[0] or ""),
+        "Available tools:" in (inner.requests_seen[0].system or ""),
         "prompted tool instructions are in system",
     )
+    check(inner.requests_seen[0] is not original, "prompted request is derived")
+    check(original.tools == [TOOL], "original request was not mutated")
     check(
         len(response.content) == 1 and isinstance(response.content[0], ToolUseBlock),
         "wrapper returns one ToolUseBlock",
@@ -223,7 +211,7 @@ async def test_wrapper_does_not_launder_non_normal_provider_outcomes(
     inner = ScriptedLLM([source])
 
     response = await PromptedToolLLMClient(inner).complete(
-        messages=[Message.user("lookup")], tools=[TOOL]
+        GenerationRequest(messages=[Message.user("lookup")], tools=[TOOL])
     )
 
     check(response is source, "non-normal outcome passes through unchanged")
@@ -237,22 +225,25 @@ async def test_passthroughs() -> None:
     schema = dict
     inner = ScriptedLLM([text_response("structured")])
     wrapper = PromptedToolLLMClient(inner)
-    response = await wrapper.complete(
+    original = GenerationRequest(
         messages=[Message.user("structured please")],
         tools=[TOOL],
         response_schema=schema,
     )
+    response = await wrapper.complete(original)
     check(
         response.text_blocks()[0].text == "structured",
         "response_schema call passes through",
     )
     check(
-        inner.tools_seen == [[TOOL]],
+        inner.requests_seen[0].tools == [TOOL],
         "response_schema passthrough keeps native tools argument",
     )
     check(
-        inner.response_schemas_seen == [schema], "response_schema reaches inner client"
+        inner.requests_seen[0].response_schema is schema,
+        "response_schema reaches inner client",
     )
+    check(inner.requests_seen[0] is original, "unchanged request preserves identity")
 
     history = [
         Message.user("lookup"),
@@ -275,13 +266,13 @@ async def test_passthroughs() -> None:
     ]
     inner = ScriptedLLM([text_response("final from history")])
     wrapper = PromptedToolLLMClient(inner)
-    response = await wrapper.complete(messages=history, tools=[TOOL])
+    response = await wrapper.complete(GenerationRequest(messages=history, tools=[TOOL]))
     check(
         response.text_blocks()[0].text == "final from history",
         "final prose passes through",
     )
     check(
-        inner.messages_seen[0][-1].role.value == "tool",
+        inner.requests_seen[0].messages[-1].role.value == "tool",
         "tool result history is passed through",
     )
 
@@ -298,13 +289,17 @@ async def test_repair() -> None:
         ]
     )
     wrapper = PromptedToolLLMClient(inner)
-    response = await wrapper.complete(
-        messages=[Message.user("lookup repaired")], tools=[TOOL]
+    original = GenerationRequest(
+        messages=[Message.user("lookup repaired")],
+        tools=[TOOL],
+        max_tokens=321,
+        thinking_level="high",
     )
+    response = await wrapper.complete(original)
     check(inner.calls == 2, "malformed JSON triggers one repair call")
     repair_text = "".join(
         block.text
-        for block in inner.messages_seen[1][-1].content
+        for block in inner.requests_seen[1].messages[-1].content
         if isinstance(block, TextBlock)
     )
     check(
@@ -318,6 +313,22 @@ async def test_repair() -> None:
         response.usage is not None and response.usage.total_tokens == 5,
         "usage from repair calls is combined",
     )
+    check(
+        all(request.max_tokens == 321 for request in inner.requests_seen),
+        "prompted and repair requests preserve max_tokens",
+    )
+    check(
+        all(request.thinking_level == "high" for request in inner.requests_seen),
+        "prompted and repair requests preserve thinking_level",
+    )
+    check(
+        all(
+            request.tools is None and request.response_schema is None
+            for request in inner.requests_seen
+        ),
+        "prompted and repair requests clear native-only fields",
+    )
+    check(original.tools == [TOOL], "repair path does not mutate original request")
 
     inner = ScriptedLLM(
         [
@@ -327,7 +338,7 @@ async def test_repair() -> None:
     )
     wrapper = PromptedToolLLMClient(inner)
     response = await wrapper.complete(
-        messages=[Message.user("lookup fail")], tools=[TOOL]
+        GenerationRequest(messages=[Message.user("lookup fail")], tools=[TOOL])
     )
     check(inner.calls == 2, "repair failure stops after one retry")
     check(not response.tool_uses(), "repair failure returns no ToolUseBlock")
@@ -342,7 +353,7 @@ async def test_semantic_errors() -> None:
     inner = ScriptedLLM([text_response('{"tool":"srv__lookup","arguments":"bad"}')])
     wrapper = PromptedToolLLMClient(inner)
     response = await wrapper.complete(
-        messages=[Message.user("lookup bad")], tools=[TOOL]
+        GenerationRequest(messages=[Message.user("lookup bad")], tools=[TOOL])
     )
     tool_uses = response.tool_uses()
     check(len(tool_uses) == 1, "bad arguments still return a ToolUseBlock")
@@ -388,7 +399,10 @@ async def test_drop_in_loop() -> None:
         "loop emitted final TextEvent",
     )
     check(done is not None and done.reason == "end_turn", "loop completed end_turn")
-    check(inner.tools_seen == [None, None], "inner prose model never saw native tools")
+    check(
+        [request.tools for request in inner.requests_seen] == [None, None],
+        "inner prose model never saw native tools",
+    )
 
 
 async def test_factory_selection() -> None:

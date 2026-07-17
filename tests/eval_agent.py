@@ -38,7 +38,7 @@ from agent import (
 )
 from api.turn import PersistencePolicy, TurnRequest, TurnRunner
 from config import get_settings
-from llm.client import LLMClient, build_llm_client
+from llm.client import GenerationRequest, LLMClient, build_llm_client
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
 from mcp_layer.client import ToolCallResult
 from orchestrator.schemas import OrchestrationDecision, OrchestrationResult
@@ -63,23 +63,11 @@ class ScriptedLLM(LLMClient):
         self._script = list(script)
         self._delay = delay
         self.calls = 0
-        self.systems: list[str | None] = []
-        self.tools_seen: list[list[dict[str, Any]] | None] = []
-        self.thinking_seen: list[str | None] = []
+        self.requests_seen: list[GenerationRequest] = []
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
-        self.systems.append(system)
-        self.tools_seen.append(tools)
-        self.thinking_seen.append(thinking_level)
+        self.requests_seen.append(request)
         if self._delay:
             await asyncio.sleep(self._delay)
         if not self._script:
@@ -507,7 +495,7 @@ def _evaluate(case: dict[str, Any], art: RunArtifacts) -> list[str]:
 
     for call_num in expect.get("tools_seen_none_on_calls", []):
         index = int(call_num) - 1
-        seen = getattr(art.llm, "tools_seen", [])
+        seen = [request.tools for request in art.llm.requests_seen]
         if index >= len(seen) or seen[index] is not None:
             failures.append(
                 f"tools on LLM call {call_num} expected None, got {seen[index] if index < len(seen) else '<missing>'!r}"
@@ -521,7 +509,7 @@ def _evaluate(case: dict[str, Any], art: RunArtifacts) -> list[str]:
                 f"system on LLM call {item['call']} missing {item['substring']!r}"
             )
     if "selected_thinking_level" in expect:
-        seen = getattr(art.llm, "thinking_seen", [])
+        seen = [request.thinking_level for request in art.llm.requests_seen]
         if expect["selected_thinking_level"] not in seen:
             failures.append(
                 f"thinking_level {expect['selected_thinking_level']!r} not observed in {seen!r}"

@@ -60,17 +60,18 @@ model; they do not replace the description used for routing.
 Two steps — the harness is provider-blind everywhere else:
 
 1. **Write `llm/providers/<name>.py`** with a class that subclasses
-   `LLMClient` and implements `async complete(...)` (handle the
-   `response_schema` kwarg if you want orchestrator support, and the
-   `thinking_level` kwarg if the provider has a deliberation control —
-   ignore it if not). Translate the internal `Message` list to the
+   `LLMClient` and implements `async complete(request: GenerationRequest)`
+   (handle `request.response_schema` if you want orchestrator support, and
+   `request.thinking_level` if the provider has a deliberation control —
+   ignore it if not). Translate the request's internal `Message` sequence to the
    provider's request format and the response back to `AssistantMessage`
    with `TextBlock`s / `ToolUseBlock`s. If the provider has opaque
    round-trip state (signatures, reasoning traces, etc.), stash it in
    `TextBlock.provider_metadata` / `ToolUseBlock.provider_metadata` on
    parse and re-attach it on the next request. Override `is_transient_error`
    for the provider's retryable failures. Keep the provider SDK import inside
-   this file only.
+   this file only. If native streaming is implemented, accept the same request
+   and reject a non-`None` `response_schema` before calling the SDK.
 2. **Register it** in `llm/client.py`: add a small lazy builder (3 lines,
    `from llm.providers.<name> import ...` inside the function) and one entry
    to `_PROVIDERS`.

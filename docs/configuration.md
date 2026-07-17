@@ -174,7 +174,7 @@ Both models are **active** — the orchestrator routes between them (cheap
   whether the served endpoint supports native tool/function calling. When set
   to `false`, `build_llm_client_from_entry()` wraps the provider client with
   the prompted-tool adapter: tools are rendered into the system prompt, the
-  provider is called with `tools=None`, and one JSON action from prose is
+  provider receives a request with `tools=None`, and one JSON action from prose is
   normalized back into a normal `ToolUseBlock`. Omitted or `true` keeps native
   tool behavior unchanged.
 - `thinking` is optional and defaults to `none`. Values:

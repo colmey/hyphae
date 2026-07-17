@@ -44,7 +44,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     ContentBlock,
@@ -460,12 +460,12 @@ async def _summarize(
         marker="transcript truncated for summarization",
     )
     try:
-        response = await llm.complete(
+        request = GenerationRequest(
             messages=[Message.user(transcript)],
-            tools=None,
             system=_SUMMARY_SYSTEM,
             max_tokens=max_tokens,
         )
+        response = await llm.complete(request)
         text = "\n".join(
             b.text for b in response.content if isinstance(b, TextBlock) and b.text
         ).strip()

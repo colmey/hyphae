@@ -10,7 +10,7 @@ import logging
 
 from pydantic import ValidationError
 
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import Message, Role, TextBlock
 from mcp_layer import ToolSnapshot
 
@@ -173,12 +173,12 @@ class Orchestrator:
 
     async def _call_orchestrator_llm(self, llm: LLMClient, prompt: str) -> str:
         """Run the LLM call and return raw text; no tools are exposed."""
-        response = await llm.complete(
+        request = GenerationRequest(
             messages=[Message.user(prompt)],
-            tools=None,
             system=self._system_prompt,
             response_schema=OrchestrationResult,
         )
+        response = await llm.complete(request)
 
         parts: list[str] = []
         for block in response.text_blocks():

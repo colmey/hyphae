@@ -2,10 +2,9 @@
 """
 LLM client: the provider-agnostic abstraction and the provider registry.
 
-The abstract `LLMClient` exposes a single async method (`complete`) that takes
-provider-agnostic messages and tools and returns a provider-agnostic
-`AssistantMessage`. Each provider implementation (in `llm/providers/`) is
-responsible for two translations:
+The abstract `LLMClient` consumes one provider-neutral `GenerationRequest` and
+returns provider-neutral outcomes. Each provider implementation (in
+`llm/providers/`) is responsible for two translations:
 
   1. Internal message/tool types -> provider SDK request shape.
   2. Provider SDK response -> internal AssistantMessage.
@@ -21,17 +20,19 @@ Provider registry:
   validators key off `supported_providers()`. Adding a provider is two steps:
   drop a file in `llm/providers/`, then add one entry here.
 
-Structured output (response_schema):
-  `complete()` accepts an optional `response_schema` (a Pydantic model class)
-  for providers that support structured output. Providers without native
-  support may ignore the kwarg; callers should be prepared to parse JSON out of
-  the text response either way.
+Generation inputs versus execution controls:
+  `GenerationRequest` contains only values that shape provider generation.
+  Retry, timeout, deadline, cancellation, tracing, persistence, and run state
+  stay with their existing execution owners. Request containers are borrowed;
+  clients and decorators must not mutate them.
 """
 
 from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable
 
 from .schemas import (
@@ -52,34 +53,39 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class GenerationRequest:
+    """Shallow-immutable, provider-neutral inputs for one generation."""
+
+    messages: Sequence[Message]
+    tools: Sequence[Mapping[str, Any]] | None = None
+    system: str | None = None
+    max_tokens: int | None = None
+    response_schema: type | None = None
+    thinking_level: str | None = None
+
+
 class LLMClient(ABC):
     """Provider-agnostic LLM client interface."""
 
     @abstractmethod
-    async def complete(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-        max_tokens: int | None = None,
-        response_schema: type | None = None,
-        thinking_level: str | None = None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         """Run one completion turn and return the assistant's response.
 
-        `tools` is the generic shape from MCPManager.get_tools_for_llm():
+        `request.tools` is the generic shape from MCPManager.get_tools_for_llm():
         [{name, description, input_schema}]. The implementation reshapes
         it for its provider.
 
-        `response_schema`, if provided, is a Pydantic model class that the
-        response should conform to. Providers that support structured output
-        (Gemini, OpenAI) honor this; others may ignore it. The orchestration
-        layer uses this kwarg; the agent loop does not.
+        `request.response_schema`, if provided, is a Pydantic model class that
+        the response should conform to. Providers that support structured
+        output (Gemini, OpenAI) honor this; others may ignore it. The
+        orchestration layer uses this field; the agent loop does not.
 
-        `thinking_level` ("low"|"medium"|"high"), if provided, asks the model
-        to deliberate more or less for this call -- the orchestrator's
-        per-request "intelligence on demand" knob. None leaves the model's
-        default. Providers without a thinking control may ignore it.
+        `request.thinking_level` ("low"|"medium"|"high"), if provided, asks
+        the model to deliberate more or less for this call -- the
+        orchestrator's per-request "intelligence on demand" knob. None leaves
+        the model's default. Providers without a thinking control may ignore
+        it.
         """
         ...
 
@@ -95,26 +101,18 @@ class LLMClient(ABC):
         return isinstance(exc, (TimeoutError, ConnectionError))
 
     async def stream(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-        max_tokens: int | None = None,
-        thinking_level: str | None = None,
+        self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
         """Stream one completion turn.
 
         Default implementation for complete-only providers: run `complete()`,
         emit any text blocks coarsely, then return the assembled message.
-        Structured-output calls intentionally stay on `complete()`.
+        Structured-output calls intentionally stay on `complete()` and are
+        rejected explicitly here rather than silently losing their schema.
         """
-        msg = await self.complete(
-            messages=messages,
-            tools=tools,
-            system=system,
-            max_tokens=max_tokens,
-            thinking_level=thinking_level,
-        )
+        if request.response_schema is not None:
+            raise ValueError("response_schema is not supported for streaming")
+        msg = await self.complete(request)
         for block in msg.content:
             if isinstance(block, TextBlock) and block.text:
                 yield TextDelta(text=block.text)

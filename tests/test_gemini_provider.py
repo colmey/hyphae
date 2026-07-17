@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from google.genai import types as genai_types
 
+from llm.client import GenerationRequest
 from llm.providers.gemini import GeminiLLMClient
 from llm.schemas import (
     Message,
@@ -52,6 +53,76 @@ def _text_part(text: str = "answer", signature: bytes | None = None) -> Any:
         thought_signature=signature,
         function_call=None,
     )
+
+
+class _CaptureGenerate:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return _response(parts=[_text_part()])
+
+
+@pytest.mark.anyio
+async def test_generation_request_reaches_gemini_config_unchanged() -> None:
+    client = _client()
+    client._profile = ModelProfile(temperature=0.2, top_p=0.8, top_k=40)
+    capture = _CaptureGenerate()
+    client._client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=capture))
+    )
+    tools = [
+        {
+            "name": "srv__lookup",
+            "description": "lookup",
+            "input_schema": {"type": "object", "properties": {}},
+        }
+    ]
+
+    await client.complete(
+        GenerationRequest(
+            messages=[Message.user("hello")],
+            tools=tools,
+            system="system",
+            max_tokens=77,
+            thinking_level="high",
+        )
+    )
+
+    call = capture.calls[0]
+    assert call["model"] == "gemini-test"
+    assert [content.role for content in call["contents"]] == ["user"]
+    config = call["config"]
+    assert config.max_output_tokens == 77
+    assert config.system_instruction == "system"
+    assert config.temperature == 0.2
+    assert config.top_p == 0.8
+    assert config.top_k == 40
+    assert config.thinking_config.thinking_level == genai_types.ThinkingLevel.HIGH
+    assert config.tools[0].function_declarations[0].name == "srv__lookup"
+
+
+@pytest.mark.anyio
+async def test_structured_generation_keeps_schema_and_suppresses_tools() -> None:
+    client = _client()
+    capture = _CaptureGenerate()
+    client._client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=capture))
+    )
+
+    await client.complete(
+        GenerationRequest(
+            messages=[Message.user("hello")],
+            tools=[{"name": "srv__lookup", "input_schema": {}}],
+            response_schema=dict,
+        )
+    )
+
+    config = capture.calls[0]["config"]
+    assert config.tools is None
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema is dict
 
 
 @pytest.mark.parametrize(

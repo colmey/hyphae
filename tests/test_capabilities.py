@@ -28,7 +28,7 @@ from agent.tracing import event_record
 from llm.providers.openai import OpenAILLMClient
 from llm.schemas import AssistantMessage, Message, ModelProfile, TextBlock, ToolUseBlock
 from config import ModelsConfig
-from llm.client import profile_from_entry
+from llm.client import GenerationRequest, profile_from_entry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,30 +107,7 @@ def install_capture(client: OpenAILLMClient, response: Any) -> CaptureCreate:
 
 
 class CapturingScriptedLLM(ScriptedLLM):
-    """ScriptedLLM that also records the messages each complete() call saw."""
-
-    def __init__(self, script: list[Any]) -> None:
-        super().__init__(script)
-        self.messages_seen: list[list[Message]] = []
-
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
-        self.messages_seen.append(list(messages))
-        return await super().complete(
-            messages,
-            tools=tools,
-            system=system,
-            max_tokens=max_tokens,
-            response_schema=response_schema,
-            thinking_level=thinking_level,
-        )
+    """Named eval fake used by capability tests."""
 
 
 def test_model_config_defaults() -> None:
@@ -209,8 +186,9 @@ async def test_openai_request_capture() -> None:
     capture = install_capture(client, fake_openai_response(content="ok"))
 
     await client.complete(
-        messages=[Message.user("hello")],
-        thinking_level="high",
+        GenerationRequest(
+            messages=[Message.user("hello")], thinking_level="high"
+        )
     )
     request = capture.requests[-1]
     check(request.get("temperature") == 0.7, "temperature reaches OpenAI request")
@@ -239,7 +217,11 @@ async def test_openai_request_capture() -> None:
         profile=none_profile,
     )
     inert_capture = install_capture(inert, fake_openai_response(content="ok"))
-    await inert.complete(messages=[Message.user("hello")], thinking_level="high")
+    await inert.complete(
+        GenerationRequest(
+            messages=[Message.user("hello")], thinking_level="high"
+        )
+    )
     check(
         "reasoning_effort" not in inert_capture.requests[-1],
         "thinking:none does not send reasoning_effort",
@@ -353,11 +335,11 @@ async def test_malformed_args_error_signal() -> None:
     second_seen_tool_results = (
         [
             block
-            for msg in llm.messages_seen[1]
+            for msg in llm.requests_seen[1].messages
             for block in msg.content
             if getattr(block, "type", None) == "tool_result"
         ]
-        if len(llm.messages_seen) > 1
+        if len(llm.requests_seen) > 1
         else []
     )
     check(

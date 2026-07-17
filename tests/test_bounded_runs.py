@@ -45,7 +45,7 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     TextBlock,
@@ -75,15 +75,7 @@ class ScriptedLLM(LLMClient):
         self._delay = delay
         self.calls = 0
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
         if self._delay:
             await asyncio.sleep(self._delay)

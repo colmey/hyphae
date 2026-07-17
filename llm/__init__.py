@@ -12,10 +12,11 @@ from .schemas import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from .client import LLMClient, build_llm_client
+from .client import GenerationRequest, LLMClient, build_llm_client
 
 __all__ = [
     "AssistantMessage",
+    "GenerationRequest",
     "LLMClient",
     "Message",
     "ModelProfile",

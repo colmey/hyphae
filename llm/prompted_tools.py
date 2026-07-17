@@ -7,10 +7,11 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, Message, TextBlock, ToolUseBlock, Usage
 
 
@@ -53,7 +54,7 @@ class PromptParseResult:
     error_tool_name: str | None = None
 
 
-def render_prompted_tools(tools: list[dict[str, Any]]) -> str:
+def render_prompted_tools(tools: Sequence[Mapping[str, Any]]) -> str:
     """Return compact tool instructions for the model-visible system prompt."""
     if not tools:
         return ""
@@ -145,41 +146,25 @@ class PromptedToolLLMClient(LLMClient):
     def is_transient_error(self, exc: BaseException) -> bool:
         return self._inner.is_transient_error(exc)
 
-    async def complete(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-        max_tokens: int | None = None,
-        response_schema: type | None = None,
-        thinking_level: str | None = None,
-    ) -> AssistantMessage:
-        if not tools or response_schema is not None:
-            return await self._inner.complete(
-                messages=messages,
-                tools=tools,
-                system=system,
-                max_tokens=max_tokens,
-                response_schema=response_schema,
-                thinking_level=thinking_level,
-            )
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        if not request.tools or request.response_schema is not None:
+            return await self._inner.complete(request)
 
-        tool_prompt = render_prompted_tools(tools)
-        effective_system = _join_system(system, tool_prompt)
+        tool_prompt = render_prompted_tools(request.tools)
+        effective_system = _join_system(request.system, tool_prompt)
         allowed_tools = {
             str(tool.get("name", "")).strip()
-            for tool in tools
+            for tool in request.tools
             if str(tool.get("name", "")).strip()
         }
 
-        first = await self._inner.complete(
-            messages=messages,
+        prompted_request = replace(
+            request,
             tools=None,
             system=effective_system,
-            max_tokens=max_tokens,
             response_schema=None,
-            thinking_level=thinking_level,
         )
+        first = await self._inner.complete(prompted_request)
         if first.stop_reason != "end_turn":
             return first
         parsed = parse_prompted_action(_visible_text(first), allowed_tools)
@@ -194,21 +179,16 @@ class PromptedToolLLMClient(LLMClient):
 
         last_error = parsed.error
         usage = first.usage
-        repair_messages = list(messages)
-        repair_messages.append(Message.assistant(first.content))
-        repair_messages.append(
-            Message.user(_REPAIR_INSTRUCTIONS.format(error=last_error))
+        repair_messages: tuple[Message, ...] = (
+            *request.messages,
+            Message.assistant(first.content),
+            Message.user(_REPAIR_INSTRUCTIONS.format(error=last_error)),
         )
 
         repair: AssistantMessage | None = None
         for _ in range(self._max_repairs):
             repair = await self._inner.complete(
-                messages=repair_messages,
-                tools=None,
-                system=effective_system,
-                max_tokens=max_tokens,
-                response_schema=None,
-                thinking_level=thinking_level,
+                replace(prompted_request, messages=repair_messages)
             )
             usage = _combine_usage(usage, repair.usage)
             if repair.stop_reason != "end_turn":
@@ -227,9 +207,10 @@ class PromptedToolLLMClient(LLMClient):
                 repair.usage = usage
                 return repair
             last_error = parsed.error
-            repair_messages.append(Message.assistant(repair.content))
-            repair_messages.append(
-                Message.user(_REPAIR_INSTRUCTIONS.format(error=last_error))
+            repair_messages = (
+                *repair_messages,
+                Message.assistant(repair.content),
+                Message.user(_REPAIR_INSTRUCTIONS.format(error=last_error)),
             )
 
         source = repair or first

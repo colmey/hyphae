@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from agent import InMemorySessionStore, RunLimits, run_agent
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage
 from mcp_layer.client import ToolCallResult
 
@@ -24,23 +24,11 @@ class ScriptedLLM(LLMClient):
         self._script = list(script)
         self._transient_types = transient_types
         self.calls = 0
-        self.messages_seen: list[list[Any]] = []
-        self.tools_seen: list[list[dict[str, Any]] | None] = []
-        self.systems_seen: list[str | None] = []
+        self.requests_seen: list[GenerationRequest] = []
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
-        self.messages_seen.append(list(messages))
-        self.tools_seen.append(tools)
-        self.systems_seen.append(system)
+        self.requests_seen.append(request)
         if not self._script:
             raise AssertionError("ScriptedLLM ran out of scripted responses")
         item = self._script.pop(0)

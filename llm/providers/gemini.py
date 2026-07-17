@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     CanonicalStopReason,
@@ -80,25 +81,17 @@ class GeminiLLMClient(LLMClient):
         self._default_max_tokens = default_max_tokens
         self._profile = profile or ModelProfile.default()
 
-    async def complete(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-        max_tokens: int | None = None,
-        response_schema: type | None = None,
-        thinking_level: str | None = None,
-    ) -> AssistantMessage:
-        contents = self._to_genai_contents(messages)
-        genai_tools = self._to_genai_tools(tools) if tools else None
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        contents = self._to_genai_contents(request.messages)
+        genai_tools = self._to_genai_tools(request.tools) if request.tools else None
 
         config_kwargs: dict[str, Any] = {
-            "max_output_tokens": max_tokens or self._default_max_tokens,
+            "max_output_tokens": request.max_tokens or self._default_max_tokens,
             "tools": genai_tools,
             "automatic_function_calling": genai_types.AutomaticFunctionCallingConfig(
                 disable=True,
             ),
-            "system_instruction": system,
+            "system_instruction": request.system,
         }
         p = self._profile
         if p.temperature is not None:
@@ -109,18 +102,21 @@ class GeminiLLMClient(LLMClient):
             config_kwargs["top_k"] = p.top_k
 
         # Invalid thinking_level is skipped rather than failing the request.
-        if thinking_level is not None:
+        if request.thinking_level is not None:
             try:
                 config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
-                    thinking_level=genai_types.ThinkingLevel(thinking_level.upper()),
+                    thinking_level=genai_types.ThinkingLevel(
+                        request.thinking_level.upper()
+                    ),
                 )
             except ValueError:
                 logger.warning(
-                    "ignoring unrecognized thinking_level %r", thinking_level
+                    "ignoring unrecognized thinking_level %r",
+                    request.thinking_level,
                 )
 
         # Structured output and tools are typically mutually exclusive.
-        if response_schema is not None:
+        if request.response_schema is not None:
             if genai_tools:
                 logger.warning(
                     "Gemini call received both tools and response_schema; "
@@ -128,7 +124,7 @@ class GeminiLLMClient(LLMClient):
                 )
                 config_kwargs["tools"] = None
             config_kwargs["response_mime_type"] = "application/json"
-            config_kwargs["response_schema"] = response_schema
+            config_kwargs["response_schema"] = request.response_schema
 
         config = genai_types.GenerateContentConfig(**config_kwargs)
 
@@ -137,8 +133,8 @@ class GeminiLLMClient(LLMClient):
             self._model,
             len(contents),
             len(genai_tools[0].function_declarations) if genai_tools else 0,
-            response_schema.__name__ if response_schema else None,
-            thinking_level,
+            request.response_schema.__name__ if request.response_schema else None,
+            request.thinking_level,
         )
 
         response = await self._client.aio.models.generate_content(
@@ -161,7 +157,9 @@ class GeminiLLMClient(LLMClient):
             return exc.code in self._RETRYABLE_STATUS
         return False
 
-    def _to_genai_contents(self, messages: list[Message]) -> list[genai_types.Content]:
+    def _to_genai_contents(
+        self, messages: Sequence[Message]
+    ) -> list[genai_types.Content]:
         """Translate internal Message list to Gemini's Content list.
 
         Tool results are user-role function_response parts. System text is
@@ -219,7 +217,9 @@ class GeminiLLMClient(LLMClient):
 
         return out
 
-    def _to_genai_tools(self, tools: list[dict[str, Any]]) -> list[genai_types.Tool]:
+    def _to_genai_tools(
+        self, tools: Sequence[Mapping[str, Any]]
+    ) -> list[genai_types.Tool]:
         """Translate generic tools into one Gemini Tool object."""
         declarations = [
             genai_types.FunctionDeclaration(

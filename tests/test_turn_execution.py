@@ -16,10 +16,9 @@ from fastapi import HTTPException
 from agent import OrchestrationDecisionEvent, Session, SessionGuard, Tracer
 from api.turn import PersistencePolicy, TurnRequest, TurnRunner
 from config import Settings
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
-    Message,
     StreamChunk,
     TextBlock,
     TextDelta,
@@ -61,19 +60,11 @@ class AnswerLLM(LLMClient):
     def __init__(self, answer: str = "done") -> None:
         self.answer = answer
         self.calls = 0
-        self.tools_seen: list[list[dict[str, Any]] | None] = []
+        self.requests_seen: list[GenerationRequest] = []
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
-        self.tools_seen.append(tools)
+        self.requests_seen.append(request)
         return AssistantMessage(
             content=[TextBlock(self.answer)],
             stop_reason="end_turn",
@@ -89,18 +80,12 @@ class RoutingLLM(LLMClient):
         self.calls = 0
         self.prompt = ""
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
         self.prompt = "".join(
-            block.text for block in messages[-1].content if isinstance(block, TextBlock)
+            block.text
+            for block in request.messages[-1].content
+            if isinstance(block, TextBlock)
         )
         if self.delay is None:
             await asyncio.Event().wait()
@@ -222,7 +207,7 @@ async def test_distinct_sessions_execute_concurrently() -> None:
             super().__init__()
             self.both_started = asyncio.Event()
 
-        async def complete(self, *args: Any, **kwargs: Any) -> AssistantMessage:
+        async def complete(self, request: GenerationRequest) -> AssistantMessage:
             self.calls += 1
             if self.calls == 2:
                 self.both_started.set()
@@ -343,7 +328,9 @@ async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> 
     assert result.metadata.model_id == "agent"
     assert result.metadata.orchestration is not None
     assert result.metadata.orchestration.tools == ["srv__one"]
-    assert [tool["name"] for tool in agent.tools_seen[0] or []] == ["srv__one"]
+    assert [tool["name"] for tool in agent.requests_seen[0].tools or []] == [
+        "srv__one"
+    ]
 
 
 async def test_guard_releases_after_normal_completion_and_exception() -> None:
@@ -375,12 +362,7 @@ async def test_guard_releases_when_stream_is_closed_early() -> None:
             self.closed = False
 
         async def stream(
-            self,
-            messages: list[Message],
-            tools=None,
-            system=None,
-            max_tokens=None,
-            thinking_level=None,
+            self, request: GenerationRequest
         ) -> AsyncIterator[StreamChunk]:
             try:
                 yield TextDelta("partial")

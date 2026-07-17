@@ -290,23 +290,16 @@ text.
 `llm/client.py` — the abstraction + the provider registry, and **nothing
 SDK-specific** (importing it never pulls in a provider SDK):
 
+- **`GenerationRequest`** is the single shallow-immutable provider-generation
+  input. Its message/tool containers are borrowed and must not be mutated;
+  retries, timeouts, deadlines, cancellation, tracing, and persistence remain
+  with their execution owners.
 - **`LLMClient`** ABC with two call modes:
   ```python
-  async complete(
-      messages: list[Message],
-      tools: list[dict] | None = None,
-      system: str | None = None,
-      max_tokens: int | None = None,
-      response_schema: type | None = None,
-      thinking_level: str | None = None,
-  ) -> AssistantMessage
+  async complete(request: GenerationRequest) -> AssistantMessage
 
   async stream(
-      messages: list[Message],
-      tools: list[dict] | None = None,
-      system: str | None = None,
-      max_tokens: int | None = None,
-      thinking_level: str | None = None,
+      request: GenerationRequest,
   ) -> AsyncIterator[StreamChunk]
   ```
   `complete()` is the canonical completed-turn API and remains the path for
@@ -314,6 +307,8 @@ SDK-specific** (importing it never pulls in a provider SDK):
   token-streaming call mode for ordinary agent turns; the ABC fallback calls
   `complete()`, emits each final text block as a coarse `TextDelta`, then
   emits `StreamEnd(AssistantMessage)`. Native streaming providers override it.
+  Streaming rejects a non-`None` `response_schema` explicitly before making a
+  provider call.
 - **`StreamChunk`** is provider-agnostic and SDK-free:
   `TextDelta(text=...)` carries visible assistant text during generation, and
   `StreamEnd(message=...)` carries the fully assembled `AssistantMessage`.
@@ -342,8 +337,8 @@ models:
 
 - Renders the already-filtered tool list into compact system-prompt text:
   tool name, one-line description, and compressed JSON schema.
-- Calls the wrapped provider with `tools=None`, so endpoints without native
-  tool calling see only ordinary text.
+- Calls the wrapped provider with `request.tools=None`, so endpoints without
+  native tool calling see only ordinary text.
 - Parses one fenced or whole-response JSON action from visible prose and
   returns a normal `ToolUseBlock`; final prose remains normal `TextBlock`
   content.
@@ -361,10 +356,10 @@ same `AssistantMessage` contract before the agent loop sees them.
 store, MCP layer, and `models.yaml` validation remain provider-blind.
 
 **Structured output (`response_schema`).** Providers that support
-structured output (Gemini, OpenAI) honor a Pydantic class passed here
+structured output (Gemini, OpenAI) honor a Pydantic class carried by the request
 and return JSON conforming to its schema. The orchestrator uses this
-for its routing decision; the agent loop does not. Providers without
-native support may ignore the kwarg.
+for its routing decision; the agent loop does not. It is completion-only;
+streaming rejects it rather than silently ignoring it.
 
 **Thinking level (`thinking_level`).** `"low" | "medium" | "high"` (or
 `None` to leave the model default). The agent loop passes the orchestrator's
@@ -560,8 +555,8 @@ behavior, used by code paths that aren't orchestration-aware. When
 provided, the loop uses the list verbatim — this is how the route
 hands the orchestrator's filtered tool subset to the model.
 
-The **`thinking_level` parameter** is the deliberation seam. It is passed
-straight through to every `llm.complete()` call of the run; the loop never
+The **`thinking_level` parameter** is the deliberation seam. It is carried
+straight through on every generation request of the run; the loop never
 inspects it. `None` (the default) leaves the model's own default. The route
 supplies the orchestrator's chosen level here; see *Thinking level* under
 the Orchestration Layer.
@@ -767,7 +762,7 @@ adds fallback metadata for in-process callers.
    `orchestrator_prompt.md` file) + AVAILABLE MODELS block + AVAILABLE
    TOOLS block (live MCP inventory) + an optional CONVERSATION SO FAR
    block (see *Context-aware routing* below) + USER MESSAGE.
-2. Calls the orchestrator's own LLM client with
+2. Calls the orchestrator's own LLM client with a `GenerationRequest` carrying
    `response_schema=OrchestrationResult`. Tools are **not** exposed —
    the orchestrator must decide, not act.
 3. Parses the JSON response into `OrchestrationResult`. Strips any
@@ -781,7 +776,7 @@ adds fallback metadata for in-process callers.
 5. Returns `OrchestrationDecision(result=..., fallback_used=False)`.
 
 **Thinking level.** The route passes `result.thinking_level` to `run_agent()`,
-which forwards it to every `llm.complete()` call. The selected client's
+which forwards it on every `GenerationRequest`. The selected client's
 `ModelProfile` decides whether that value becomes a provider request hint
 (`hint-param`), is intentionally inert (`none`), or is represented by
 self-emitted reasoning tags (`think-tags`). The loop never branches on provider
@@ -1004,8 +999,8 @@ resolve a problem we hit; don't change them without understanding why.
     method drops unknown tool names and corrects unknown model_ids
     without raising the `fallback_used` flag. Fallback is reserved for
     cases where the orchestrator's LLM call itself failed.
-24. **The orchestrator gets no tools.** It must decide, not act. Calling
-    `complete()` with `tools=None` enforces this.
+24. **The orchestrator gets no tools.** It must decide, not act. Its
+    `GenerationRequest` carries `tools=None` to enforce this.
 25. **Orchestration is optional and degradable.** Missing config files,
     failed LLM calls, or bad outputs all degrade to the legacy
     (pre-orchestrator) behavior. The route checks
@@ -1023,7 +1018,7 @@ resolve a problem we hit; don't change them without understanding why.
     `required_api_key()` is preserved as a thin wrapper for legacy callers.
 28. **Thinking level is a routing dimension, not just a model choice.** The
     orchestrator emits `thinking_level` (`low`/`medium`/`high`) alongside
-    the model, and the loop passes it to every `complete()` call. This makes
+    the model, and the loop carries it on every `GenerationRequest`. This makes
     deliberation a per-request lever independent of model selection — cheap
     requests can shed thinking for latency, hard ones can buy more. `None`
     leaves the model default, so legacy callers are unaffected. The field is

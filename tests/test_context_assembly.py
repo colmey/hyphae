@@ -54,7 +54,7 @@ from agent.context import (
     estimate_tools_tokens,
     estimate_usage_tokens,
 )
-from llm.client import LLMClient
+from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     Message,
@@ -92,24 +92,14 @@ class RecordingLLM(LLMClient):
         self._script = list(script)
         self._summary_text = summary_text
         self._fail_summary = fail_summary
-        self.loop_messages: list[list[Message]] = []
-        self.summary_messages: list[list[Message]] = []
+        self.loop_requests: list[GenerationRequest] = []
+        self.summary_requests: list[GenerationRequest] = []
         self.summary_calls = 0
-        self.summary_had_tools: list[bool] = []
 
-    async def complete(
-        self,
-        messages,
-        tools=None,
-        system=None,
-        max_tokens=None,
-        response_schema=None,
-        thinking_level=None,
-    ) -> AssistantMessage:
-        if system == _SUMMARY_SYSTEM:
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        if request.system == _SUMMARY_SYSTEM:
             self.summary_calls += 1
-            self.summary_messages.append(list(messages))
-            self.summary_had_tools.append(tools is not None)
+            self.summary_requests.append(request)
             if self._fail_summary:
                 raise RuntimeError("summarizer backend down")
             return AssistantMessage(
@@ -117,7 +107,7 @@ class RecordingLLM(LLMClient):
                 stop_reason="end_turn",
                 usage=Usage(),
             )
-        self.loop_messages.append(list(messages))
+        self.loop_requests.append(request)
         if not self._script:
             raise AssertionError("RecordingLLM ran out of scripted responses")
         return self._script.pop(0)
@@ -372,8 +362,12 @@ async def test_compaction_strategy() -> None:
     )
     check(assembled.compacted, "over budget: compacted")
     check(llm.summary_calls == 1, "exactly one summarizer call")
-    check(llm.summary_had_tools == [False], "summarizer call carries no tools")
-    summary_prompt = llm.summary_messages[0][0]
+    check(llm.summary_requests[0].tools is None, "summarizer call carries no tools")
+    check(
+        llm.summary_requests[0].max_tokens == 64,
+        "summarizer request carries its output budget",
+    )
+    summary_prompt = llm.summary_requests[0].messages[0]
     summary_transcript = next(
         b.text for b in summary_prompt.content if isinstance(b, TextBlock)
     )
@@ -471,7 +465,7 @@ async def test_summarizer_failure_degrades_to_pass_through() -> None:
     )
     check(failing.summary_calls == 1, "summarizer was attempted once")
     check(
-        len(failing.loop_messages[0]) == len(session.messages) - 1,
+        len(failing.loop_requests[0].messages) == len(session.messages) - 1,
         "degraded call sent the full history",
     )
 
@@ -501,7 +495,7 @@ async def test_loop_uses_compacted_view_without_mutating_session_history() -> No
     ):
         events.append(event)
     done = next(e for e in events if isinstance(e, DoneEvent))
-    sent = llm.loop_messages[0]
+    sent = llm.loop_requests[0].messages
     check(done.reason == "end_turn", "compacted run completes end_turn")
     check(llm.summary_calls == 1, "one summarizer call for the over-budget view")
     check(len(sent) < len(before), "LLM saw the compacted view, not full history")

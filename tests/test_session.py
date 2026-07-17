@@ -8,10 +8,22 @@ import pytest
 
 from agent import InMemorySessionStore, SessionBusyError, SessionGuard
 from agent.session import SessionNotFoundError
-from llm.schemas import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock
+from llm.schemas import AssistantMessage, Role, TextBlock, ToolResultBlock, ToolUseBlock
 
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_append_assistant_text_owns_canonical_replay_shape() -> None:
+    session = await InMemorySessionStore().create()
+
+    message = session.append_assistant_text("replayed answer")
+
+    assert message.role is Role.ASSISTANT
+    assert len(message.content) == 1
+    assert isinstance(message.content[0], TextBlock)
+    assert message.content[0].text == "replayed answer"
+    assert session.messages == [message]
 
 
 async def test_session_round_trip_preserves_all_message_kinds() -> None:

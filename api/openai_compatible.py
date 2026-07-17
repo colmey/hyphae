@@ -9,7 +9,6 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import replace
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, Request
@@ -22,25 +21,25 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from agent import (
     DoneEvent,
     ErrorEvent,
-    SessionStore,
+    Session,
     TextEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
-from llm.schemas import AssistantMessage, TextBlock
-from orchestrator import LLMRegistry
 
 from .dependencies import (
-    get_registry,
     get_settings_obj,
-    get_store,
     get_turn_runner,
     require_api_key,
 )
-from .turn import TurnRequest, TurnRunner
+from .turn import PersistencePolicy, TurnRequest, TurnRunner
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+class _InvalidChatRequest(ValueError):
+    """Client-owned conversation content cannot form an executable turn."""
 
 
 class _ChatMessage(BaseModel):
@@ -137,7 +136,9 @@ def _strip_tool_blocks(text: str) -> str:
     return _TOOL_BLOCK_RE.sub("", text)
 
 
-def _prepare(messages: list[_ChatMessage]) -> tuple[str | None, list[tuple[str, str]], str | None]:
+def _prepare(
+    messages: list[_ChatMessage],
+) -> tuple[str | None, list[tuple[str, str]], str]:
     """Map OpenAI `messages[]` to (system_override, history, prompt).
 
     The final user message is the active prompt; earlier user/assistant turns
@@ -150,17 +151,22 @@ def _prepare(messages: list[_ChatMessage]) -> tuple[str | None, list[tuple[str, 
     for m in messages:
         if m.role not in ("user", "assistant"):
             continue
-        text = _text_of(m.content)
-        if m.role == "assistant":
-            text = _strip_tool_blocks(text)
-        convo.append((m.role, text))
+        convo.append((m.role, _text_of(m.content)))
 
-    last_user = next((i for i in range(len(convo) - 1, -1, -1) if convo[i][0] == "user"), None)
-    if last_user is None:
-        return system_override, convo, None
+    if not any(role == "user" for role, _text in convo):
+        raise _InvalidChatRequest("no user message found in 'messages'")
+    if convo[-1][0] != "user":
+        raise _InvalidChatRequest(
+            "the final conversational message must have role 'user'"
+        )
 
-    prompt = convo[last_user][1]
-    history = convo[:last_user] + convo[last_user + 1:]
+    prompt = convo[-1][1]
+    if not prompt:
+        raise _InvalidChatRequest("no user message found in 'messages'")
+    history = [
+        (role, _strip_tool_blocks(text) if role == "assistant" else text)
+        for role, text in convo[:-1]
+    ]
     return system_override, history, prompt
 
 
@@ -181,6 +187,14 @@ def _error_response(message: str, *, status: int = 400, err_type: str = "invalid
     )
 
 
+def _http_error_response(exc: StarletteHTTPException) -> JSONResponse:
+    """Preserve an HTTP exception in the OpenAI-compatible error envelope."""
+    err_type = (
+        "server_error" if exc.status_code >= 500 else "invalid_request_error"
+    )
+    return _error_response(str(exc.detail), status=exc.status_code, err_type=err_type)
+
+
 async def openai_auth_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Reshape a /v1 401 into the OpenAI error envelope; delegate everything else.
 
@@ -189,15 +203,6 @@ async def openai_auth_exception_handler(request: Request, exc: StarletteHTTPExce
     if exc.status_code == 401 and request.url.path.startswith("/v1"):
         return _error_response(exc.detail, status=401, err_type="invalid_request_error")
     return await http_exception_handler(request, exc)
-
-
-def _default_model(settings, registry: Optional[LLMRegistry]) -> str:
-    if registry is not None:
-        try:
-            return registry.default_id()
-        except Exception:
-            pass
-    return settings.llm_model
 
 
 def _completion_body(answer: str, model: str, usage, done_reason: str) -> dict:
@@ -230,7 +235,6 @@ def _chunk(cid: str, created: int, model: str, delta: dict, finish_reason: str |
 
 
 async def _stream(
-    model: str,
     runner: TurnRunner,
     turn: TurnRequest,
     tool_block_max_chars: int,
@@ -242,10 +246,10 @@ async def _stream(
     """
     cid = _completion_id()
     created = int(time.time())
-    yield {"data": json.dumps(_chunk(cid, created, model, {"role": "assistant"}, None))}
 
     done_reason: str | None = None
     failed = False
+    model: str | None = None
     pending_args: dict[str, Any] = {}  # tool_use_id -> input
 
     def server_error(message: str) -> dict[str, str]:
@@ -253,6 +257,10 @@ async def _stream(
 
     try:
         async with runner.open(turn) as execution:
+            model = execution.metadata.model_id
+            yield {"data": json.dumps(
+                _chunk(cid, created, model, {"role": "assistant"}, None)
+            )}
             async for event in execution.events:
                 if failed:
                     continue
@@ -284,6 +292,7 @@ async def _stream(
             failed = True
             yield server_error("completion stream ended without a terminal event")
         else:
+            assert model is not None
             yield {"data": json.dumps(_chunk(cid, created, model, {}, _finish_reason(done_reason)))}
     yield {"data": "[DONE]"}
 
@@ -291,9 +300,7 @@ async def _stream(
 @router.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_completions(
     request: Request,
-    store: SessionStore = Depends(get_store),
     settings = Depends(get_settings_obj),
-    registry: Optional[LLMRegistry] = Depends(get_registry),
     runner: TurnRunner = Depends(get_turn_runner),
 ):
     try:
@@ -309,40 +316,47 @@ async def chat_completions(
     if not req.messages:
         return _error_response("'messages' must be a non-empty array")
 
-    system_override, history, prompt = _prepare(req.messages)
-    if not prompt:
-        return _error_response("no user message found in 'messages'")
+    try:
+        runner.validate_model_id(req.model)
+    except StarletteHTTPException as exc:
+        return _http_error_response(exc)
 
-    reported_model = req.model or _default_model(settings, registry)
+    try:
+        system_override, history, prompt = _prepare(req.messages)
+    except _InvalidChatRequest as exc:
+        return _error_response(str(exc))
 
     # Fresh ephemeral session per request; the client owns durable history.
-    session = await store.create()
+    session = Session()
     for role, text in history:
         if role == "user":
             session.append_user(text)
         else:
-            session.append_assistant(AssistantMessage(content=[TextBlock(text=text)]))
+            session.append_assistant_text(text)
 
-    # `model` is a routing hint; the runner owns singleton dependencies.
+    # The runner owns singleton dependencies and resolves the executing model.
     turn = TurnRequest(
         prompt=prompt,
         session=session,
+        persistence=PersistencePolicy.EPHEMERAL,
         system_override=system_override,
         model_id=req.model,
+        stream=req.stream,
     )
 
     if req.stream:
         return EventSourceResponse(
             _stream(
-                reported_model,
                 runner,
-                replace(turn, stream=True),
+                turn,
                 settings.openai_tool_block_max_chars,
             )
         )
 
     try:
         result = await runner.run(turn)
+    except StarletteHTTPException as exc:
+        return _http_error_response(exc)
     except Exception as e:  # noqa: BLE001 -- never leak a stack trace to the client.
         logger.exception("error handling /v1/chat/completions")
         return _error_response(str(e), status=500, err_type="server_error")
@@ -355,16 +369,23 @@ async def chat_completions(
         )
 
     return JSONResponse(
-        _completion_body(result.answer, reported_model, result.usage, result.done_reason)
+        _completion_body(
+            result.answer,
+            result.metadata.model_id,
+            result.usage,
+            result.done_reason,
+        )
     )
 
 
 @router.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models(
-    settings = Depends(get_settings_obj),
-    registry: Optional[LLMRegistry] = Depends(get_registry),
+    runner: TurnRunner = Depends(get_turn_runner),
 ) -> JSONResponse:
-    ids = registry.model_ids if registry is not None else [settings.llm_model]
+    try:
+        ids = runner.available_model_ids()
+    except StarletteHTTPException as exc:
+        return _http_error_response(exc)
     created = int(time.time())
     data = [
         {"id": mid, "object": "model", "created": created, "owned_by": "hyphae"}

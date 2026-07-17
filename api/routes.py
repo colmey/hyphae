@@ -29,7 +29,7 @@ from .dependencies import (
     require_api_key,
 )
 from .schemas import HealthResponse
-from .turn import TurnRequest, TurnRunner
+from .turn import PersistencePolicy, TurnRequest, TurnRunner
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -81,7 +81,11 @@ async def chat(
     prompt = await _prompt_from_body(request)
     session = await _session_from_header(request, store)
 
-    result = await runner.run(TurnRequest(prompt=prompt, session=session))
+    result = await runner.run(TurnRequest(
+        prompt=prompt,
+        session=session,
+        persistence=PersistencePolicy.PERSISTENT,
+    ))
     return PlainTextResponse(
         result.answer,
         headers={"X-Session-Id": session.session_id, "X-Done-Reason": result.done_reason},
@@ -106,7 +110,12 @@ async def chat_stream(
     async def _events() -> AsyncIterator[dict]:
         step = 0
         try:
-            turn = TurnRequest(prompt=prompt, session=session, stream=True)
+            turn = TurnRequest(
+                prompt=prompt,
+                session=session,
+                persistence=PersistencePolicy.PERSISTENT,
+                stream=True,
+            )
             async with runner.open(turn) as execution:
                 async for event in execution.events:
                     step += 1

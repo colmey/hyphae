@@ -46,7 +46,7 @@ pytestmark = [
 
 
 # Tool-free prompts: each resolves in a single turn (user + assistant), so an
-# isolated session ends with exactly 2 messages.
+# isolated native session ends with exactly 2 messages.
 DISTINCT_PROMPTS = [
     "What is 11 + 11? Reply with just the number.",
     "What is 22 + 22? Reply with just the number.",
@@ -76,47 +76,47 @@ async def test_configured_request_concurrency() -> None:
             print("Scenario 1: concurrent /chat on DISTINCT sessions -> isolated")
             print("=" * 72)
             responses = await asyncio.gather(*(
-                client.post("/chat", json={"prompt": p})
+                client.post("/chat", content=p)
                 for p in DISTINCT_PROMPTS
             ))
-            bodies = []
             for r in responses:
                 r.raise_for_status()
-                bodies.append(r.json())
 
-            session_ids = [b["session_id"] for b in bodies]
+            session_ids = [r.headers["X-Session-Id"] for r in responses]
             assert len(set(session_ids)) == len(session_ids), (
                 f"expected all-distinct session_ids, got {session_ids}"
             )
-            for b in bodies:
+            for session_id, response in zip(session_ids, responses):
                 # 2 == user + assistant. Anything larger would mean another
                 # request's turns bled into this session.
-                assert b["message_count"] == 2, (
-                    f"session {b['session_id']} has {b['message_count']} messages; "
+                session = await app.state.store.get(session_id)
+                assert len(session.messages) == 2, (
+                    f"session {session_id} has {len(session.messages)} messages; "
                     "expected 2 (history bled across concurrent requests?)"
                 )
-                assert b["done_reason"] == "end_turn", b["done_reason"]
-            for sid, b in zip(session_ids, bodies):
-                ans = b["response"].replace("\n", " ")[:40]
-                print(f"  {sid}: msgs={b['message_count']} -> {ans!r}")
-            print(f"  {len(bodies)} concurrent requests, all isolated.\n")
+                assert response.headers["X-Done-Reason"] == "end_turn"
+                assert response.text.strip()
+                ans = response.text.replace("\n", " ")[:40]
+                print(f"  {session_id}: msgs={len(session.messages)} -> {ans!r}")
+            print(f"  {len(responses)} concurrent requests, all isolated.\n")
 
             # ----- Scenario 2: same session_id is guarded (409) -----
             print("=" * 72)
             print("Scenario 2: concurrent /chat on the SAME session_id -> 409 guard")
             print("=" * 72)
             seed = await client.post(
-                "/chat", json={"prompt": "What is 1 + 1? Reply with just the number."}
+                "/chat", content="What is 1 + 1? Reply with just the number."
             )
             seed.raise_for_status()
-            session_id = seed.json()["session_id"]
+            session_id = seed.headers["X-Session-Id"]
             print(f"  seeded session: {session_id}")
 
             overlapping = await asyncio.gather(*(
-                client.post("/chat", json={
-                    "prompt": f"What is {i} + {i}? Reply with just the number.",
-                    "commands": {"session": session_id},
-                })
+                client.post(
+                    "/chat",
+                    content=f"What is {i} + {i}? Reply with just the number.",
+                    headers={"X-Session-Id": session_id},
+                )
                 for i in range(SAME_SESSION_FANOUT)
             ))
             statuses = [r.status_code for r in overlapping]
@@ -138,6 +138,10 @@ async def test_configured_request_concurrency() -> None:
             for r in overlapping:
                 if r.status_code == 409:
                     assert "processing another request" in r.json()["detail"]
+                else:
+                    assert r.headers["X-Session-Id"] == session_id
+                    assert r.headers["X-Done-Reason"] == "end_turn"
+                    assert r.text.strip()
             print("  same-session overlap correctly rejected with 409.\n")
 
             print("concurrency smoke test passed.")

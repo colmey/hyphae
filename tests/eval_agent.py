@@ -38,7 +38,7 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from api.turn import TurnRequest, TurnRunner
+from api.turn import PersistencePolicy, TurnRequest, TurnRunner
 from config import get_settings
 from llm.client import LLMClient, build_llm_client
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
@@ -332,6 +332,7 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
         turn = TurnRequest(
             prompt=case["prompt"],
             session=session,
+            persistence=PersistencePolicy.PERSISTENT,
             system_override=(case.get("run") or {}).get("system"),
         )
         async with runner.open(turn) as execution:

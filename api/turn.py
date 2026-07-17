@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import HTTPException
@@ -33,15 +34,27 @@ from .schemas import TokenUsage
 logger = logging.getLogger(__name__)
 
 
+class PersistencePolicy(Enum):
+    """Whether a turn publishes its session mutations to the native store."""
+
+    PERSISTENT = "persistent"
+    EPHEMERAL = "ephemeral"
+
+
 @dataclass(frozen=True)
 class TurnRequest:
     """All request-scoped input needed to execute one turn."""
 
     prompt: str
     session: Session
+    persistence: PersistencePolicy
     system_override: str | None = None
     model_id: str | None = None
     stream: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.persistence, PersistencePolicy):
+            raise TypeError("persistence must be a PersistencePolicy")
 
 
 @dataclass(frozen=True)
@@ -123,6 +136,33 @@ class TurnRunner:
     def __post_init__(self) -> None:
         object.__setattr__(self, "limits", RunLimits.from_settings(self.settings))
 
+    def available_model_ids(self) -> list[str]:
+        """Return the model IDs accepted by the OpenAI-compatible boundary."""
+        try:
+            if self.registry is not None:
+                return self.registry.model_ids
+            return [self.settings.llm_model]
+        except Exception as exc:
+            logger.exception("failed to read model inventory")
+            raise HTTPException(
+                status_code=500,
+                detail="model inventory unavailable",
+            ) from exc
+
+    def validate_model_id(self, model_id: str | None) -> None:
+        """Reject an explicit model ID that this runner cannot execute."""
+        if model_id is None:
+            return
+        available = self.available_model_ids()
+        if model_id not in available:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"invalid model {model_id!r}; available model IDs: "
+                    f"{', '.join(available)}"
+                ),
+            )
+
     async def _resolve_routing(
         self,
         request: TurnRequest,
@@ -152,12 +192,13 @@ class TurnRunner:
         if decision.fallback_used:
             context.logger.info("orchestration fallback in effect: %s", decision.fallback_reason)
 
-        chosen_id = (
-            request.model_id
-            if request.model_id and request.model_id in self.registry.model_ids
-            else result.selected_model_id
-        )
-        resolved_id, selected_llm = self.registry.get_or_default(chosen_id)
+        if request.model_id is not None:
+            resolved_id = request.model_id
+            selected_llm = self.registry.get(resolved_id)
+        else:
+            resolved_id, selected_llm = self.registry.get_or_default(
+                result.selected_model_id
+            )
         try:
             model_entry = self.registry.get_entry(resolved_id)
         except (AttributeError, KeyError):
@@ -216,11 +257,18 @@ class TurnRunner:
             yield await context.emit(DoneEvent(reason="deadline_exceeded", iterations=0))
             return
 
+        if request.persistence is PersistencePolicy.PERSISTENT:
+            store = self.store
+        elif request.persistence is PersistencePolicy.EPHEMERAL:
+            store = None
+        else:  # Defensive against future enum members.
+            raise ValueError(f"unsupported persistence policy: {request.persistence!r}")
+
         agent_events = run_agent(
             session=request.session,
             llm=routing.llm,
             mcp=self.mcp,
-            store=self.store,
+            store=store,
             system=routing.system_prompt,
             tools=routing.tools,
             thinking_level=routing.thinking_level,
@@ -246,6 +294,7 @@ class TurnRunner:
     @asynccontextmanager
     async def open(self, request: TurnRequest) -> AsyncIterator[TurnExecution]:
         """Claim a session and hold it through routing, iteration, and cleanup."""
+        self.validate_model_id(request.model_id)
         try:
             async with self.guard.claim(request.session.session_id):
                 context = RunContext.start(

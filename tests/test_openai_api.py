@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
 import pytest
 
+from agent import InMemorySessionStore, Session
+from api import openai_compatible
 from llm.client import LLMClient
-from llm.schemas import AssistantMessage, StreamChunk, StreamEnd, TextBlock, TextDelta, Usage
+from llm.schemas import (
+    AssistantMessage,
+    Role,
+    StreamChunk,
+    StreamEnd,
+    TextBlock,
+    TextDelta,
+    Usage,
+)
 from config import load_models_config
 from orchestrator import LLMRegistry
+from orchestrator.schemas import OrchestrationDecision, OrchestrationResult
 from tests._app_support import wired_app
 
 
@@ -20,10 +32,14 @@ class FakeLLM(LLMClient):
     def __init__(self) -> None:
         self.complete_calls = 0
         self.stream_calls = 0
+        self.messages_seen: list[list[Any]] = []
+        self.systems_seen: list[str | None] = []
 
     async def complete(self, messages, tools=None, system=None, max_tokens=None,
                        response_schema=None, thinking_level=None) -> AssistantMessage:
         self.complete_calls += 1
+        self.messages_seen.append(list(messages))
+        self.systems_seen.append(system)
         return AssistantMessage(
             content=[TextBlock(text="Hello"), TextBlock(text=", world")],
             stop_reason="end_turn",
@@ -34,6 +50,8 @@ class FakeLLM(LLMClient):
     async def stream(self, messages, tools=None, system=None, max_tokens=None,
                      thinking_level=None) -> AsyncIterator[StreamChunk]:
         self.stream_calls += 1
+        self.messages_seen.append(list(messages))
+        self.systems_seen.append(system)
         yield TextDelta(text="Hello")
         yield TextDelta(text=", ")
         yield TextDelta(text="world")
@@ -42,6 +60,58 @@ class FakeLLM(LLMClient):
             stop_reason="end_turn",
             model="fake",
             usage=Usage(input_tokens=11, output_tokens=3, total_tokens=14),
+        ))
+
+
+class CountingMCP:
+    connected_servers: list[str] = []
+
+    def __init__(self) -> None:
+        self.inventory_reads = 0
+
+    def get_tools_for_llm(self) -> list[dict[str, Any]]:
+        self.inventory_reads += 1
+        return []
+
+    def list_tools(self) -> list[Any]:
+        return []
+
+
+class RegistryStub:
+    model_ids = ["selected", "requested"]
+
+    def __init__(self, clients: dict[str, LLMClient]) -> None:
+        self.clients = clients
+
+    def get_or_default(self, model_id: str | None) -> tuple[str, LLMClient]:
+        resolved = model_id if model_id in self.model_ids else "selected"
+        return resolved, self.clients[resolved]
+
+    def get(self, model_id: str) -> LLMClient:
+        return self.clients[model_id]
+
+    def get_entry(self, _model_id: str) -> Any:
+        return SimpleNamespace(max_tokens=256, context_window=4096)
+
+
+class BrokenRegistry:
+    @property
+    def model_ids(self) -> list[str]:
+        raise RuntimeError("private registry failure")
+
+
+class SelectingOrchestrator:
+    def __init__(self, selected_model_id: str = "selected") -> None:
+        self.selected_model_id = selected_model_id
+        self.calls = 0
+
+    async def decide(self, prompt, tools, preferences=None, history=None,
+                     timeout=None, log=None) -> OrchestrationDecision:
+        self.calls += 1
+        return OrchestrationDecision(result=OrchestrationResult(
+            selected_model_id=self.selected_model_id,
+            selected_tools=[],
+            generated_system_prompt="routed system",
         ))
 
 
@@ -63,13 +133,40 @@ async def test_models_returns_registry_in_openai_list_shape(asgi_client) -> None
     assert all(model["object"] == "model" for model in body["data"])
 
 
+@pytest.mark.parametrize("path", ["/v1/models", "/v1/chat/completions"])
+async def test_model_inventory_failure_is_sanitized(asgi_client, path: str) -> None:
+    with wired_app(FakeLLM(), registry=BrokenRegistry()) as (app, _settings):
+        client = asgi_client(app)
+        if path.endswith("completions"):
+            response = await client.post(
+                path,
+                json={
+                    "model": "requested",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+        else:
+            response = await client.get(path)
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "message": "model inventory unavailable",
+            "type": "server_error",
+            "param": None,
+            "code": None,
+        }
+    }
+    assert "private registry failure" not in response.text
+
+
 async def test_non_stream_completion_shape_and_usage(asgi_client) -> None:
     llm = FakeLLM()
-    with wired_app(llm) as (app, _settings):
+    with wired_app(llm) as (app, settings):
         response = await asgi_client(app).post(
             "/v1/chat/completions",
             json={
-                "model": "whatever",
+                "model": settings.llm_model,
                 "messages": [
                     {"role": "system", "content": "You are terse."},
                     {"role": "user", "content": "Hi there"},
@@ -80,7 +177,7 @@ async def test_non_stream_completion_shape_and_usage(asgi_client) -> None:
     response.raise_for_status()
     body = response.json()
     assert body["object"] == "chat.completion"
-    assert body["model"] == "whatever"
+    assert body["model"] == settings.llm_model
     choice = body["choices"][0]
     assert choice["message"] == {"role": "assistant", "content": "Hello, world"}
     assert choice["finish_reason"] == "stop"
@@ -106,6 +203,7 @@ async def test_stream_completion_emits_deltas_finish_and_done(asgi_client, parse
     assert payloads[-1] == "[DONE]"
     frames = [payload for payload in payloads if payload != "[DONE]"]
     assert all(frame["object"] == "chat.completion.chunk" for frame in frames)
+    assert all(frame["model"] == _settings.llm_model for frame in frames)
     assert frames[0]["choices"][0]["delta"]["role"] == "assistant"
     deltas = [frame["choices"][0]["delta"].get("content", "") for frame in frames]
     assert deltas.count("Hello") == 1
@@ -120,3 +218,217 @@ async def test_empty_messages_returns_openai_error(asgi_client) -> None:
 
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_repeated_v1_calls_never_publish_sessions(
+    asgi_client, parse_sse, stream: bool
+) -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, _settings):
+        initial_ids = app.state.store.ids()
+        client = asgi_client(app)
+        for _ in range(4):
+            payload = {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": stream,
+            }
+            if stream:
+                async with client.stream(
+                    "POST", "/v1/chat/completions", json=payload
+                ) as response:
+                    assert response.status_code == 200
+                    events = parse_sse("".join([
+                        chunk async for chunk in response.aiter_text()
+                    ]))
+                    assert events[-1] == "[DONE]"
+            else:
+                response = await client.post("/v1/chat/completions", json=payload)
+                response.raise_for_status()
+
+        assert len(app.state.store) == len(initial_ids)
+        assert app.state.store.ids() == initial_ids
+
+
+async def test_v1_traffic_cannot_evict_native_session_at_capacity(asgi_client) -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, _settings):
+        app.state.store = InMemorySessionStore(max_count=1)
+        client = asgi_client(app)
+        native = await client.post("/chat", content="native first turn")
+        native.raise_for_status()
+        session_id = native.headers["X-Session-Id"]
+
+        for _ in range(5):
+            response = await client.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "ephemeral"}]},
+            )
+            response.raise_for_status()
+
+        assert app.state.store.ids() == [session_id]
+        continued = await client.post(
+            "/chat",
+            content="native follow-up",
+            headers={"X-Session-Id": session_id},
+        )
+        continued.raise_for_status()
+        assert continued.headers["X-Session-Id"] == session_id
+        assert len((await app.state.store.get(session_id)).messages) == 4
+
+
+@pytest.mark.parametrize(
+    ("requested_model", "expected_model"),
+    [("requested", "requested"), (None, "selected")],
+)
+@pytest.mark.parametrize("stream", [False, True])
+async def test_reports_the_model_that_orchestration_actually_executes(
+    asgi_client,
+    parse_sse,
+    requested_model: str | None,
+    expected_model: str,
+    stream: bool,
+) -> None:
+    selected = FakeLLM()
+    requested = FakeLLM()
+    registry = RegistryStub({"selected": selected, "requested": requested})
+    orchestrator = SelectingOrchestrator()
+    with wired_app(selected, registry=registry) as (app, _settings):
+        app.state.orchestrator = orchestrator
+        payload: dict[str, Any] = {
+            "messages": [{"role": "user", "content": "route me"}],
+            "stream": stream,
+        }
+        if requested_model is not None:
+            payload["model"] = requested_model
+        response = await asgi_client(app).post("/v1/chat/completions", json=payload)
+
+    response.raise_for_status()
+    if stream:
+        frames = [event for event in parse_sse(response.text) if event != "[DONE]"]
+        assert frames
+        assert all(frame["model"] == expected_model for frame in frames)
+    else:
+        assert response.json()["model"] == expected_model
+    assert orchestrator.calls == 1
+    executed = selected if expected_model == "selected" else requested
+    unused = requested if expected_model == "selected" else selected
+    assert executed.complete_calls + executed.stream_calls == 1
+    assert unused.complete_calls + unused.stream_calls == 0
+
+
+@pytest.mark.parametrize("orchestrated", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_unknown_model_is_rejected_before_session_inventory_or_execution(
+    asgi_client,
+    monkeypatch: pytest.MonkeyPatch,
+    orchestrated: bool,
+    stream: bool,
+) -> None:
+    llm = FakeLLM()
+    mcp = CountingMCP()
+    created_sessions = 0
+    real_session = Session
+
+    def counting_session() -> Session:
+        nonlocal created_sessions
+        created_sessions += 1
+        return real_session()
+
+    monkeypatch.setattr(openai_compatible, "Session", counting_session)
+    registry = RegistryStub({"selected": llm, "requested": llm}) if orchestrated else None
+    orchestrator = SelectingOrchestrator() if orchestrated else None
+    with wired_app(llm, mcp=mcp, registry=registry) as (app, settings):
+        app.state.orchestrator = orchestrator
+        store = app.state.store
+        initial_ids = store.ids()
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={
+                "model": "bogus",
+                "messages": [{"role": "user", "content": "must not run"}],
+                "stream": stream,
+            },
+        )
+
+    available = "selected, requested" if orchestrated else settings.llm_model
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "message": f"invalid model 'bogus'; available model IDs: {available}",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": None,
+        }
+    }
+    assert created_sessions == 0
+    assert store.ids() == initial_ids
+    assert mcp.inventory_reads == 0
+    assert orchestrator is None or orchestrator.calls == 0
+    assert llm.complete_calls == 0
+    assert llm.stream_calls == 0
+
+
+async def test_ordered_history_replays_without_altering_user_content(asgi_client) -> None:
+    llm = FakeLLM()
+    tool_block = (
+        "\n<details>\n<summary>🔧 web__search ✅</summary>\n"
+        "tool output\n</details>\n"
+    )
+    user_text = f"user-authored block stays{tool_block}after"
+    with wired_app(llm) as (app, _settings):
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "system", "content": "system one"},
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": f"checked{tool_block}done"},
+                    {"role": "tool", "content": "ignored unsupported role"},
+                    {"role": "system", "content": "system two"},
+                    {"role": "user", "content": "active prompt"},
+                ]
+            },
+        )
+
+    response.raise_for_status()
+    seen = llm.messages_seen[0]
+    assert [message.role for message in seen] == [Role.USER, Role.ASSISTANT, Role.USER]
+    assert seen[0].content[0].text == user_text
+    assert seen[1].content[0].text == "checkeddone"
+    assert seen[2].content[0].text == "active prompt"
+    assert llm.systems_seen == ["system one\n\nsystem two"]
+
+
+async def test_trailing_assistant_is_rejected_instead_of_reordered(asgi_client) -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, _settings):
+        store = app.state.store
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "question"},
+                    {"role": "assistant", "content": "prefill"},
+                ],
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == (
+        "the final conversational message must have role 'user'"
+    )
+    assert llm.complete_calls == llm.stream_calls == 0
+    assert len(store) == 0
+
+
+async def test_assistant_only_request_preserves_no_user_error(asgi_client) -> None:
+    with wired_app(FakeLLM()) as (app, _settings):
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "assistant", "content": "hello"}]},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "no user message found in 'messages'"

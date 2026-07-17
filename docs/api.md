@@ -167,8 +167,9 @@ loop iteration. This endpoint streams activity, not provider tokens.
 An **OpenAI-compatible** adapter for OpenWebUI, LibreChat, and the `openai` SDK.
 Point the client's base URL at `/v1`.
 
-**Stateless.** Each request seeds an ephemeral session from `messages`; the
-client owns durable history, so same-session 409 never applies.
+**Stateless.** Each request seeds a new ephemeral session from `messages`; the
+client owns durable history, and `/v1` never creates, saves, or evicts entries
+in the native bounded session store. Same-session 409 therefore never applies.
 
 **Request** (standard OpenAI body; unknown fields like `temperature`, `top_p`
 are tolerated and ignored):
@@ -188,12 +189,14 @@ Content-Type: application/json
 ```
 
 - A `role: "system"` message becomes the per-call system override (multiple are
-  concatenated). `user`/`assistant` messages become the conversation history;
-  the final `user` message is the turn that runs.
-- `model`, when it matches a `config/models.yaml` model_id, pins that model
-  (the orchestrator still selects tools and the system prompt). Otherwise it is
-  a free-form label and the orchestrator decides everything. Use
-  [`GET /v1/models`](#get-v1models) to discover routable ids.
+  concatenated). Ordered `user`/`assistant` messages become conversation
+  history, and the final supported conversational message must be `user`; that
+  message is the active turn. Assistant-prefill ordering is rejected with 400
+  rather than moved ahead of an earlier user message.
+- `model`, when supplied, must exactly match an ID advertised by
+  [`GET /v1/models`](#get-v1models) and pins that model (the orchestrator still
+  selects tools and the system prompt). An unknown explicit ID returns 400;
+  omitted `model` leaves model selection to the orchestrator.
 - `messages` must be a non-empty array containing at least one `user` message.
 
 **Response (200) — non-stream** (`object: "chat.completion"`):
@@ -216,6 +219,8 @@ Content-Type: application/json
 `no_progress → stop`. Unrecoverable or unknown terminal reasons fail closed
 instead of being presented as a successful stop.
 Provider-extracted reasoning is not included in the `message.content` payload.
+The response `model` is the registry ID that actually executed, including when
+the request omitted `model` and orchestration selected it.
 
 **Response (200) — stream** (`stream: true`, OpenWebUI's default): a
 `text/event-stream` of `chat.completion.chunk` frames, terminated by
@@ -237,9 +242,11 @@ data: [DONE]
 ```
 
 Reasoning events are skipped by the OpenAI-compatible stream mapper; only
-visible assistant text becomes `delta.content`. If the model fails after the
-stream opens, any prior content remains visible, followed by one OpenAI error
-envelope and `[DONE]`; no successful `finish_reason` frame is emitted.
+visible assistant text becomes `delta.content`. Every chunk's `model` is the
+registry ID that actually executed. The turn is resolved before the initial
+assistant-role chunk is emitted. If the model fails after the stream opens, any
+prior content remains visible, followed by one OpenAI error envelope and
+`[DONE]`; no successful `finish_reason` frame is emitted.
 
 **Tool-call visibility (stream only).** OpenAI clients render only
 `delta.content`, so completed server-side tool calls are folded into collapsible
@@ -249,6 +256,13 @@ only.
 
 ```json
 {"error": {"message": "'messages' must be a non-empty array", "type": "invalid_request_error", "param": null, "code": null}}
+```
+
+An unknown explicit model is also a 400 and names both the invalid ID and the
+advertised inventory:
+
+```json
+{"error": {"message": "invalid model 'bogus'; available model IDs: gemini-flash, gemini-pro", "type": "invalid_request_error", "param": null, "code": null}}
 ```
 
 Bad input returns **400**; unexpected internal failure, including an

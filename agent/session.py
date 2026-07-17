@@ -101,6 +101,13 @@ class Session:
         self.updated_at = _utc_now()
         return msg
 
+    def append_assistant_text(self, text: str) -> Message:
+        """Append replayed assistant text in the canonical session shape."""
+        msg = Message.assistant([TextBlock(text=text)])
+        self.messages.append(msg)
+        self.updated_at = _utc_now()
+        return msg
+
     def append_tool_results(self, results: list[ToolResultBlock]) -> Message:
         if not results:
             raise ValueError("append_tool_results requires at least one result")

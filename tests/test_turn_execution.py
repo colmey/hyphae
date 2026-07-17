@@ -13,8 +13,8 @@ from typing import Any, AsyncIterator
 import pytest
 from fastapi import HTTPException
 
-from agent import DoneEvent, OrchestrationDecisionEvent, SessionGuard, Tracer
-from api.turn import TurnRequest, TurnRunner
+from agent import DoneEvent, OrchestrationDecisionEvent, Session, SessionGuard, Tracer
+from api.turn import PersistencePolicy, TurnRequest, TurnRunner
 from config import Settings
 from llm.client import LLMClient
 from llm.schemas import (
@@ -188,9 +188,9 @@ async def test_busy_session_rejects_before_inventory_or_routing() -> None:
     runner = _runner(agent=agent, mcp=mcp, orchestrator=orchestrator, registry=registry)
     session = await runner.store.create()
 
-    async with runner.open(TurnRequest("first", session)):
+    async with runner.open(TurnRequest("first", session, PersistencePolicy.PERSISTENT)):
         with pytest.raises(HTTPException) as exc_info:
-            await runner.run(TurnRequest("second", session))
+            await runner.run(TurnRequest("second", session, PersistencePolicy.PERSISTENT))
         assert exc_info.value.status_code == 409
 
     assert orchestrator.calls == 1
@@ -218,8 +218,8 @@ async def test_distinct_sessions_execute_concurrently() -> None:
     second = await runner.store.create()
 
     results = await asyncio.wait_for(asyncio.gather(
-        runner.run(TurnRequest("one", first)),
-        runner.run(TurnRequest("two", second)),
+        runner.run(TurnRequest("one", first, PersistencePolicy.PERSISTENT)),
+        runner.run(TurnRequest("two", second, PersistencePolicy.PERSISTENT)),
     ), timeout=0.5)
 
     assert [result.answer for result in results] == ["done", "done"]
@@ -246,7 +246,7 @@ async def test_routing_timeout_falls_back_while_turn_budget_remains() -> None:
     session = await runner.store.create()
 
     started = time.perf_counter()
-    result = await runner.run(TurnRequest("hello", session))
+    result = await runner.run(TurnRequest("hello", session, PersistencePolicy.PERSISTENT))
     elapsed = time.perf_counter() - started
 
     assert result.answer == "done"
@@ -276,7 +276,7 @@ async def test_routing_consumes_absolute_deadline_and_skips_agent_model() -> Non
     )
     session = await runner.store.create()
 
-    result = await runner.run(TurnRequest("hello", session))
+    result = await runner.run(TurnRequest("hello", session, PersistencePolicy.PERSISTENT))
 
     assert result.done_reason == "deadline_exceeded"
     assert agent.calls == 0
@@ -303,7 +303,9 @@ async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> 
     )
     session = await runner.store.create()
 
-    result = await runner.run(TurnRequest("use a tool", session))
+    result = await runner.run(TurnRequest(
+        "use a tool", session, PersistencePolicy.PERSISTENT
+    ))
 
     assert mcp.inventory_reads == 1
     assert "srv__one" in router.prompt
@@ -319,15 +321,17 @@ async def test_guard_releases_after_normal_completion_and_exception() -> None:
     runner = _runner(agent=agent, mcp=mcp, settings=_settings(orchestration_enabled=False))
     session = await runner.store.create()
 
-    await runner.run(TurnRequest("normal", session))
+    await runner.run(TurnRequest("normal", session, PersistencePolicy.PERSISTENT))
     assert runner.guard.in_flight() == set()
 
     mcp.fail_next_inventory = True
     with pytest.raises(RuntimeError, match="inventory unavailable"):
-        await runner.run(TurnRequest("raises", session))
+        await runner.run(TurnRequest("raises", session, PersistencePolicy.PERSISTENT))
     assert runner.guard.in_flight() == set()
 
-    await runner.run(TurnRequest("after exception", session))
+    await runner.run(TurnRequest(
+        "after exception", session, PersistencePolicy.PERSISTENT
+    ))
     assert agent.calls == 2
 
 
@@ -349,7 +353,9 @@ async def test_guard_releases_when_stream_is_closed_early() -> None:
     runner = _runner(agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False))
     session = await runner.store.create()
 
-    async with runner.open(TurnRequest("stream", session, stream=True)) as execution:
+    async with runner.open(TurnRequest(
+        "stream", session, PersistencePolicy.PERSISTENT, stream=True
+    )) as execution:
         event = await anext(execution.events)
         assert event.type == "text"
 
@@ -380,7 +386,9 @@ async def test_active_task_cancellation_releases_guard() -> None:
         registry=RegistryStub(agent),
     )
     session = await runner.store.create()
-    task = asyncio.create_task(runner.run(TurnRequest("cancel", session)))
+    task = asyncio.create_task(runner.run(TurnRequest(
+        "cancel", session, PersistencePolicy.PERSISTENT
+    )))
     await orchestrator.started.wait()
 
     task.cancel()
@@ -420,12 +428,93 @@ async def test_legacy_metadata_reports_executing_model_without_decision() -> Non
     runner = _runner(agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False))
     session = await runner.store.create()
 
-    request = TurnRequest("hello", session, model_id="request-label")
+    request = TurnRequest(
+        "hello",
+        session,
+        PersistencePolicy.PERSISTENT,
+        model_id="legacy-executing-model",
+    )
     async with runner.open(request) as execution:
         events = [event async for event in execution.events]
 
-    result = await runner.run(TurnRequest("again", session, model_id="request-label"))
+    result = await runner.run(TurnRequest(
+        "again",
+        session,
+        PersistencePolicy.PERSISTENT,
+        model_id="legacy-executing-model",
+    ))
 
     assert not any(isinstance(event, OrchestrationDecisionEvent) for event in events)
     assert result.metadata.model_id == "legacy-executing-model"
     assert result.metadata.orchestration is None
+
+
+async def test_model_inventory_uses_registry_or_legacy_setting() -> None:
+    agent = AnswerLLM()
+    legacy = _runner(
+        agent=agent,
+        mcp=CountingMCP(),
+        settings=_settings(orchestration_enabled=False),
+    )
+    orchestrated = _runner(
+        agent=agent,
+        mcp=CountingMCP(),
+        orchestrator=FakeOrchestrator(),
+        registry=RegistryStub(agent),
+    )
+
+    assert legacy.available_model_ids() == ["legacy-executing-model"]
+    assert orchestrated.available_model_ids() == ["agent", "router"]
+
+
+async def test_explicit_unknown_model_is_rejected_before_turn_setup() -> None:
+    agent = AnswerLLM()
+    mcp = CountingMCP()
+    orchestrator = FakeOrchestrator()
+    runner = _runner(
+        agent=agent,
+        mcp=mcp,
+        orchestrator=orchestrator,
+        registry=RegistryStub(agent),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await runner.run(TurnRequest(
+            "hello",
+            Session(),
+            PersistencePolicy.EPHEMERAL,
+            model_id="unknown",
+        ))
+
+    assert exc_info.value.status_code == 400
+    assert mcp.inventory_reads == 0
+    assert orchestrator.calls == 0
+    assert agent.calls == 0
+
+
+async def test_ephemeral_turn_does_not_publish_session_to_store() -> None:
+    agent = AnswerLLM()
+    runner = _runner(
+        agent=agent,
+        mcp=CountingMCP(),
+        settings=_settings(orchestration_enabled=False),
+    )
+    original_ids = runner.store.ids()  # type: ignore[attr-defined]
+
+    result = await runner.run(TurnRequest(
+        "hello",
+        Session(),
+        PersistencePolicy.EPHEMERAL,
+    ))
+
+    assert result.answer == "done"
+    assert runner.store.ids() == original_ids  # type: ignore[attr-defined]
+
+
+async def test_turn_request_rejects_untyped_persistence_policy() -> None:
+    with pytest.raises(TypeError, match="persistence must be a PersistencePolicy"):
+        TurnRequest(
+            "hello",
+            Session(),
+            "persistent",  # type: ignore[arg-type]
+        )

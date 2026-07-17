@@ -8,11 +8,18 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from agent import DoneEvent, ErrorEvent, Session, TextEvent
 from api.openai_compatible import _FINISH_REASONS, _finish_reason, _stream, chat_completions
 from api.schemas import TokenUsage
-from api.turn import TurnExecution, TurnMetadata, TurnRequest, TurnResult
+from api.turn import (
+    PersistencePolicy,
+    TurnExecution,
+    TurnMetadata,
+    TurnRequest,
+    TurnResult,
+)
 
 
 class _EventsRunner:
@@ -38,6 +45,13 @@ class _RunRunner:
     def __init__(self, done_reason: str) -> None:
         self.done_reason = done_reason
 
+    def available_model_ids(self) -> list[str]:
+        return ["test-model"]
+
+    def validate_model_id(self, model_id: str | None) -> None:
+        if model_id is not None and model_id not in self.available_model_ids():
+            raise HTTPException(status_code=400, detail="invalid model")
+
     async def run(self, _turn):
         return TurnResult(
             answer="partial answer",
@@ -47,9 +61,9 @@ class _RunRunner:
         )
 
 
-class _Store:
-    async def create(self) -> Session:
-        return Session()
+class _HTTPErrorRunner(_RunRunner):
+    async def run(self, _turn):
+        raise HTTPException(status_code=409, detail="turn is busy")
 
 
 class _Request:
@@ -59,8 +73,13 @@ class _Request:
 
 def _collect_stream(runner: _EventsRunner) -> list[dict]:
     async def collect() -> list[dict]:
-        turn = TurnRequest(prompt="hello", session=Session(), stream=True)
-        return [item async for item in _stream("test-model", runner, turn, 2000)]
+        turn = TurnRequest(
+            prompt="hello",
+            session=Session(),
+            persistence=PersistencePolicy.EPHEMERAL,
+            stream=True,
+        )
+        return [item async for item in _stream(runner, turn, 2000)]
 
     return asyncio.run(collect())
 
@@ -158,9 +177,7 @@ def test_sse_missing_terminal_event_fails_instead_of_defaulting_to_stop() -> Non
 def test_nonstream_invalid_done_reason_returns_openai_500(reason: str) -> None:
     response = asyncio.run(chat_completions(
         _Request(),
-        store=_Store(),
         settings=SimpleNamespace(llm_model="test-model"),
-        registry=None,
         runner=_RunRunner(reason),
     ))
 
@@ -169,3 +186,21 @@ def test_nonstream_invalid_done_reason_returns_openai_500(reason: str) -> None:
     assert body["error"]["type"] == "server_error"
     assert body["error"]["param"] is None
     assert body["error"]["code"] is None
+
+
+def test_nonstream_http_exception_preserves_status_and_openai_envelope() -> None:
+    response = asyncio.run(chat_completions(
+        _Request(),
+        settings=SimpleNamespace(llm_model="test-model"),
+        runner=_HTTPErrorRunner("end_turn"),
+    ))
+
+    assert response.status_code == 409
+    assert json.loads(response.body) == {
+        "error": {
+            "message": "turn is busy",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": None,
+        }
+    }

@@ -9,6 +9,7 @@ import json
 import logging
 import random
 import time
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
 
 import jsonschema
@@ -74,10 +75,82 @@ _SKIPPED_TOOL_DEADLINE_MESSAGE = (
 _SKIPPED_TOOL_BUDGET_MESSAGE = (
     "tool call skipped because the run token budget was exceeded"
 )
+_CANCELLED_TOOL_UNKNOWN_MESSAGE = (
+    "tool call outcome is unknown because execution was cancelled while the call was in flight"
+)
+_CANCELLED_TOOL_NOT_STARTED_MESSAGE = (
+    "tool call was not executed because execution was cancelled"
+)
 
 
 class _RunDeadlineExceeded(TimeoutError):
     """Internal signal that the run-level wall clock expired."""
+
+
+@dataclass
+class _ActiveToolBatch:
+    """Cancellation state for one sequential assistant tool-use batch."""
+
+    tool_uses: list[ToolUseBlock]
+    _results: list[ToolResultBlock] = field(default_factory=list, init=False)
+    _next_index: int = field(default=0, init=False)
+    _in_flight: ToolUseBlock | None = field(default=None, init=False)
+    _appended: bool = field(default=False, init=False)
+
+    def start_dispatch(self, tool_use: ToolUseBlock) -> None:
+        if self._in_flight is not None:
+            raise RuntimeError("another tool call is already in flight")
+        expected = self.tool_uses[self._next_index]
+        if tool_use is not expected:
+            raise ValueError("tool calls must be dispatched in batch order")
+        self._in_flight = tool_use
+
+    def complete(self, result: ToolResultBlock) -> None:
+        expected = self.tool_uses[self._next_index]
+        if (result.tool_use_id, result.name) != (expected.id, expected.name):
+            raise ValueError("tool result does not match the next tool call")
+        self._results.append(result)
+        self._next_index += 1
+        self._in_flight = None
+
+    def complete_remaining(self, results: list[ToolResultBlock]) -> None:
+        remaining = self.tool_uses[self._next_index:]
+        expected = [(tool_use.id, tool_use.name) for tool_use in remaining]
+        actual = [(result.tool_use_id, result.name) for result in results]
+        if actual != expected:
+            raise ValueError("synthetic results must match every remaining tool call")
+        self._results.extend(results)
+        self._next_index = len(self.tool_uses)
+        self._in_flight = None
+
+    def balance_after_interruption(self) -> None:
+        if self._appended:
+            return
+        if self._in_flight is not None:
+            self._results.append(ToolResultBlock(
+                tool_use_id=self._in_flight.id,
+                name=self._in_flight.name,
+                content=_CANCELLED_TOOL_UNKNOWN_MESSAGE,
+                is_error=True,
+            ))
+            self._next_index += 1
+            self._in_flight = None
+        for tool_use in self.tool_uses[self._next_index:]:
+            self._results.append(ToolResultBlock(
+                tool_use_id=tool_use.id,
+                name=tool_use.name,
+                content=_CANCELLED_TOOL_NOT_STARTED_MESSAGE,
+                is_error=True,
+            ))
+        self._next_index = len(self.tool_uses)
+
+    def append_to(self, session: Session) -> None:
+        if self._appended:
+            return
+        if self._next_index != len(self.tool_uses):
+            raise ValueError("cannot append an incomplete tool-result batch")
+        session.append_tool_results(self._results)
+        self._appended = True
 
 
 def _canonical_args(args: dict[str, Any]) -> str:
@@ -303,6 +376,7 @@ async def run_agent(
     # Run-scoped state for repeat-call detection and failure nudging.
     seen_calls: set[tuple[str, str]] = set()
     consecutive_tool_errors = 0
+    active_tool_batch: _ActiveToolBatch | None = None
 
     _emit = context.emit
 
@@ -353,6 +427,27 @@ async def run_agent(
             and max_run_tokens > 0
             and cumulative.total_tokens >= max_run_tokens
         )
+
+    async def _publish_checkpoint(*, continue_work: bool) -> None:
+        """Publish only safe state, then detach before further mutation."""
+        nonlocal session
+        if store is not None:
+            await store.save(session)
+        if continue_work:
+            session = session.staged_copy()
+
+    async def _publish_tool_batch(
+        batch: _ActiveToolBatch,
+        *,
+        continue_work: bool,
+    ) -> None:
+        batch.append_to(session)
+        await _publish_checkpoint(continue_work=continue_work)
+
+    async def _balance_interrupted_tool_batch(batch: _ActiveToolBatch) -> None:
+        """Best-effort protocol balancing without replacing the primary signal."""
+        batch.balance_after_interruption()
+        await _publish_tool_batch(batch, continue_work=False)
 
     def _skipped_result(tu: ToolUseBlock, content: str) -> ToolResultBlock:
         return ToolResultBlock(
@@ -454,7 +549,7 @@ async def run_agent(
                 for attempt in range(attempts):
                     if _deadline_exceeded():
                         raise _RunDeadlineExceeded()
-                    emitted_text = False
+                    visible_deltas: list[str] = []
                     chunks: AsyncIterator[Any] | None = None
                     try:
                         chunks = llm.stream(
@@ -484,20 +579,32 @@ async def run_agent(
 
                             if isinstance(chunk, TextDelta):
                                 if chunk.text:
-                                    emitted_text = True
+                                    visible_deltas.append(chunk.text)
                                     yield await _emit(TextEvent(text=chunk.text))
                             elif isinstance(chunk, StreamEnd):
                                 response = chunk.message
                                 break
 
                         if response is None:
-                            response = AssistantMessage(
-                                content=[],
-                                stop_reason="empty",
-                                model=None,
-                                usage=Usage(),
-                            )
-                        if response.stop_reason == "empty" and attempt < attempts - 1 and not emitted_text:
+                            if visible_deltas:
+                                response = AssistantMessage(
+                                    content=[TextBlock(text="".join(visible_deltas))],
+                                    stop_reason="incomplete_stream",
+                                    model=None,
+                                    usage=Usage(),
+                                )
+                            else:
+                                response = AssistantMessage(
+                                    content=[],
+                                    stop_reason="empty",
+                                    model=None,
+                                    usage=Usage(),
+                                )
+                        if (
+                            response.stop_reason == "empty"
+                            and attempt < attempts - 1
+                            and not visible_deltas
+                        ):
                             delay = _backoff_delay(retry_base_delay, attempt)
                             run_log.warning(
                                 "empty LLM stream (attempt %d/%d), retrying in %.2fs",
@@ -518,7 +625,7 @@ async def run_agent(
                         if _deadline_exceeded():
                             raise _RunDeadlineExceeded() from exc
                         transient = isinstance(exc, TimeoutError) or llm.is_transient_error(exc)
-                        if emitted_text or not transient or attempt == attempts - 1:
+                        if visible_deltas or not transient or attempt == attempts - 1:
                             raise
                         delay = _backoff_delay(retry_base_delay, attempt)
                         run_log.warning(
@@ -566,228 +673,265 @@ async def run_agent(
             return
         llm_latency_ms = round((time.perf_counter() - llm_started) * 1000, 2)
 
-        # Record the assistant turn before tool work mutates the session further.
+        # Establish tool-batch state before any post-response cancellation point.
         session.append_assistant(response)
+        tool_uses = response.tool_uses()
+        active_tool_batch = _ActiveToolBatch(tool_uses) if tool_uses else None
 
-        # Estimate usage when providers omit it so local servers still honor caps.
-        usage = estimate_usage_tokens(
-            response.usage,
-            messages=messages_for_llm,
-            system=effective_system,
-            response=response,
-        )
-        cumulative = cumulative + usage
-        yield await _emit(UsageEvent(
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            total_tokens=usage.total_tokens,
-            thinking_tokens=usage.thinking_tokens,
-            cached_tokens=usage.cached_tokens,
-            iteration=iteration,
-            latency_ms=llm_latency_ms,
-        ))
+        try:
+            # A complete non-tool response is terminal and safe immediately.
+            if active_tool_batch is None:
+                await _publish_checkpoint(continue_work=False)
 
-        if store is not None:
-            await store.save(session)
+            # Estimate usage when providers omit it so local servers still honor caps.
+            usage = estimate_usage_tokens(
+                response.usage,
+                messages=messages_for_llm,
+                system=effective_system,
+                response=response,
+            )
+            cumulative = cumulative + usage
+            yield await _emit(UsageEvent(
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_tokens=usage.total_tokens,
+                thinking_tokens=usage.thinking_tokens,
+                cached_tokens=usage.cached_tokens,
+                iteration=iteration,
+                latency_ms=llm_latency_ms,
+            ))
 
-        if response.reasoning:
-            yield await _emit(ReasoningEvent(text=response.reasoning))
+            if response.reasoning:
+                yield await _emit(ReasoningEvent(text=response.reasoning))
 
-        for block in response.content:
-            if not stream and isinstance(block, TextBlock) and block.text:
-                yield await _emit(TextEvent(text=block.text))
+            for block in response.content:
+                if not stream and isinstance(block, TextBlock) and block.text:
+                    yield await _emit(TextEvent(text=block.text))
 
-        tool_uses: list[ToolUseBlock] = [
-            b for b in response.content if isinstance(b, ToolUseBlock)
-        ]
+            if response.stop_reason == "incomplete_stream":
+                yield await _emit(ErrorEvent(
+                    message="LLM stream ended without a terminal provider message"
+                ))
+                yield await _emit(_done(reason="incomplete_stream"))
+                return
 
-        # If a post-LLM guard trips, close any requested tool turns synthetically.
-        guard_reason: str | None = None
-        skipped_message: str | None = None
-        if _deadline_exceeded():
-            guard_reason = "deadline_exceeded"
-            skipped_message = _SKIPPED_TOOL_DEADLINE_MESSAGE
-        elif _token_budget_exceeded():
-            guard_reason = "budget_exceeded"
-            skipped_message = _SKIPPED_TOOL_BUDGET_MESSAGE
-
-        if guard_reason is not None:
-            if tool_uses:
-                assert skipped_message is not None
-                events, results = _skipped_tool_events(tool_uses, skipped_message)
-                for event in events:
-                    yield await _emit(event)
-                session.append_tool_results(results)
-                if store is not None:
-                    await store.save(session)
-            if guard_reason == "deadline_exceeded":
-                elapsed = context.elapsed()
-                run_log.warning("run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
-                               max_run_seconds, elapsed)
-            else:
-                run_log.warning("run exceeded max_run_tokens=%d (used=%d)",
-                               max_run_tokens, cumulative.total_tokens)
-            yield await _emit(_done(reason=guard_reason))
-            return
-
-        if not tool_uses:
-            # Preserve truncation/max-iteration signals even when text was produced.
-            if response.stop_reason == "max_tokens":
-                yield await _emit(_done(reason="truncated"))
-            elif is_final_iteration:
-                yield await _emit(_done(reason="max_iterations"))
-            else:
-                yield await _emit(_done(reason="end_turn" if response.content else "empty"))
-            return
-
-        # Execute tools sequentially; some MCP tools may have side effects.
-        results: list[ToolResultBlock] = []
-        for tool_index, tu in enumerate(tool_uses):
-            yield await _emit(ToolCallEvent(id=tu.id, name=tu.name, input=tu.input))
-
+            # If a post-LLM guard trips, close requested tools synthetically.
+            guard_reason: str | None = None
+            skipped_message: str | None = None
             if _deadline_exceeded():
-                events, skipped_results = _skipped_tool_events(
-                    tool_uses[tool_index:],
-                    _SKIPPED_TOOL_DEADLINE_MESSAGE,
-                    first_call_already_emitted=True,
-                )
-                for event in events:
-                    yield await _emit(event)
-                results.extend(skipped_results)
-                session.append_tool_results(results)
-                if store is not None:
-                    await store.save(session)
-                elapsed = context.elapsed()
-                run_log.warning("run exceeded max_run_seconds=%.1f before tool dispatch (elapsed=%.1fs)",
-                               max_run_seconds, elapsed)
-                yield await _emit(_done(reason="deadline_exceeded"))
+                guard_reason = "deadline_exceeded"
+                skipped_message = _SKIPPED_TOOL_DEADLINE_MESSAGE
+            elif _token_budget_exceeded():
+                guard_reason = "budget_exceeded"
+                skipped_message = _SKIPPED_TOOL_BUDGET_MESSAGE
+
+            if guard_reason is not None:
+                if active_tool_batch is not None:
+                    assert skipped_message is not None
+                    events, skipped_results = _skipped_tool_events(
+                        tool_uses, skipped_message
+                    )
+                    active_tool_batch.complete_remaining(skipped_results)
+                    for event in events:
+                        yield await _emit(event)
+                    await _publish_tool_batch(
+                        active_tool_batch,
+                        continue_work=False,
+                    )
+                    active_tool_batch = None
+                if guard_reason == "deadline_exceeded":
+                    elapsed = context.elapsed()
+                    run_log.warning(
+                        "run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
+                        max_run_seconds,
+                        elapsed,
+                    )
+                else:
+                    run_log.warning(
+                        "run exceeded max_run_tokens=%d (used=%d)",
+                        max_run_tokens,
+                        cumulative.total_tokens,
+                    )
+                yield await _emit(_done(reason=guard_reason))
                 return
 
-            # Exact repeat calls get a synthetic error instead of re-execution.
-            call_key = (tu.name, _canonical_args(tu.input))
-            tool_latency_ms: float | None = None
-            if call_key in seen_calls:
-                run_log.info("stall: repeat call to %s with identical args; skipping", tu.name)
-                content = _STALL_MESSAGE
-                is_error = True
-            else:
-                seen_calls.add(call_key)
-
-                # Short-circuit bad args before they become opaque MCP errors.
-                if tu.parse_error is not None:
-                    validation_error = (
-                        f"tool call arguments were not valid JSON ({tu.parse_error}); "
-                        "return the arguments as a JSON object matching the tool schema."
-                    )
+            if active_tool_batch is None:
+                # Preserve truncation/max-iteration signals even with text.
+                if response.stop_reason == "max_tokens":
+                    yield await _emit(_done(reason="truncated"))
+                elif is_final_iteration:
+                    yield await _emit(_done(reason="max_iterations"))
                 else:
-                    validation_error = _validate_tool_args(
-                        tool_schemas.get(tu.name), tu.input, log=run_log
-                    )
+                    reason = "end_turn" if response.content else "empty"
+                    yield await _emit(_done(reason=reason))
+                return
 
-                # Denied calls never reach MCP and count as model-facing errors.
-                decision = policy.check(tu.name, tu.input) if validation_error is None else None
-                if validation_error is not None:
-                    run_log.info("invalid args for %s: %s", tu.name, validation_error)
-                    content = validation_error
+            # Execute tools sequentially; some MCP tools may have side effects.
+            for tool_index, tu in enumerate(tool_uses):
+                yield await _emit(ToolCallEvent(id=tu.id, name=tu.name, input=tu.input))
+
+                if _deadline_exceeded():
+                    events, skipped_results = _skipped_tool_events(
+                        tool_uses[tool_index:],
+                        _SKIPPED_TOOL_DEADLINE_MESSAGE,
+                        first_call_already_emitted=True,
+                    )
+                    active_tool_batch.complete_remaining(skipped_results)
+                    for event in events:
+                        yield await _emit(event)
+                    await _publish_tool_batch(active_tool_batch, continue_work=False)
+                    active_tool_batch = None
+                    elapsed = context.elapsed()
+                    run_log.warning(
+                        "run exceeded max_run_seconds=%.1f before tool dispatch (elapsed=%.1fs)",
+                        max_run_seconds,
+                        elapsed,
+                    )
+                    yield await _emit(_done(reason="deadline_exceeded"))
+                    return
+
+                # Exact repeat calls get a synthetic error instead of re-execution.
+                call_key = (tu.name, _canonical_args(tu.input))
+                tool_latency_ms: float | None = None
+                if call_key in seen_calls:
+                    run_log.info(
+                        "stall: repeat call to %s with identical args; skipping", tu.name
+                    )
+                    content = _STALL_MESSAGE
                     is_error = True
-                    tool_latency_ms = None
-                elif decision is not None and decision.verdict is Verdict.DENY:
-                    run_log.info("policy denied %s", tu.name)
-                    content = decision.reason
-                    is_error = True
-                    tool_latency_ms = None
                 else:
-                    tool_started = time.perf_counter()
-                    try:
-                        effective_tool_timeout = _effective_timeout(tool_timeout_seconds)
-                        if effective_tool_timeout and effective_tool_timeout > 0:
-                            async with asyncio.timeout(effective_tool_timeout):
+                    seen_calls.add(call_key)
+                    if tu.parse_error is not None:
+                        validation_error = (
+                            f"tool call arguments were not valid JSON ({tu.parse_error}); "
+                            "return the arguments as a JSON object matching the tool schema."
+                        )
+                    else:
+                        validation_error = _validate_tool_args(
+                            tool_schemas.get(tu.name), tu.input, log=run_log
+                        )
+
+                    decision = (
+                        policy.check(tu.name, tu.input)
+                        if validation_error is None
+                        else None
+                    )
+                    if validation_error is not None:
+                        run_log.info("invalid args for %s: %s", tu.name, validation_error)
+                        content = validation_error
+                        is_error = True
+                    elif decision is not None and decision.verdict is Verdict.DENY:
+                        run_log.info("policy denied %s", tu.name)
+                        content = decision.reason
+                        is_error = True
+                    else:
+                        tool_started = time.perf_counter()
+                        active_tool_batch.start_dispatch(tu)
+                        try:
+                            effective_tool_timeout = _effective_timeout(tool_timeout_seconds)
+                            if effective_tool_timeout and effective_tool_timeout > 0:
+                                async with asyncio.timeout(effective_tool_timeout):
+                                    call_result = await mcp.call_tool(tu.name, tu.input)
+                            else:
                                 call_result = await mcp.call_tool(tu.name, tu.input)
-                        else:
-                            call_result = await mcp.call_tool(tu.name, tu.input)
-                        content = call_result.content
-                        is_error = call_result.is_error
-                    except TimeoutError:
-                        if _deadline_exceeded():
-                            events, skipped_results = _skipped_tool_events(
-                                tool_uses[tool_index:],
-                                _SKIPPED_TOOL_DEADLINE_MESSAGE,
-                                first_call_already_emitted=True,
-                            )
-                            for event in events:
-                                yield await _emit(event)
-                            results.extend(skipped_results)
-                            session.append_tool_results(results)
-                            if store is not None:
-                                await store.save(session)
-                            elapsed = context.elapsed()
+                            content = call_result.content
+                            is_error = call_result.is_error
+                        except TimeoutError:
+                            if _deadline_exceeded():
+                                events, skipped_results = _skipped_tool_events(
+                                    tool_uses[tool_index:],
+                                    _SKIPPED_TOOL_DEADLINE_MESSAGE,
+                                    first_call_already_emitted=True,
+                                )
+                                active_tool_batch.complete_remaining(skipped_results)
+                                for event in events:
+                                    yield await _emit(event)
+                                await _publish_tool_batch(
+                                    active_tool_batch,
+                                    continue_work=False,
+                                )
+                                active_tool_batch = None
+                                elapsed = context.elapsed()
+                                run_log.warning(
+                                    "run exceeded max_run_seconds=%.1f during tool "
+                                    "dispatch (elapsed=%.1fs)",
+                                    max_run_seconds,
+                                    elapsed,
+                                )
+                                yield await _emit(_done(reason="deadline_exceeded"))
+                                return
                             run_log.warning(
-                                "run exceeded max_run_seconds=%.1f during tool dispatch (elapsed=%.1fs)",
-                                max_run_seconds,
-                                elapsed,
+                                "tool %s timed out after %ss", tu.name, tool_timeout_seconds
                             )
-                            yield await _emit(_done(reason="deadline_exceeded"))
-                            return
-                        # Surface tool timeouts as tool-result errors.
-                        run_log.warning("tool %s timed out after %ss", tu.name, tool_timeout_seconds)
-                        content = f"tool {tu.name!r} timed out after {tool_timeout_seconds}s"
-                        is_error = True
-                    except Exception as e:
-                        # Normalize unexpected tool exceptions into tool results.
-                        run_log.exception("tool execution raised for %s", tu.name)
-                        content = f"tool execution raised: {e}"
-                        is_error = True
-                    tool_latency_ms = round((time.perf_counter() - tool_started) * 1000, 2)
+                            content = f"tool {tu.name!r} timed out after {tool_timeout_seconds}s"
+                            is_error = True
+                        except Exception as exc:
+                            run_log.exception("tool execution raised for %s", tu.name)
+                            content = f"tool execution raised: {exc}"
+                            is_error = True
+                        tool_latency_ms = round(
+                            (time.perf_counter() - tool_started) * 1000, 2
+                        )
 
-            # Clip once so streamed and stored tool content stay identical.
-            content = clip_content(content, tool_result_max_chars)
+                content = clip_content(content, tool_result_max_chars)
+                consecutive_tool_errors = consecutive_tool_errors + 1 if is_error else 0
+                if (
+                    is_error
+                    and consecutive_tool_errors == _CONSECUTIVE_ERROR_NUDGE_THRESHOLD
+                ):
+                    content = f"{content}\n\n{_FAILURE_NUDGE}"
 
-            # Nudge once when tool errors start cascading.
-            consecutive_tool_errors = consecutive_tool_errors + 1 if is_error else 0
-            if is_error and consecutive_tool_errors == _CONSECUTIVE_ERROR_NUDGE_THRESHOLD:
-                content = f"{content}\n\n{_FAILURE_NUDGE}"
-
-            yield await _emit(ToolResultEvent(
-                id=tu.id,
-                name=tu.name,
-                content=content,
-                is_error=is_error,
-                latency_ms=tool_latency_ms,
-            ))
-            results.append(ToolResultBlock(
-                tool_use_id=tu.id,
-                name=tu.name,
-                content=content,
-                is_error=is_error,
-            ))
-
-            # Abort after the nudge threshold if the cascade continues.
-            if (
-                is_error
-                and abort_after_consecutive_tool_failures
-                and abort_after_consecutive_tool_failures > 0
-                and consecutive_tool_errors >= abort_after_consecutive_tool_failures
-            ):
-                events, skipped_results = _skipped_tool_events(
-                    tool_uses[tool_index + 1:],
-                    _SKIPPED_TOOL_ABORT_MESSAGE,
+                result = ToolResultBlock(
+                    tool_use_id=tu.id,
+                    name=tu.name,
+                    content=content,
+                    is_error=is_error,
                 )
-                for event in events:
-                    yield await _emit(event)
-                results.extend(skipped_results)
-                run_log.warning(
-                    "aborting run: %d consecutive tool failures (threshold=%d)",
-                    consecutive_tool_errors, abort_after_consecutive_tool_failures,
-                )
-                session.append_tool_results(results)
-                if store is not None:
-                    await store.save(session)
-                yield await _emit(_done(reason="no_progress"))
-                return
+                active_tool_batch.complete(result)
+                yield await _emit(ToolResultEvent(
+                    id=tu.id,
+                    name=tu.name,
+                    content=content,
+                    is_error=is_error,
+                    latency_ms=tool_latency_ms,
+                ))
 
-        session.append_tool_results(results)
-        if store is not None:
-            await store.save(session)
+                if (
+                    is_error
+                    and abort_after_consecutive_tool_failures
+                    and abort_after_consecutive_tool_failures > 0
+                    and consecutive_tool_errors >= abort_after_consecutive_tool_failures
+                ):
+                    events, skipped_results = _skipped_tool_events(
+                        tool_uses[tool_index + 1:],
+                        _SKIPPED_TOOL_ABORT_MESSAGE,
+                    )
+                    active_tool_batch.complete_remaining(skipped_results)
+                    for event in events:
+                        yield await _emit(event)
+                    run_log.warning(
+                        "aborting run: %d consecutive tool failures (threshold=%d)",
+                        consecutive_tool_errors,
+                        abort_after_consecutive_tool_failures,
+                    )
+                    await _publish_tool_batch(active_tool_batch, continue_work=False)
+                    active_tool_batch = None
+                    yield await _emit(_done(reason="no_progress"))
+                    return
+
+            await _publish_tool_batch(active_tool_batch, continue_work=True)
+            active_tool_batch = None
+        except (asyncio.CancelledError, GeneratorExit):
+            interrupted_batch = active_tool_batch
+            if interrupted_batch is not None:
+                try:
+                    await _balance_interrupted_tool_batch(interrupted_batch)
+                except BaseException:  # noqa: BLE001 -- preserve cancellation/close.
+                    run_log.warning(
+                        "failed to publish balanced tool checkpoint during interruption",
+                        exc_info=True,
+                    )
+            raise
 
     # Structural fallback: the generator must always end on a DoneEvent.
     run_log.warning("agent loop hit max_iterations=%d without end_turn",

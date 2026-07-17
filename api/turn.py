@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, AsyncIterator, Optional
 
@@ -302,8 +302,20 @@ class TurnRunner:
                     base_logger=logger,
                     tracer=self.tracer,
                 )
+                if request.persistence is PersistencePolicy.PERSISTENT:
+                    source_session = await self.store.get(request.session.session_id)
+                elif request.persistence is PersistencePolicy.EPHEMERAL:
+                    source_session = request.session
+                else:  # Defensive against future enum members.
+                    raise ValueError(
+                        f"unsupported persistence policy: {request.persistence!r}"
+                    )
                 tool_snapshot = ToolSnapshot.from_llm_tools(self.mcp.get_tools_for_llm())
-                routing = await self._resolve_routing(request, tool_snapshot, context)
+                staged_request = replace(
+                    request,
+                    session=source_session.staged_copy(),
+                )
+                routing = await self._resolve_routing(staged_request, tool_snapshot, context)
                 limits = self.limits.for_model(routing.model_entry)
                 metadata = TurnMetadata(
                     run_id=context.run_id,
@@ -311,7 +323,7 @@ class TurnRunner:
                     orchestration=routing.orchestration,
                 )
                 events = self._events(
-                    request=request,
+                    request=staged_request,
                     routing=routing,
                     limits=limits,
                     context=context,

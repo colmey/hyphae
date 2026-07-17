@@ -14,10 +14,10 @@ sessions are short-lived scratchpads and durable persistence isn't needed;
 the ABC is retained purely as the seam for swapping in SQLite/Postgres/Redis
 later (one file, one line in `main.py`'s lifespan).
 
-Concurrency: distinct sessions are fully isolated — each request owns its own
-`Session` object. The only crossover vector is two concurrent requests on the
-*same* session_id sharing one `.messages` list. `SessionGuard` closes that by
-rejecting (HTTP 409) a second in-flight request for a session.
+Concurrency: distinct sessions are fully isolated. Each accepted persistent
+request resolves the latest stored checkpoint by ID and stages a copy before
+appending its prompt. `SessionGuard` rejects (HTTP 409) a second in-flight
+request for the same session ID.
 
 Design notes:
   - The store interface is async even though the in-memory implementation
@@ -30,10 +30,11 @@ Design notes:
     the single-threaded asyncio loop a check-then-add with no `await` between
     is atomic. Switching to wait-semantics later means swapping the in-flight
     `set` for a `dict[str, asyncio.Lock]`.
-  - `save()` is explicit rather than auto-on-mutate. The loop calls it once
-    per turn (or once at the end of a run). This matches how a future SQL
-    backend would work — commit on a meaningful boundary, not every block
-    append.
+  - `save()` is explicit rather than auto-on-mutate. The loop publishes only
+    protocol-safe checkpoints: a complete non-tool assistant response, or a
+    tool-use message followed by exactly one result per call. After an
+    intermediate checkpoint it continues on another staged copy, so even the
+    reference-storing in-memory backend cannot expose later mutation.
 """
 
 from __future__ import annotations
@@ -80,6 +81,22 @@ class Session:
     # (e.g. user_id, system prompt overrides, tags). The store persists it
     # opaquely.
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def staged_copy(self) -> "Session":
+        """Return a copy-on-write view suitable for uncommitted work.
+
+        Canonical messages and their content blocks are treated as immutable,
+        so only the message list and mutable metadata bag are copied. A saved
+        checkpoint must never be mutated again; callers that continue after a
+        save stage another copy first.
+        """
+        return Session(
+            session_id=self.session_id,
+            messages=list(self.messages),
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            metadata=dict(self.metadata),
+        )
 
     # ----- mutation helpers -----
     #
@@ -177,7 +194,8 @@ class InMemorySessionStore(SessionStore):
 
     Eviction is lazy: it runs on create() (the only operation that grows the
     store), avoiding a background sweeper and the lifecycle that comes with it.
-    ttl_seconds <= 0 or max_count <= 0 (the defaults) disables that dimension; production bounds are injected from Settings in main.py.
+    ttl_seconds <= 0 or max_count <= 0 (the defaults) disables that dimension;
+    production bounds are injected from Settings in main.py.
     """
 
     def __init__(self, ttl_seconds: int = 0, max_count: int = 0) -> None:

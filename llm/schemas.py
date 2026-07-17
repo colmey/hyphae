@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, Union
+from typing import Any, Literal, TypeAlias, Union
 
 
 class Role(str, Enum):
@@ -31,6 +31,18 @@ class Role(str, Enum):
     ASSISTANT = "assistant"
     SYSTEM = "system"
     TOOL = "tool"
+
+
+CanonicalStopReason: TypeAlias = Literal[
+    "end_turn",
+    "tool_use",
+    "max_tokens",
+    "empty",
+    "content_filter",
+    "refusal",
+    "provider_error",
+    "incomplete_stream",
+]
 
 
 # ----- content blocks -----
@@ -160,20 +172,19 @@ class Message:
 class AssistantMessage:
     """The structured response from an LLM completion.
 
-    `stop_reason` is normalized by each client into a canonical vocabulary so
-    the loop can read it provider-agnostically: "end_turn" (model stopped
-    naturally), "max_tokens" (output was truncated), "empty" (no candidates
-    returned), or the provider's lowercased reason name for anything else
-    (e.g. "safety"); None when unknown. The loop uses it to flag truncation
-    but still checks the content blocks directly for tool calls.
+    `stop_reason` is the provider-neutral terminal classification used by the
+    loop. `raw_stop_reason` retains an optional provider-native value for
+    diagnostics and later boundary mapping. Tool blocks remain authoritative
+    when deciding whether dispatch is required.
     """
     content: list[ContentBlock]
-    stop_reason: str | None = None
+    stop_reason: CanonicalStopReason | None = None
     model: str | None = None
     usage: Usage | None = None
     # Provider-extracted chain-of-thought; trace-only, never replayed to the
     # model or sent on the OpenAI-compatible response wire.
     reasoning: str | None = None
+    raw_stop_reason: str | None = None
 
     def text_blocks(self) -> list[TextBlock]:
         return [b for b in self.content if isinstance(b, TextBlock)]

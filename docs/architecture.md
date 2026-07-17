@@ -402,6 +402,12 @@ and `none` profiles log once that the knob is inert.
 - Mutation API: `append_user(text)`, `append_assistant(response)`,
   `append_tool_results(results)`. The agent loop uses these rather than
   poking `.messages` directly — one seam for future invariant checks.
+- `staged_copy()` preserves identity/timestamps, copies the metadata bag and
+  message list, and shares immutable canonical messages. Native turns route and
+  execute against this copy, never the object currently owned by the store.
+  Persistent turns resolve the latest checkpoint by session ID before staging,
+  so an older caller-held `Session` remains a safe identity handle rather than
+  overwriting newer stored history.
 - `last_assistant_tool_uses()` — convenience for "what tools did the
   model just ask me to run?"
 - `SessionStore` ABC: `create(metadata)`, `get(session_id)`,
@@ -449,7 +455,8 @@ discriminators for JSON serialization at the API boundary:
 | `ErrorEvent`                   | `message`                                    | Unrecoverable internal failure            |
 
 `DoneEvent.reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty",
-"truncated", "budget_exceeded", "deadline_exceeded", "no_progress"}`. Guard
+"truncated", "budget_exceeded", "deadline_exceeded", "no_progress",
+"incomplete_stream"}`. Guard
 exits carry any answer text already accrued.
 
 Tool execution failures become `ToolResultEvent(is_error=True)` so the model can
@@ -518,14 +525,17 @@ Per-iteration algorithm:
 0. Check bounded-run guards before another LLM call.
 1. Assemble the outgoing context view, then call the LLM with timeout/retry.
    Exhausted LLM failures yield `ErrorEvent` + `DoneEvent("llm_error")`.
-2. `session.append_assistant(response)` immediately — a later crash in
-   this iteration still leaves the session consistent.
-3. Yield a `UsageEvent` for this iteration's tokens. Provider-reported usage
+2. Append the complete assistant response only to the staged session. A
+   non-tool response is now a safe terminal checkpoint; a tool-use response is
+   not publishable yet.
+3. Publish a complete non-tool assistant response once. Visible deltas followed
+   by ordinary provider exhaustion are synthesized as an `incomplete_stream`
+   assistant response, saved with identical text, and terminated abnormally.
+4. Yield a `UsageEvent` for this iteration's tokens. Provider-reported usage
    is used as-is; absent/all-zero usage is filled by the local estimator
    (`estimate_usage_tokens`, chars/4 heuristic over the outgoing view +
    system + response) so the token cap works against local servers that
    report zero usage. Never double-counted.
-4. If `store` was provided, `await store.save(session)`.
 5. If the response carries `reasoning`, yield a `ReasoningEvent` for trace and
    raw debug renderers. Reasoning is not appended to session content.
 6. Yield a `TextEvent` for each non-empty text block.
@@ -536,7 +546,14 @@ Per-iteration algorithm:
    teaching `is_error` results, enforce `ToolPolicy`, call MCP with timeout,
    clip the result, update failure counters, emit `ToolResultEvent`, and build
    the matching `ToolResultBlock`.
-9. `session.append_tool_results(results)` and save again.
+9. Append the complete matching result batch and publish the balanced tool
+   protocol. Continue from a fresh `staged_copy()` so later mutation cannot
+   alias the object just saved by `InMemorySessionStore`. Cancellation keeps
+   completed results, marks an in-flight call as outcome-unknown, marks
+   unstarted calls cancelled, best-effort publishes the balanced batch, and
+   re-raises the original cancellation or generator-close signal. Once the
+   consumer has cancelled or closed, synthetic results are checkpointed for
+   safe replay but cannot be delivered on that terminated event stream.
 10. Loop. **Final-iteration wrap-up:** on the last allowed iteration the
    loop withholds tools and appends a wrap-up note to the per-call system prompt
    so the model produces a best-effort final answer instead of dying

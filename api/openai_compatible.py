@@ -65,6 +65,8 @@ _FINISH_REASONS = {
     "budget_exceeded": "length",
     "deadline_exceeded": "length",
     "no_progress": "stop",
+    "content_filter": "content_filter",
+    "refusal": "content_filter",
 }
 
 
@@ -78,6 +80,10 @@ def _finish_reason(done_reason: str) -> str:
 def _terminal_error_message(done_reason: str) -> str:
     if done_reason == "llm_error":
         return "LLM call failed"
+    if done_reason == "provider_error":
+        return "LLM provider terminated abnormally"
+    if done_reason == "incomplete_stream":
+        return "LLM stream ended without a terminal provider message"
     return f"unsupported completion reason: {done_reason!r}"
 
 

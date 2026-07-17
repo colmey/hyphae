@@ -207,6 +207,31 @@ async def test_wrapper_basic() -> None:
     check(response.reasoning == "kept private", "reasoning metadata preserved")
 
 
+@pytest.mark.parametrize(
+    "stop_reason",
+    ["max_tokens", "empty", "content_filter", "refusal", "provider_error"],
+)
+async def test_wrapper_does_not_launder_non_normal_provider_outcomes(
+    stop_reason: str,
+) -> None:
+    source = AssistantMessage(
+        content=[TextBlock(text=action_text("must-not-run"))],
+        stop_reason=stop_reason,
+        raw_stop_reason="provider-raw",
+        usage=Usage(total_tokens=3),
+    )
+    inner = ScriptedLLM([source])
+
+    response = await PromptedToolLLMClient(inner).complete(
+        messages=[Message.user("lookup")], tools=[TOOL]
+    )
+
+    check(response is source, "non-normal outcome passes through unchanged")
+    check(response.stop_reason == stop_reason, "canonical reason is preserved")
+    check(response.raw_stop_reason == "provider-raw", "raw reason is preserved")
+    check(inner.calls == 1, "abnormal outcome is not repaired")
+
+
 async def test_passthroughs() -> None:
     print("--- wrapper passthrough cases ---")
     schema = dict

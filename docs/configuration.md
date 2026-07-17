@@ -187,7 +187,10 @@ Both models are **active** — the orchestrator routes between them (cheap
 - `sampling` is optional. Supported fields are `temperature` (`0.0`-`2.0`),
   `top_p` (`0.0`-`1.0`), and `top_k` (`>= 1`). Omit the block, or omit an
   individual field, to leave the provider/server default in force. Sampling is
-  per model entry, not an environment variable.
+  per model entry, not an environment variable. Gemini receives its native
+  `top_k`; a configured OpenAI-compatible endpoint receives `top_k` under
+  `extra_body`; real OpenAI omits `top_k` because it is not a supported direct
+  chat-completions parameter.
 - `default: true` on **exactly one** entry. The default model is used
   by the orchestrator itself (unless `ORCHESTRATOR_MODEL_ID` overrides)
   and is the safe fallback when orchestration fails.

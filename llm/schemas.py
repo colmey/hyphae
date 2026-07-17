@@ -129,6 +129,14 @@ class Usage:
         )
 
 
+def coerce_usage_count(value: Any) -> int:
+    """Coerce provider token metadata without letting malformed values escape."""
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 @dataclass(frozen=True)
 class ModelProfile:
     """Declared model-interface capabilities, resolved from a models.yaml row."""

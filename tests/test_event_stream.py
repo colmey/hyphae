@@ -62,6 +62,34 @@ class FakePlainLLM(LLMClient):
         )
 
 
+class FakeOutcomeLLM(LLMClient):
+    def __init__(self, stop_reason: str) -> None:
+        self.stop_reason = stop_reason
+
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
+        return AssistantMessage(
+            content=[
+                TextBlock(
+                    text="provider-visible",
+                    provider_metadata={"thought_signature": b"opaque-signature"},
+                )
+            ],
+            stop_reason=self.stop_reason,
+            raw_stop_reason="raw-provider-reason",
+            reasoning="private-chain-of-thought",
+            model="fake",
+            usage=Usage(total_tokens=4),
+        )
+
+
 class ToolResult:
     def __init__(self, content: str, is_error: bool = False) -> None:
         self.content = content
@@ -134,6 +162,29 @@ async def test_plain_turn_emits_only_text_usage_and_done(asgi_client) -> None:
         "".join(e["text"] for e in events if e["type"] == "text") == "Just an answer."
     )
     assert types[-1] == "done"
+
+
+@pytest.mark.parametrize(
+    "stop_reason",
+    ["content_filter", "refusal", "provider_error", "incomplete_stream"],
+)
+async def test_native_routes_expose_abnormal_reason_without_reasoning(
+    asgi_client, stop_reason: str
+) -> None:
+    with wired_app(FakeOutcomeLLM(stop_reason), mcp=FakeMCP()) as (app, _settings):
+        client = asgi_client(app)
+        buffered = await client.post("/chat", content="say something")
+        events, _headers = await _stream_events(client, "say something else")
+
+    assert buffered.status_code == 200
+    assert buffered.headers["x-done-reason"] == stop_reason
+    assert [event["reason"] for event in events if event["type"] == "done"] == [
+        stop_reason
+    ]
+    assert not any(event["type"] == "reasoning" for event in events)
+    rendered = json.dumps(events)
+    assert "private-chain-of-thought" not in rendered
+    assert "opaque-signature" not in rendered
 
 
 async def test_empty_prompt_is_rejected(asgi_client) -> None:

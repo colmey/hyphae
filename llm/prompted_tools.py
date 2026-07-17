@@ -180,6 +180,8 @@ class PromptedToolLLMClient(LLMClient):
             response_schema=None,
             thinking_level=thinking_level,
         )
+        if first.stop_reason != "end_turn":
+            return first
         parsed = parse_prompted_action(_visible_text(first), allowed_tools)
         if parsed.action is not None:
             return _action_message(first, parsed.action, model=self._model)
@@ -209,6 +211,9 @@ class PromptedToolLLMClient(LLMClient):
                 thinking_level=thinking_level,
             )
             usage = _combine_usage(usage, repair.usage)
+            if repair.stop_reason != "end_turn":
+                repair.usage = usage
+                return repair
             parsed = parse_prompted_action(_visible_text(repair), allowed_tools)
             if parsed.action is not None:
                 return _action_message(
@@ -276,6 +281,7 @@ def _action_message(
         model=source.model or model,
         usage=usage if usage is not None else source.usage,
         reasoning=source.reasoning,
+        raw_stop_reason=source.raw_stop_reason,
     )
 
 
@@ -292,6 +298,7 @@ def _parse_failure_message(
         model=source.model or model,
         usage=usage if usage is not None else source.usage,
         reasoning=source.reasoning,
+        raw_stop_reason=source.raw_stop_reason,
     )
 
 
@@ -315,6 +322,7 @@ def _parse_error_tool_message(
         model=source.model or model,
         usage=usage if usage is not None else source.usage,
         reasoning=source.reasoning,
+        raw_stop_reason=source.raw_stop_reason,
     )
 
 

@@ -73,6 +73,34 @@ class FakeLLM(LLMClient):
         )
 
 
+class OutcomeLLM(LLMClient):
+    def __init__(self, stop_reason: str) -> None:
+        self.stop_reason = stop_reason
+
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        system=None,
+        max_tokens=None,
+        response_schema=None,
+        thinking_level=None,
+    ) -> AssistantMessage:
+        return AssistantMessage(
+            content=[
+                TextBlock(
+                    text="provider-visible",
+                    provider_metadata={"thought_signature": b"opaque-signature"},
+                )
+            ],
+            stop_reason=self.stop_reason,
+            raw_stop_reason="raw-provider-reason",
+            reasoning="private-chain-of-thought",
+            model="provider-model",
+            usage=Usage(input_tokens=2, output_tokens=1, total_tokens=3),
+        )
+
+
 class CountingMCP:
     connected_servers: list[str] = []
 
@@ -200,6 +228,65 @@ async def test_non_stream_completion_shape_and_usage(asgi_client) -> None:
         "total_tokens": 14,
     }
     assert llm.complete_calls == 1
+
+
+@pytest.mark.parametrize("stop_reason", ["content_filter", "refusal"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_policy_outcomes_map_to_openai_content_filter(
+    asgi_client, parse_sse, stop_reason: str, stream: bool
+) -> None:
+    with wired_app(OutcomeLLM(stop_reason)) as (app, _settings):
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": stream,
+            },
+        )
+
+    assert response.status_code == 200
+    if stream:
+        payloads = parse_sse(response.text)
+        assert payloads[-1] == "[DONE]"
+        frames = [payload for payload in payloads if payload != "[DONE]"]
+        assert not any("error" in frame for frame in frames)
+        assert frames[-1]["choices"][0]["finish_reason"] == "content_filter"
+        rendered = response.text
+    else:
+        body = response.json()
+        assert body["choices"][0]["finish_reason"] == "content_filter"
+        rendered = response.text
+    assert "private-chain-of-thought" not in rendered
+    assert "opaque-signature" not in rendered
+
+
+@pytest.mark.parametrize("stop_reason", ["provider_error", "incomplete_stream"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_provider_and_incomplete_stream_errors_fail_closed(
+    asgi_client, parse_sse, stop_reason: str, stream: bool
+) -> None:
+    with wired_app(OutcomeLLM(stop_reason)) as (app, _settings):
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": stream,
+            },
+        )
+
+    if stream:
+        assert response.status_code == 200
+        payloads = parse_sse(response.text)
+        assert payloads[-1] == "[DONE]"
+        frames = [payload for payload in payloads if payload != "[DONE]"]
+        assert sum("error" in frame for frame in frames) == 1
+        assert not any(
+            frame.get("choices") and frame["choices"][0]["finish_reason"] is not None
+            for frame in frames
+        )
+    else:
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"
 
 
 async def test_stream_completion_emits_deltas_finish_and_done(

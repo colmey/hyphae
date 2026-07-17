@@ -103,7 +103,16 @@ def test_finish_reason_maps_only_supported_success_reasons(
     assert _finish_reason(done_reason) == expected
 
 
-@pytest.mark.parametrize("done_reason", ["llm_error", "unknown", "provider_surprise"])
+@pytest.mark.parametrize(
+    "done_reason",
+    [
+        "llm_error",
+        "provider_error",
+        "incomplete_stream",
+        "unknown",
+        "provider_surprise",
+    ],
+)
 def test_finish_reason_fails_closed(done_reason: str) -> None:
     with pytest.raises(ValueError, match="unsupported completion reason"):
         _finish_reason(done_reason)
@@ -156,7 +165,9 @@ def test_sse_error_event_is_terminal_and_emitted_once(events) -> None:
     assert frames[-1] == "[DONE]"
 
 
-@pytest.mark.parametrize("reason", ["llm_error", "unexpected_reason"])
+@pytest.mark.parametrize(
+    "reason", ["llm_error", "provider_error", "incomplete_stream", "unexpected_reason"]
+)
 def test_sse_invalid_done_reason_becomes_error_without_success_finish(
     reason: str,
 ) -> None:
@@ -206,7 +217,9 @@ def test_sse_missing_terminal_event_fails_instead_of_defaulting_to_stop() -> Non
     assert frames[-1] == "[DONE]"
 
 
-@pytest.mark.parametrize("reason", ["llm_error", "unexpected_reason"])
+@pytest.mark.parametrize(
+    "reason", ["llm_error", "provider_error", "incomplete_stream", "unexpected_reason"]
+)
 def test_nonstream_invalid_done_reason_returns_openai_500(reason: str) -> None:
     response = asyncio.run(
         chat_completions(

@@ -258,7 +258,7 @@ async def test_error_after_first_delta_surfaces_partial_text() -> None:
         ),
         (["   <think>secret</think>  Hello"], "Hello", "secret", True),
         (["plain"], "plain", None, True),
-        (["<think>unfinished"], "<think>unfinished", None, False),
+        (["<think>unfinished"], "", "unfinished", True),
     ],
 )
 def test_reasoning_stripper_boundaries(

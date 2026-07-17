@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
 
 from agent import (
+    ReasoningEvent,
     SessionNotFoundError,
     SessionStore,
 )
@@ -127,6 +128,8 @@ async def chat_stream(
             )
             async with runner.open(turn) as execution:
                 async for event in execution.events:
+                    if isinstance(event, ReasoningEvent):
+                        continue
                     step += 1
                     yield {
                         "data": json.dumps(

@@ -148,6 +148,69 @@ async def test_truncation_reason(
     check(all_text(events) == "half an answe", "partial text still streamed")
 
 
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_done", "has_error"),
+    [
+        ("content_filter", "content_filter", False),
+        ("refusal", "refusal", False),
+        ("provider_error", "provider_error", True),
+    ],
+)
+async def test_abnormal_outcomes_are_not_retried_or_laundered(
+    scripted_llm_factory,
+    scripted_mcp_factory,
+    agent_event_collector,
+    stop_reason: str,
+    expected_done: str,
+    has_error: bool,
+) -> None:
+    response = AssistantMessage(
+        content=[TextBlock(text="provider text")],
+        stop_reason=stop_reason,
+        raw_stop_reason="raw-provider-reason",
+        usage=Usage(),
+    )
+    llm = scripted_llm_factory([response])
+
+    events = await agent_event_collector(
+        llm=llm,
+        mcp=scripted_mcp_factory(),
+        max_retries=2,
+        retry_base_delay=0.0,
+    )
+
+    check(llm.calls == 1, "abnormal provider outcome was not retried")
+    check(done_reason(events) == expected_done, "done reason stayed canonical")
+    check(
+        any(isinstance(event, ErrorEvent) for event in events) is has_error,
+        "only provider_error emitted ErrorEvent",
+    )
+
+
+@pytest.mark.parametrize(
+    "stop_reason", [None, "content_filter", "provider_error", "incomplete_stream"]
+)
+async def test_real_tool_blocks_override_inconsistent_provider_reason(
+    scripted_llm_factory,
+    scripted_mcp_factory,
+    agent_event_collector,
+    stop_reason: str | None,
+) -> None:
+    inconsistent = AssistantMessage(
+        content=[ToolUseBlock(id="call_1", name="srv__tool", input={})],
+        stop_reason=stop_reason,
+        raw_stop_reason="unknown-provider-reason",
+        usage=Usage(),
+    )
+    llm = scripted_llm_factory([inconsistent, text_response("tool completed")])
+    mcp = scripted_mcp_factory()
+
+    events = await agent_event_collector(llm=llm, mcp=mcp)
+
+    check(mcp.call_count == 1, "authoritative tool block was dispatched")
+    check(done_reason(events) == "end_turn", "loop continued after tool result")
+
+
 async def test_tool_timeout(
     scripted_llm_factory, scripted_mcp_factory, agent_event_collector
 ) -> None:

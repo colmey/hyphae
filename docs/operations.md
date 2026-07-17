@@ -542,8 +542,8 @@ extension path described above.
   downstream agent turns.
 - **Reasoning is trace/debug data, not answer text.** OpenAI-compatible
   leading `<think>...</think>` content is separated from visible text and
-  emitted as a `reasoning` trace/event record. The raw `/chat/stream` route
-  shows it by design; `/chat`, session replay, and `/v1` payloads do not.
+  emitted as a `reasoning` trace/event record. No HTTP route renders it, and
+  session replay excludes it.
   Gemini reasoning remains `None` unless the SDK exposes thought content in a
   detectable form; Gemini `thought_signature` still round-trips through
   `provider_metadata`.

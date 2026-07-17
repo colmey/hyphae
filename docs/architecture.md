@@ -237,10 +237,11 @@ speaks:
   - `TextBlock(text, provider_metadata)`
   - `ToolUseBlock(id, name, input, provider_metadata, parse_error)`
   - `ToolResultBlock(tool_use_id, name, content, is_error)`
-- **`AssistantMessage(content, stop_reason, model, reasoning)`** with helpers
-  `text_blocks()`, `tool_uses()`, `to_message()`. `reasoning` is trace-only
-  data extracted by the provider; it is not replayed through `to_message()`
-  and is not part of user-facing answer text.
+- **`AssistantMessage(content, stop_reason, model, reasoning, raw_stop_reason)`**
+  with helpers `text_blocks()`, `tool_uses()`, `to_message()`. `stop_reason`
+  uses the canonical vocabulary below; `raw_stop_reason` retains the optional
+  provider-native value for diagnostics. `reasoning` is trace-only data: it is
+  neither replayed through `to_message()` nor rendered by an HTTP route.
 - **`ModelProfile`**: the immutable, provider-agnostic capability profile
   resolved from one `models.yaml` row. It carries
   `supports_native_tools`, `thinking`, and optional sampling
@@ -265,8 +266,26 @@ speaks:
    call.
 4. **`reasoning`** on `AssistantMessage`. Provider-extracted thinking lives as
    a sibling of content, not inside `provider_metadata`. The loop may emit it
-   as a `ReasoningEvent` for trace/debug surfaces, but session replay and
-   OpenAI-compatible responses stay clean.
+   as a `ReasoningEvent` for tracing, but session replay and all HTTP responses
+   stay clean.
+
+**Canonical provider outcomes:**
+
+| Outcome | Meaning |
+|---|---|
+| `end_turn` | Ordinary natural completion |
+| `tool_use` | One or more real tool-use blocks were returned |
+| `max_tokens` | Provider output limit reached |
+| `empty` | No candidate or usable content from an otherwise normal response |
+| `content_filter` | Provider safety/content policy blocked output |
+| `refusal` | Provider returned an explicit refusal |
+| `provider_error` | Missing, unknown, or abnormal provider termination |
+| `incomplete_stream` | Visible deltas arrived without a terminal provider message |
+
+Real tool-use blocks are authoritative over missing or inconsistent provider
+finish reasons. Only `empty` is response-retryable; blocked, refused, truncated,
+incomplete, and provider-error outcomes are never retried merely for lacking
+text.
 
 `llm/client.py` — the abstraction + the provider registry, and **nothing
 SDK-specific** (importing it never pulls in a provider SDK):
@@ -381,6 +400,19 @@ and `none` profiles log once that the knob is inert.
   without guessing. Gemini `thought_signature` still uses `provider_metadata`
   for round-trip state.
 
+Gemini preserves the provider enum name in `raw_stop_reason` and applies this
+terminal map:
+
+| Provider state | Canonical outcome |
+|---|---|
+| Actual function-call part | `tool_use`, regardless of finish reason |
+| `STOP` with visible content | `end_turn` |
+| `STOP` without usable content | `empty` |
+| `MAX_TOKENS` | `max_tokens` |
+| `SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`, `IMAGE_RECITATION` | `content_filter` |
+| `FINISH_REASON_UNSPECIFIED`, `LANGUAGE`, `OTHER`, `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, `NO_IMAGE`, `IMAGE_OTHER`, missing, or unknown | `provider_error` |
+| No candidates | `empty` |
+
 **OpenAI-compatible specifics** (isolated in `llm/providers/openai.py`):
 
 - Per-model sampling from `ModelProfile` is copied into the chat-completions
@@ -392,6 +424,27 @@ and `none` profiles log once that the knob is inert.
   inert once and omitted from the request.
 - Malformed tool-call argument JSON is surfaced as `ToolUseBlock.parse_error`
   instead of disappearing into an empty argument object.
+- Missing OpenAI tool IDs are minted once as `call_<uuid>` when the complete
+  tool call is finalized, then reused through dispatch, results, checkpoints,
+  and replay.
+- Real OpenAI requests use `max_completion_tokens`, omit `max_tokens`, and omit
+  `top_k`. Configured compatible endpoints use `max_tokens` and merge `top_k`
+  into `extra_body` without replacing other extension values.
+
+OpenAI preserves the original finish-reason string in `raw_stop_reason` and
+applies this terminal map:
+
+| Provider state | Canonical outcome |
+|---|---|
+| Actual native or legacy function-call block | `tool_use`, regardless of finish reason |
+| `refusal` field without tool content | `refusal` |
+| `stop` with visible content | `end_turn` |
+| `stop` without usable content | `empty` |
+| `length` | `max_tokens` |
+| `content_filter` | `content_filter` |
+| `tool_calls` or `function_call` without a parsed call | `provider_error` |
+| Missing or unknown finish reason | `provider_error` |
+| No choices | `empty` |
 
 ### Agent Layer
 
@@ -456,7 +509,7 @@ discriminators for JSON serialization at the API boundary:
 
 `DoneEvent.reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty",
 "truncated", "budget_exceeded", "deadline_exceeded", "no_progress",
-"incomplete_stream"}`. Guard
+"content_filter", "refusal", "provider_error", "incomplete_stream"}`. Guard
 exits carry any answer text already accrued.
 
 Tool execution failures become `ToolResultEvent(is_error=True)` so the model can
@@ -536,11 +589,11 @@ Per-iteration algorithm:
    (`estimate_usage_tokens`, chars/4 heuristic over the outgoing view +
    system + response) so the token cap works against local servers that
    report zero usage. Never double-counted.
-5. If the response carries `reasoning`, yield a `ReasoningEvent` for trace and
-   raw debug renderers. Reasoning is not appended to session content.
+5. If the response carries `reasoning`, yield a `ReasoningEvent` for tracing.
+   Reasoning is not appended to session content or rendered over HTTP.
 6. Yield a `TextEvent` for each non-empty text block.
-7. Collect tool calls; if no tools were requested, finish with the appropriate
-   done reason (`end_turn`, `truncated`, or `max_iterations`).
+7. Collect tool calls first; if none were requested, finish with the explicit
+   canonical provider outcome or the applicable run-limit reason.
 8. For each tool call, sequentially: emit `ToolCallEvent`, run repeat-call
    detection, convert provider parse errors or schema validation failures into
    teaching `is_error` results, enforce `ToolPolicy`, call MCP with timeout,

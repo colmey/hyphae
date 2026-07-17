@@ -750,7 +750,10 @@ async def run_agent(
                 if not stream and isinstance(block, TextBlock) and block.text:
                     yield await _emit(TextEvent(text=block.text))
 
-            if response.stop_reason == "incomplete_stream":
+            if (
+                active_tool_batch is None
+                and response.stop_reason == "incomplete_stream"
+            ):
                 yield await _emit(
                     ErrorEvent(
                         message="LLM stream ended without a terminal provider message"
@@ -800,14 +803,30 @@ async def run_agent(
                 return
 
             if active_tool_batch is None:
-                # Preserve truncation/max-iteration signals even with text.
-                if response.stop_reason == "max_tokens":
+                # Provider outcomes remain explicit at the native boundary.
+                stop_reason = response.stop_reason
+                if stop_reason == "max_tokens":
                     yield await _emit(_done(reason="truncated"))
-                elif is_final_iteration:
+                elif stop_reason == "content_filter":
+                    yield await _emit(_done(reason="content_filter"))
+                elif stop_reason == "refusal":
+                    yield await _emit(_done(reason="refusal"))
+                elif stop_reason == "empty":
+                    yield await _emit(_done(reason="empty"))
+                elif stop_reason == "end_turn" and is_final_iteration:
                     yield await _emit(_done(reason="max_iterations"))
+                elif stop_reason == "end_turn":
+                    yield await _emit(_done(reason="end_turn"))
                 else:
-                    reason = "end_turn" if response.content else "empty"
-                    yield await _emit(_done(reason=reason))
+                    run_log.warning(
+                        "provider terminated abnormally: canonical=%r raw=%r",
+                        stop_reason,
+                        response.raw_stop_reason,
+                    )
+                    yield await _emit(
+                        ErrorEvent(message="LLM provider terminated abnormally")
+                    )
+                    yield await _emit(_done(reason="provider_error"))
                 return
 
             # Execute tools sequentially; some MCP tools may have side effects.

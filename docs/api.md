@@ -141,8 +141,6 @@ ends after the `done` event. `X-Session-Id` is returned as a response header.
 ```
 data: {"type":"usage","iteration":1,"total_tokens":42,"latency_ms":120.4, ...}
 
-data: {"type":"reasoning","reasoning":"..."}
-
 data: {"type":"tool_call","tool_use_id":"call_1","name":"web_search","args":{"q":"..."}}
 
 data: {"type":"tool_result","tool_use_id":"call_1","name":"web_search","content":"...","is_error":false,"latency_ms":1830.2}
@@ -152,12 +150,12 @@ data: {"type":"text","text":"SpaceX launched ..."}
 data: {"type":"done","reason":"end_turn","iterations":2,"total_tokens":1875}
 ```
 
-Event `type`s: `reasoning`, `text`, `tool_call`, `tool_result`, `usage`,
-`done`, `error`. `reasoning` is trace/debug data extracted from providers such
-as OpenAI-compatible models that self-emit leading `<think>...</think>` blocks;
-it is deliberately visible on this raw event stream and hidden from `/chat` and
-`/v1` answer payloads. A failure mid-turn is delivered as a terminal error frame
-because the SSE response is already open.
+Event `type`s: `text`, `tool_call`, `tool_result`, `usage`, `done`, `error`.
+Provider reasoning/chain-of-thought is trace-only and is not rendered by this
+route, `/chat`, or `/v1`. A failure mid-turn is delivered as a terminal error
+frame because the SSE response is already open. Provider policy and failure
+outcomes remain explicit in `done.reason`: `content_filter`, `refusal`,
+`provider_error`, and `incomplete_stream` are never collapsed to `end_turn`.
 
 **Text is not token-streamed:** assistant text arrives as one `text` event per
 loop iteration. This endpoint streams activity, not provider tokens.
@@ -216,8 +214,9 @@ Content-Type: application/json
 
 `finish_reason` maps from the loop's done reason: `end_turn`/`empty → stop`;
 `truncated`/`max_tokens`/`max_iterations`/`budget_exceeded`/`deadline_exceeded → length`;
-`no_progress → stop`. Unrecoverable or unknown terminal reasons fail closed
-instead of being presented as a successful stop.
+`no_progress → stop`; and `content_filter`/`refusal → content_filter`.
+`provider_error`, `incomplete_stream`, unrecoverable, and unknown terminal
+reasons fail closed instead of being presented as a successful stop.
 Provider-extracted reasoning is not included in the `message.content` payload.
 The response `model` is the registry ID that actually executed, including when
 the request omitted `model` and orchestration selected it.
@@ -241,12 +240,14 @@ data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":
 data: [DONE]
 ```
 
-Reasoning events are skipped by the OpenAI-compatible stream mapper; only
-visible assistant text becomes `delta.content`. Every chunk's `model` is the
+Reasoning events are skipped by the OpenAI-compatible stream mapper; opaque
+provider metadata such as Gemini thought signatures is also absent. Only visible
+assistant text becomes `delta.content`. Every chunk's `model` is the
 registry ID that actually executed. The turn is resolved before the initial
 assistant-role chunk is emitted. If the model fails after the stream opens, any
 prior content remains visible, followed by one OpenAI error envelope and
-`[DONE]`; no successful `finish_reason` frame is emitted.
+`[DONE]`; no successful `finish_reason` frame is emitted. Policy stops and
+refusals instead end normally with `finish_reason: "content_filter"`.
 
 **Tool-call visibility (stream only).** OpenAI clients render only
 `delta.content`, so completed server-side tool calls are folded into collapsible

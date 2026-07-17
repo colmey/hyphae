@@ -215,7 +215,16 @@ async def test_openai_request_capture() -> None:
     request = capture.requests[-1]
     check(request.get("temperature") == 0.7, "temperature reaches OpenAI request")
     check(request.get("top_p") == 0.91, "top_p reaches OpenAI request")
-    check(request.get("top_k") == 42, "top_k reaches OpenAI-compatible request")
+    check("top_k" not in request, "top_k is not a direct OpenAI SDK keyword")
+    check(
+        request.get("extra_body") == {"top_k": 42},
+        "top_k reaches the OpenAI-compatible extension body",
+    )
+    check(request.get("max_tokens") == 123, "compatible endpoint keeps max_tokens")
+    check(
+        "max_completion_tokens" not in request,
+        "compatible endpoint omits max_completion_tokens",
+    )
     check(
         request.get("reasoning_effort") == "high",
         "hint-param thinking maps to reasoning_effort",

@@ -14,6 +14,7 @@ from google.genai import types as genai_types
 from llm.client import LLMClient
 from llm.schemas import (
     AssistantMessage,
+    CanonicalStopReason,
     Message,
     ModelProfile,
     Role,
@@ -21,21 +22,46 @@ from llm.schemas import (
     ToolResultBlock,
     ToolUseBlock,
     Usage,
+    coerce_usage_count,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _canonical_stop_reason(finish_reason: Any) -> str | None:
-    """Normalize a Gemini FinishReason into the harness vocabulary."""
+_CONTENT_FILTER_REASONS = frozenset(
+    {
+        "SAFETY",
+        "RECITATION",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "IMAGE_PROHIBITED_CONTENT",
+        "IMAGE_RECITATION",
+    }
+)
+
+
+def _raw_stop_reason(finish_reason: Any) -> str | None:
     if finish_reason is None:
         return None
-    name = getattr(finish_reason, "name", None) or str(finish_reason)
-    if name == "STOP":
-        return "end_turn"
-    if name == "MAX_TOKENS":
+    return getattr(finish_reason, "name", None) or str(finish_reason)
+
+
+def _canonical_stop_reason(
+    finish_reason: Any, *, has_tools: bool, has_visible_content: bool
+) -> CanonicalStopReason:
+    """Translate Gemini terminal state, with function-call parts authoritative."""
+    if has_tools:
+        return "tool_use"
+    raw_reason = _raw_stop_reason(finish_reason)
+    if raw_reason == "STOP":
+        return "end_turn" if has_visible_content else "empty"
+    if raw_reason == "MAX_TOKENS":
         return "max_tokens"
-    return name.lower()
+    if raw_reason in _CONTENT_FILTER_REASONS:
+        return "content_filter"
+    return "provider_error"
 
 
 class GeminiLLMClient(LLMClient):
@@ -218,6 +244,7 @@ class GeminiLLMClient(LLMClient):
             return AssistantMessage(
                 content=[],
                 stop_reason="empty",
+                raw_stop_reason=None,
                 model=self._model,
                 usage=self._usage_from_response(response),
                 reasoning=None,
@@ -256,9 +283,20 @@ class GeminiLLMClient(LLMClient):
 
             logger.debug("unhandled gemini part type: %r", part)
 
+        has_tools = any(isinstance(block, ToolUseBlock) for block in blocks)
+        has_visible_content = any(
+            isinstance(block, TextBlock) and bool(block.text) for block in blocks
+        )
+        raw_stop_reason = _raw_stop_reason(finish_reason)
+
         return AssistantMessage(
             content=blocks,
-            stop_reason=_canonical_stop_reason(finish_reason),
+            stop_reason=_canonical_stop_reason(
+                finish_reason,
+                has_tools=has_tools,
+                has_visible_content=has_visible_content,
+            ),
+            raw_stop_reason=raw_stop_reason,
             model=self._model,
             usage=self._usage_from_response(response),
         )
@@ -269,13 +307,12 @@ class GeminiLLMClient(LLMClient):
         if um is None:
             return Usage()
 
-        def _n(v: Any) -> int:
-            return int(v) if v else 0
-
         return Usage(
-            input_tokens=_n(getattr(um, "prompt_token_count", 0)),
-            output_tokens=_n(getattr(um, "candidates_token_count", 0)),
-            total_tokens=_n(getattr(um, "total_token_count", 0)),
-            thinking_tokens=_n(getattr(um, "thoughts_token_count", 0)),
-            cached_tokens=_n(getattr(um, "cached_content_token_count", 0)),
+            input_tokens=coerce_usage_count(getattr(um, "prompt_token_count", 0)),
+            output_tokens=coerce_usage_count(getattr(um, "candidates_token_count", 0)),
+            total_tokens=coerce_usage_count(getattr(um, "total_token_count", 0)),
+            thinking_tokens=coerce_usage_count(getattr(um, "thoughts_token_count", 0)),
+            cached_tokens=coerce_usage_count(
+                getattr(um, "cached_content_token_count", 0)
+            ),
         )

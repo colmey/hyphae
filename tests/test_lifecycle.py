@@ -14,7 +14,7 @@ from openai import AsyncOpenAI, AsyncStream
 
 import main as main_module
 import orchestrator.registry as registry_module
-from config import ModelEntry, ModelsConfig
+from config import MCPConfig, ModelEntry, ModelsConfig
 from llm.client import GenerationRequest, LLMClient
 from llm.prompted_tools import PromptedToolLLMClient
 from llm.providers.gemini import GeminiLLMClient
@@ -336,4 +336,54 @@ async def test_lifespan_closes_default_llm_after_partial_startup_failure(
         async with lifespan(FastAPI()):
             raise AssertionError("startup failure must prevent lifespan entry")
 
+    assert default.close_calls == 1
+
+
+async def test_lifespan_injects_mcp_connect_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    default = _ClosingClient()
+    captured: dict[str, float] = {}
+
+    class _Manager:
+        connected_servers: list[str] = []
+
+        def __init__(self, config: MCPConfig, *, connect_timeout_seconds: float) -> None:
+            captured["timeout"] = connect_timeout_seconds
+
+        async def startup(self) -> None:
+            pass
+
+        async def shutdown(self) -> None:
+            pass
+
+        def list_tools(self) -> list[Any]:
+            return []
+
+        def status_snapshot(self) -> tuple[Any, ...]:
+            return ()
+
+    settings = SimpleNamespace(
+        log_level="INFO",
+        llm_provider="test",
+        llm_model="test-model",
+        mcp_config_path="mcp.yaml",
+        mcp_connect_timeout_seconds=17.5,
+        orchestration_enabled=False,
+        session_ttl_seconds=0,
+        session_max_count=0,
+        trace_enabled=False,
+        trace_path=tmp_path / "trace.jsonl",
+    )
+    mcp_config = MCPConfig.model_validate({"mcpServers": {}})
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "build_llm_client", lambda value: default)
+    monkeypatch.setattr(main_module, "load_mcp_config", lambda path: mcp_config)
+    monkeypatch.setattr(main_module, "MCPManager", _Manager)
+
+    async with lifespan(FastAPI()):
+        pass
+
+    assert captured == {"timeout": 17.5}
     assert default.close_calls == 1

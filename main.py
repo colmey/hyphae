@@ -177,11 +177,12 @@ def _log_ready_summary(
 
     logger.info(
         "harness ready: provider=%s default_model=%s | %s | "
-        "mcp=%d servers connected (%d tools)",
+        "mcp=%d/%d servers healthy (%d tools)",
         settings.llm_provider,
         settings.llm_model,
         orch_part,
         len(mcp.connected_servers),
+        len(mcp.status_snapshot()),
         len(mcp.list_tools()),
     )
 
@@ -208,7 +209,10 @@ async def lifespan(app: FastAPI):
     tracer: Tracer | None = None
     try:
         mcp_config = load_mcp_config(settings.mcp_config_path)
-        mcp = MCPManager(mcp_config)
+        mcp = MCPManager(
+            mcp_config,
+            connect_timeout_seconds=settings.mcp_connect_timeout_seconds,
+        )
         await mcp.startup()
 
         # Dispatch policy is what may run; orchestration is only what the model sees.

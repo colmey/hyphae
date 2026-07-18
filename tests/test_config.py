@@ -45,6 +45,14 @@ def test_settings_load_without_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.llm_model
     assert settings.llm_max_tokens > 0
     assert settings.max_loop_iterations > 0
+    assert settings.mcp_connect_timeout_seconds == 30
+
+
+@pytest.mark.parametrize("value", [0, -1, 12.5])
+def test_mcp_connect_timeout_accepts_disabled_and_positive_values(value: float) -> None:
+    settings = Settings(_env_file=None, mcp_connect_timeout_seconds=value)
+
+    assert settings.mcp_connect_timeout_seconds == value
 
 
 def test_load_mcp_config_and_filter_disabled_servers(tmp_path) -> None:

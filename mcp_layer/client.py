@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -62,6 +63,7 @@ class MCPClient:
 
         stack = AsyncExitStack()
         connected = False
+        primary_error: BaseException | None = None
         try:
             if isinstance(self.config, StreamableHTTPServer):
                 logger.info(
@@ -111,11 +113,35 @@ class MCPClient:
             logger.info(
                 "connected to %r: %d tool(s) available", self.name, len(self._tools)
             )
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
             # CancelledError from failed transports is BaseException, so cleanup
             # must live in finally rather than `except Exception`.
             if not connected:
-                await stack.aclose()
+                try:
+                    await stack.aclose()
+                except asyncio.CancelledError:
+                    # A new application cancellation takes precedence over an
+                    # ordinary connection error. If cancellation was already the
+                    # primary outcome, preserve that original cancellation.
+                    if not isinstance(primary_error, asyncio.CancelledError):
+                        raise
+                    logger.warning(
+                        "cleanup after cancelled connection to %r was cancelled",
+                        self.name,
+                    )
+                except BaseException:
+                    if primary_error is None:
+                        raise
+                    # Cleanup failure must not replace a timeout, connection
+                    # exception, or application cancellation already in flight.
+                    logger.warning(
+                        "cleanup after failed connection to %r failed",
+                        self.name,
+                        exc_info=True,
+                    )
 
     async def call_tool(
         self, tool_name: str, arguments: dict[str, Any]

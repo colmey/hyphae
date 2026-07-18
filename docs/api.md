@@ -34,19 +34,42 @@ curl -sS -X POST http://localhost:8000/chat \
 
 ```json
 {
-  "status": "ok",
-  "provider": "gemini",
-  "model": "gemini-3-flash-preview",
-  "connected_servers": ["my-toolbox", "web-search"],
-  "tool_count": 15,
+  "status": "degraded",
+  "provider": "openai",
+  "model": "qwen",
+  "connected_servers": ["my-toolbox"],
+  "tool_count": 8,
+  "mcp_servers": [
+    {
+      "name": "my-toolbox",
+      "state": "healthy",
+      "last_error": null,
+      "tool_count": 8
+    },
+    {
+      "name": "web-search",
+      "state": "unhealthy",
+      "last_error": "connection timed out after 30 seconds",
+      "tool_count": 0
+    }
+  ],
   "orchestration_enabled": true,
-  "available_model_ids": ["gemini-flash", "gemini-pro"]
+  "available_model_ids": ["qwen-local"]
 }
 ```
 
 `orchestration_enabled` is true if and only if an orchestrator was built
 during startup. `available_model_ids` lists the model IDs from
 `config/models.yaml` (empty when orchestration is off).
+
+`mcp_servers` contains every configured enabled server in configuration order.
+Its state is one of `disconnected`, `connecting`, `healthy`, `unhealthy`, or
+`closed`; errors are sanitized and unhealthy servers always advertise zero
+tools. The compatibility fields remain: `connected_servers` contains healthy
+servers only and `tool_count` is the aggregate healthy inventory. Top-level
+`status` is `ok` when every enabled server is healthy (or none are enabled), and
+`degraded` otherwise. This is a startup snapshot, not an active reachability
+probe; `/health` remains HTTP 200 in either state.
 
 ## `POST /chat`
 

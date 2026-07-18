@@ -12,6 +12,9 @@ from config import Settings
 class EmptyMCP:
     connected_servers: list[str] = []
 
+    def status_snapshot(self) -> tuple[Any, ...]:
+        return ()
+
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
         return []
 

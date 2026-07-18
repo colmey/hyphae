@@ -14,7 +14,11 @@ harness still uses:
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+from mcp_layer import MCPServerState
 
 
 class TokenUsage(BaseModel):
@@ -52,14 +56,24 @@ class OrchestrationInfo(BaseModel):
     )
 
 
+class MCPServerHealth(BaseModel):
+    """One configured enabled MCP server's startup status."""
+
+    name: str
+    state: MCPServerState
+    last_error: str | None
+    tool_count: int
+
+
 class HealthResponse(BaseModel):
     """Body for GET /health."""
 
-    status: str
+    status: Literal["ok", "degraded"]
     provider: str
     model: str
     connected_servers: list[str]
     tool_count: int
+    mcp_servers: list[MCPServerHealth]
     orchestration_enabled: bool = Field(
         default=False,
         description="True if the orchestration layer is active.",

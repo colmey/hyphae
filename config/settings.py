@@ -57,6 +57,13 @@ class Settings(BaseSettings):
         default=60,
         description="Cap on a single mcp.call_tool() call. <=0 disables.",
     )
+    mcp_connect_timeout_seconds: float = Field(
+        default=30,
+        description=(
+            "Cap on complete MCP startup connection setup, including transport, "
+            "initialization, and initial tool discovery. <=0 disables."
+        ),
+    )
     llm_max_retries: int = Field(
         default=3,
         description=(

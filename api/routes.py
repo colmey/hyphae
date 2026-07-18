@@ -18,7 +18,7 @@ from agent import (
     SessionStore,
 )
 from agent.tracing import event_record
-from mcp_layer import MCPManager
+from mcp_layer import MCPManager, MCPServerState
 from orchestrator import LLMRegistry
 
 from .dependencies import (
@@ -63,12 +63,26 @@ async def health(
     settings=Depends(get_settings_obj),
     registry: Optional[LLMRegistry] = Depends(get_registry),
 ) -> HealthResponse:
+    server_statuses = mcp.status_snapshot()
     return HealthResponse(
-        status="ok",
+        status=(
+            "ok"
+            if all(status.state is MCPServerState.HEALTHY for status in server_statuses)
+            else "degraded"
+        ),
         provider=settings.llm_provider,
         model=settings.llm_model,
         connected_servers=mcp.connected_servers,
         tool_count=len(mcp.list_tools()),
+        mcp_servers=[
+            {
+                "name": status.name,
+                "state": status.state,
+                "last_error": status.last_error,
+                "tool_count": status.tool_count,
+            }
+            for status in server_statuses
+        ],
         orchestration_enabled=registry is not None,
         available_model_ids=registry.model_ids if registry is not None else [],
     )

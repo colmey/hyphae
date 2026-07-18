@@ -377,8 +377,10 @@ overlaps get 409.
 
 ### Graceful shutdown
 
-Uvicorn lifespan shutdown closes every constructed LLM SDK client, then MCP
-connections and the tracer. The default LLM and lazy registry cache are
+Uvicorn lifespan shutdown closes every constructed LLM SDK client, then every
+retained MCP client (healthy or failed), and the tracer. MCP inventory is
+cleared and records transition to `closed` before client cleanup. The default
+LLM and lazy registry cache are
 combined by object identity, so a client reachable through both paths is closed
 once. Prompted-tool wrappers forward lifecycle ownership to their inner
 provider. One cleanup failure is logged and does not skip the remaining LLMs or
@@ -418,18 +420,24 @@ DEBUG so you can audit what the agent was told without spamming INFO.
 
 ### Health checks
 
-`GET /health` returns 200 as long as the app is up. It does **not**
-check MCP server reachability after startup — `connected_servers` shows
-who connected at startup, not who's currently reachable. It also
-doesn't probe the orchestrator's LLM provider. Add a real liveness
-check if you need one.
+`GET /health` returns 200 as long as the app is up. `mcp_servers` reports every
+configured enabled server's startup state, sanitized last error, and advertised
+tool count. `connected_servers` remains the healthy-only compatibility list and
+`tool_count` remains the aggregate healthy inventory. Top-level status is `ok`
+when all enabled servers are healthy (or none are enabled) and `degraded`
+otherwise.
+
+This is a truthful startup snapshot, not an active reachability probe. Plan 06
+does not reconnect, retry, poll, or replay a tool call, and the endpoint does
+not probe the orchestrator's LLM provider. Add a separate liveness/readiness
+policy if deployment requirements need active probes.
 
 ### Failure modes
 
 | Symptom                                       | Likely cause                                                 |
 |-----------------------------------------------|--------------------------------------------------------------|
 | App fails to start with missing-key error     | API key missing from `.env`, `config.load_secrets()` didn't run, or wrong `LLM_PROVIDER` |
-| `/health` shows fewer servers than configured | One or more MCP servers were unreachable at startup          |
+| `/health` is `degraded` or an MCP server is `unhealthy` | The server failed, was cancelled, or exceeded `MCP_CONNECT_TIMEOUT_SECONDS` during startup; healthy siblings remain usable |
 | `/health` shows `orchestration_enabled: false` | `models.yaml` or `orchestrator_prompt.md` missing/unparseable, or `ORCHESTRATION_ENABLED=false`. Lifespan logs the reason. |
 | Every response has `orchestration.fallback_used: true` | Orchestrator's LLM call is failing. Check the `orchestration fallback in effect:` warning logs for the underlying provider error. |
 | 400 from `/chat`                              | Empty request body. `/chat` is plain text — send the prompt as the body. |
@@ -587,8 +595,9 @@ extension path described above.
   (distinct sessions are fully isolated and run in parallel freely). The
   guard is in-process; a multi-worker deployment would need a shared claim
   (see "Adding persistence") to cover the same id across workers.
-- **`/health` doesn't probe MCP after startup.** It only reports the
-  startup snapshot. It also doesn't probe the orchestrator's LLM provider.
+- **`/health` doesn't probe MCP after startup.** It truthfully reports every
+  enabled server's retained startup state and healthy inventory, but does not
+  reconnect or poll. It also doesn't probe the orchestrator's LLM provider.
 - **Two LLM providers implemented: Gemini and OpenAI-compatible.** The OpenAI
   client also drives any OpenAI-compatible server (local Ollama/vLLM) via
   `base_url`, and is the **default runtime** (a local Qwen, per

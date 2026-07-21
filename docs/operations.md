@@ -104,10 +104,12 @@ See [configuration.md](configuration.md) for the env vars and profile fields.
 
 `/v1/chat/completions` with `stream:true` uses the provider's native token
 stream when the selected OpenAI-compatible model client supports it. The
-existing `LLM_TIMEOUT_SECONDS` caps time-to-first-chunk for this path; after
-the first text delta is emitted, the harness does not retry or resume a broken
-stream. A later provider failure is surfaced as partial text followed by an
-error event and `done_reason=llm_error`.
+existing `LLM_TIMEOUT_SECONDS` caps each incremental provider read for this
+path, so the idle timeout resets after every chunk while `MAX_RUN_SECONDS`
+continues shrinking absolutely. After the first text delta is emitted, the
+harness does not retry or resume a broken stream. A later provider failure is
+surfaced as partial text followed by an error event and
+`done_reason=llm_error`.
 
 Local harness verification:
 

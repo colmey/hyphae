@@ -563,6 +563,13 @@ Reliability params default to legacy behavior for direct callers; routes opt in
 by passing `Settings` values. The loop owns timeout/retry policy while providers
 classify transient errors.
 
+Buffered and streaming generation share one private attempt-policy controller
+for attempt counts, deadline-aware timeout bounds, transient eligibility,
+jittered exponential backoff, and cancellable retry sleep. Their completion
+mechanics remain separate: buffered generation awaits one response, while
+streaming applies the configured LLM timeout to every incremental read and
+never retries after a visible delta has been emitted.
+
 **The caller appends the user message before invoking `run_agent`.** The
 loop owns assistant turns and tool round-trips. This keeps the loop
 callable identically from a CLI, a FastAPI route, or a test.
@@ -657,7 +664,11 @@ before the call ever reaches the server. Provider parse failures
 visible feedback rather than a silent `{}` execution. Validation and parse
 failures count toward the consecutive-failure counter like any other tool
 error, so a model stuck sending malformed args still trips the no-progress
-abort if one is configured.
+abort if one is configured. Concrete JSON Schema validators are selected,
+schema-checked, and compiled once from the turn's immutable tool inventory,
+then reused for every matching call in that run. A malformed advertised schema
+warns once during setup and is permissive for that run; validator state never
+mutates the snapshot or MCP inventory.
 
 If any bounded-run guard trips after an assistant has requested tools, the loop
 emits and persists compact synthetic `is_error=True` results for skipped tool

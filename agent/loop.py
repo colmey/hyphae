@@ -10,14 +10,16 @@ import logging
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Protocol
 
 import jsonschema
+from jsonschema.validators import validator_for
 
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     Message,
+    StreamChunk,
     StreamEnd,
     TextBlock,
     TextDelta,
@@ -88,6 +90,84 @@ _CANCELLED_TOOL_NOT_STARTED_MESSAGE = (
 
 class _RunDeadlineExceeded(TimeoutError):
     """Internal signal that the run-level wall clock expired."""
+
+
+@dataclass(frozen=True)
+class _TimeoutBound:
+    """One timeout computed against the current absolute run deadline."""
+
+    seconds: float | None
+    deadline_limited: bool
+
+
+@dataclass(frozen=True)
+class _AttemptController:
+    """Shared attempt, deadline, and backoff policy for one LLM generation."""
+
+    limits: RunLimits
+    context: RunContext
+    log: logging.Logger | logging.LoggerAdapter
+
+    @property
+    def total_attempts(self) -> int:
+        return max(0, self.limits.max_retries) + 1
+
+    def indexes(self) -> range:
+        return range(self.total_attempts)
+
+    def ensure_before_attempt(self) -> None:
+        if self.context.deadline_exceeded():
+            raise _RunDeadlineExceeded()
+
+    def timeout_bound(self) -> _TimeoutBound:
+        """Return the smaller enabled LLM timeout and remaining run budget."""
+        remaining = self.context.remaining()
+        if remaining is not None and remaining <= 0:
+            raise _RunDeadlineExceeded()
+
+        per_attempt = self.limits.llm_timeout_seconds
+        if per_attempt is not None and per_attempt <= 0:
+            per_attempt = None
+        if remaining is None:
+            return _TimeoutBound(per_attempt, False)
+        if per_attempt is None or remaining <= per_attempt:
+            return _TimeoutBound(remaining, True)
+        return _TimeoutBound(per_attempt, False)
+
+    async def retry(
+        self,
+        attempt_index: int,
+        *,
+        eligible: bool,
+        mode: str,
+        reason: str,
+        cause: BaseException | None = None,
+    ) -> bool:
+        """Sleep for the next retry, or report that this attempt is final."""
+        if not eligible or attempt_index >= self.total_attempts - 1:
+            return False
+
+        delay = _backoff_delay(self.limits.retry_base_delay, attempt_index)
+        remaining = self.context.remaining()
+        if remaining is not None:
+            if remaining <= 0:
+                raise _RunDeadlineExceeded() from cause
+            delay = min(delay, remaining)
+
+        suffix = f": {cause}" if cause is not None else ""
+        self.log.warning(
+            "retrying %s LLM after %s (attempt %d/%d) in %.2fs%s",
+            mode,
+            reason,
+            attempt_index + 1,
+            self.total_attempts,
+            delay,
+            suffix,
+        )
+        await asyncio.sleep(delay)
+        if self.context.deadline_exceeded():
+            raise _RunDeadlineExceeded() from cause
+        return True
 
 
 @dataclass
@@ -172,33 +252,83 @@ def _canonical_args(args: dict[str, Any]) -> str:
         return repr(args)
 
 
-def _validate_tool_args(
-    schema: dict[str, Any] | None,
-    args: dict[str, Any],
+class _ArgumentValidator(Protocol):
+    """Run-local argument-validation seam used by tool dispatch."""
+
+    def validate(self, args: dict[str, Any]) -> str | None: ...
+
+
+class _ConcreteSchemaValidator(Protocol):
+    """Minimal jsonschema validator surface retained by the run wrapper."""
+
+    def validate(self, instance: Any) -> None: ...
+
+
+class _PermissiveArgumentValidator:
+    """Sentinel used for absent or unusable schemas."""
+
+    def validate(self, args: dict[str, Any]) -> None:
+        return None
+
+
+_PERMISSIVE_VALIDATOR = _PermissiveArgumentValidator()
+
+
+@dataclass
+class _CompiledArgumentValidator:
+    """Concrete JSON Schema validator isolated to one run and tool."""
+
+    name: str
+    concrete: _ConcreteSchemaValidator
+    log: logging.Logger | logging.LoggerAdapter
+    _disabled: bool = field(default=False, init=False)
+
+    def validate(self, args: dict[str, Any]) -> str | None:
+        if self._disabled:
+            return None
+        try:
+            self.concrete.validate(args)
+        except jsonschema.ValidationError as exc:
+            field_path = "/".join(str(part) for part in exc.path) or "(top level)"
+            return (
+                f"invalid arguments for field {field_path!r}: {exc.message}. "
+                f"Expected shape: {json.dumps(exc.schema, ensure_ascii=False)}"
+            )
+        except Exception:  # noqa: BLE001 -- a broken schema stays permissive.
+            self._disabled = True
+            self.log.warning(
+                "tool %s input validator failed; disabling arg validation for this run",
+                self.name,
+                exc_info=True,
+            )
+        return None
+
+
+def _compile_tool_validators(
+    tools: list[dict[str, Any]],
     *,
     log: logging.Logger | logging.LoggerAdapter = logger,
-) -> str | None:
-    """Validate a tool call's arguments against its declared `input_schema`.
-
-    Returns a model-facing error on failure. Missing or malformed schemas are
-    treated as permissive; only declared constraints are enforced.
-    """
-    if not schema:
-        return None
-    try:
-        jsonschema.validate(instance=args, schema=schema)
-    except jsonschema.ValidationError as exc:
-        field = "/".join(str(p) for p in exc.path) or "(top level)"
-        return (
-            f"invalid arguments for field {field!r}: {exc.message}. "
-            f"Expected shape: {json.dumps(exc.schema, ensure_ascii=False)}"
-        )
-    except jsonschema.SchemaError:
-        log.warning(
-            "tool input_schema is invalid; skipping arg validation", exc_info=True
-        )
-        return None
-    return None
+) -> dict[str, _ArgumentValidator]:
+    """Compile each advertised tool schema once for this run."""
+    schemas = {tool["name"]: tool.get("input_schema") or {} for tool in tools}
+    validators: dict[str, _ArgumentValidator] = {}
+    for name, schema in schemas.items():
+        try:
+            validator_cls = validator_for(schema)
+            validator_cls.check_schema(schema)
+            validators[name] = _CompiledArgumentValidator(
+                name=name,
+                concrete=validator_cls(schema),
+                log=log,
+            )
+        except Exception:  # noqa: BLE001 -- malformed tool schemas are permissive.
+            log.warning(
+                "tool %s input_schema is invalid; skipping arg validation",
+                name,
+                exc_info=True,
+            )
+            validators[name] = _PERMISSIVE_VALIDATOR
+    return validators
 
 
 def _with_wrapup(system: str | None) -> str:
@@ -212,76 +342,75 @@ async def _complete_with_retry(
     llm: LLMClient,
     *,
     request: GenerationRequest,
-    timeout: float | None,
-    max_retries: int,
-    base_delay: float,
-    deadline_expired: Callable[[], bool] | None = None,
-    remaining_seconds: Callable[[], float | None] | None = None,
-    log: logging.Logger | logging.LoggerAdapter = logger,
+    attempts: _AttemptController,
 ) -> AssistantMessage:
     """Call llm.complete() with a per-attempt timeout and bounded retries.
 
     Retries transient errors, timeouts, and empty responses. Exhausted transient
     errors re-raise; exhausted empty responses return the last empty response.
     """
-    attempts = max(0, max_retries) + 1
-    last_response: AssistantMessage | None = None
-
-    for attempt in range(attempts):
-        if deadline_expired is not None and deadline_expired():
-            raise _RunDeadlineExceeded()
+    for attempt_index in attempts.indexes():
+        attempts.ensure_before_attempt()
+        timeout = attempts.timeout_bound()
         try:
-            if timeout and timeout > 0:
-                async with asyncio.timeout(timeout):
+            if timeout.seconds is not None and timeout.seconds > 0:
+                async with asyncio.timeout(timeout.seconds):
                     response = await llm.complete(request)
             else:
                 response = await llm.complete(request)
-        except Exception as exc:
-            if deadline_expired is not None and deadline_expired():
+        except TimeoutError as exc:
+            if timeout.deadline_limited or attempts.context.deadline_exceeded():
                 raise _RunDeadlineExceeded() from exc
-            transient = isinstance(exc, TimeoutError) or llm.is_transient_error(exc)
-            if not transient or attempt == attempts - 1:
-                raise
-            delay = _backoff_delay(base_delay, attempt)
-            log.warning(
-                "transient LLM error (attempt %d/%d), retrying in %.2fs: %s",
-                attempt + 1,
-                attempts,
-                delay,
-                exc,
-            )
-            if remaining_seconds is not None:
-                remaining = remaining_seconds()
-                if remaining is not None:
-                    if remaining <= 0:
-                        raise _RunDeadlineExceeded() from exc
-                    delay = min(delay, remaining)
-            await asyncio.sleep(delay)
-            continue
+            if await attempts.retry(
+                attempt_index,
+                eligible=True,
+                mode="buffered",
+                reason="timeout",
+                cause=exc,
+            ):
+                continue
+            raise
+        except Exception as exc:
+            if attempts.context.deadline_exceeded():
+                raise _RunDeadlineExceeded() from exc
+            if await attempts.retry(
+                attempt_index,
+                eligible=llm.is_transient_error(exc),
+                mode="buffered",
+                reason="transient provider error",
+                cause=exc,
+            ):
+                continue
+            raise
 
         # Success. An empty-candidates response is retryable up to the budget.
-        if response.stop_reason == "empty" and attempt < attempts - 1:
-            last_response = response
-            delay = _backoff_delay(base_delay, attempt)
-            log.warning(
-                "empty LLM response (attempt %d/%d), retrying in %.2fs",
-                attempt + 1,
-                attempts,
-                delay,
-            )
-            if remaining_seconds is not None:
-                remaining = remaining_seconds()
-                if remaining is not None:
-                    if remaining <= 0:
-                        raise _RunDeadlineExceeded()
-                    delay = min(delay, remaining)
-            await asyncio.sleep(delay)
+        if await attempts.retry(
+            attempt_index,
+            eligible=response.stop_reason == "empty",
+            mode="buffered",
+            reason="empty response",
+        ):
             continue
         return response
 
-    # Only reachable if the final attempt produced an empty response.
-    assert last_response is not None
-    return last_response
+    raise AssertionError("attempt controller produced no buffered attempts")
+
+
+async def _read_stream_chunk(
+    chunks: AsyncIterator[StreamChunk],
+    attempts: _AttemptController,
+) -> StreamChunk:
+    """Read one stream chunk within the idle timeout and absolute deadline."""
+    timeout = attempts.timeout_bound()
+    if timeout.seconds is None or timeout.seconds <= 0:
+        return await anext(chunks)
+    try:
+        async with asyncio.timeout(timeout.seconds):
+            return await anext(chunks)
+    except TimeoutError as exc:
+        if timeout.deadline_limited or attempts.context.deadline_exceeded():
+            raise _RunDeadlineExceeded() from exc
+        raise
 
 
 async def _close_stream(
@@ -348,8 +477,6 @@ async def run_agent(
     max_tokens = limits.max_tokens
     llm_timeout_seconds = limits.llm_timeout_seconds
     tool_timeout_seconds = limits.tool_timeout_seconds
-    max_retries = limits.max_retries
-    retry_base_delay = limits.retry_base_delay
     tool_result_max_chars = limits.tool_result_max_chars
     max_run_tokens = limits.max_run_tokens
     max_run_seconds = limits.max_run_seconds
@@ -363,9 +490,7 @@ async def run_agent(
     # `tools` controls what the model sees; MCP dispatch still routes by name.
     if tools is None:
         tools = mcp.get_tools_for_llm()
-    tool_schemas: dict[str, dict[str, Any] | None] = {
-        t["name"]: t.get("input_schema") for t in tools
-    }
+    tool_validators = _compile_tool_validators(tools, log=run_log)
     # Policy controls what may run.
     policy = policy or _DEFAULT_POLICY
     iteration = 0
@@ -388,36 +513,11 @@ async def run_agent(
             thinking_tokens=cumulative.thinking_tokens,
         )
 
-    def _remaining_run_seconds() -> float | None:
-        return context.remaining()
-
     def _deadline_exceeded() -> bool:
         return context.deadline_exceeded()
 
     def _effective_timeout(per_call_timeout: float | None) -> float | None:
         return context.effective_timeout(per_call_timeout)
-
-    def _stream_read_timeout() -> tuple[float | None, bool]:
-        """Return (seconds, deadline_limited) for the next provider read.
-
-        Unlike a whole-call timeout, the configured LLM timeout is an idle
-        bound that resets for every streamed read.  The run deadline remains
-        absolute and therefore shrinks between chunks.
-        """
-        remaining = _remaining_run_seconds()
-        if remaining is not None and remaining <= 0:
-            raise _RunDeadlineExceeded()
-
-        per_read = (
-            llm_timeout_seconds
-            if llm_timeout_seconds is not None and llm_timeout_seconds > 0
-            else None
-        )
-        if remaining is None:
-            return per_read, False
-        if per_read is None or remaining <= per_read:
-            return remaining, True
-        return per_read, False
 
     def _token_budget_exceeded() -> bool:
         return (
@@ -562,33 +662,23 @@ async def run_agent(
             thinking_level=thinking_level,
         )
         llm_started = time.perf_counter()
+        attempts = _AttemptController(limits=limits, context=context, log=run_log)
         try:
             if stream:
-                attempts = max(0, max_retries) + 1
                 response: AssistantMessage | None = None
 
-                for attempt in range(attempts):
-                    if _deadline_exceeded():
-                        raise _RunDeadlineExceeded()
+                for attempt_index in attempts.indexes():
+                    attempts.ensure_before_attempt()
                     visible_deltas: list[str] = []
-                    chunks: AsyncIterator[Any] | None = None
+                    chunks: AsyncIterator[StreamChunk] | None = None
+                    attempt_response: AssistantMessage | None = None
+                    attempt_error: Exception | None = None
+                    retryable_error = False
                     try:
                         chunks = llm.stream(generation_request)
                         while True:
-                            if _deadline_exceeded():
-                                raise _RunDeadlineExceeded()
                             try:
-                                timeout, deadline_limited = _stream_read_timeout()
-                                if timeout and timeout > 0:
-                                    try:
-                                        async with asyncio.timeout(timeout):
-                                            chunk = await anext(chunks)
-                                    except TimeoutError as exc:
-                                        if deadline_limited or _deadline_exceeded():
-                                            raise _RunDeadlineExceeded() from exc
-                                        raise
-                                else:
-                                    chunk = await anext(chunks)
+                                chunk = await _read_stream_chunk(chunks, attempts)
                             except StopAsyncIteration:
                                 break
 
@@ -597,85 +687,74 @@ async def run_agent(
                                     visible_deltas.append(chunk.text)
                                     yield await _emit(TextEvent(text=chunk.text))
                             elif isinstance(chunk, StreamEnd):
-                                response = chunk.message
+                                attempt_response = chunk.message
                                 break
 
-                        if response is None:
+                        if attempt_response is None:
                             if visible_deltas:
-                                response = AssistantMessage(
+                                attempt_response = AssistantMessage(
                                     content=[TextBlock(text="".join(visible_deltas))],
                                     stop_reason="incomplete_stream",
                                     model=None,
                                     usage=Usage(),
                                 )
                             else:
-                                response = AssistantMessage(
+                                attempt_response = AssistantMessage(
                                     content=[],
                                     stop_reason="empty",
                                     model=None,
                                     usage=Usage(),
                                 )
-                        if (
-                            response.stop_reason == "empty"
-                            and attempt < attempts - 1
-                            and not visible_deltas
-                        ):
-                            delay = _backoff_delay(retry_base_delay, attempt)
-                            run_log.warning(
-                                "empty LLM stream (attempt %d/%d), retrying in %.2fs",
-                                attempt + 1,
-                                attempts,
-                                delay,
-                            )
-                            remaining = _remaining_run_seconds()
-                            if remaining is not None:
-                                if remaining <= 0:
-                                    raise _RunDeadlineExceeded()
-                                delay = min(delay, remaining)
-                            await asyncio.sleep(delay)
-                            response = None
-                            continue
-                        break
+                    except _RunDeadlineExceeded:
+                        raise
                     except Exception as exc:
-                        if isinstance(exc, _RunDeadlineExceeded):
-                            raise
                         if _deadline_exceeded():
                             raise _RunDeadlineExceeded() from exc
-                        transient = isinstance(
-                            exc, TimeoutError
-                        ) or llm.is_transient_error(exc)
-                        if visible_deltas or not transient or attempt == attempts - 1:
-                            raise
-                        delay = _backoff_delay(retry_base_delay, attempt)
-                        run_log.warning(
-                            "transient LLM stream error (attempt %d/%d), retrying in %.2fs: %s",
-                            attempt + 1,
-                            attempts,
-                            delay,
-                            exc,
+                        attempt_error = exc
+                        retryable_error = not visible_deltas and (
+                            isinstance(exc, TimeoutError)
+                            or llm.is_transient_error(exc)
                         )
-                        remaining = _remaining_run_seconds()
-                        if remaining is not None:
-                            if remaining <= 0:
-                                raise _RunDeadlineExceeded() from exc
-                            delay = min(delay, remaining)
-                        await asyncio.sleep(delay)
-                        continue
                     finally:
                         if chunks is not None:
                             await _close_stream(chunks, log=run_log)
+
+                    if attempt_error is not None:
+                        retry_reason = (
+                            "timeout"
+                            if isinstance(attempt_error, TimeoutError)
+                            else "transient provider error"
+                        )
+                        if await attempts.retry(
+                            attempt_index,
+                            eligible=retryable_error,
+                            mode="streaming",
+                            reason=retry_reason,
+                            cause=attempt_error,
+                        ):
+                            continue
+                        raise attempt_error
+
+                    assert attempt_response is not None
+                    if await attempts.retry(
+                        attempt_index,
+                        eligible=(
+                            attempt_response.stop_reason == "empty"
+                            and not visible_deltas
+                        ),
+                        mode="streaming",
+                        reason="empty response",
+                    ):
+                        continue
+                    response = attempt_response
+                    break
 
                 assert response is not None
             else:
                 response = await _complete_with_retry(
                     llm,
                     request=generation_request,
-                    timeout=_effective_timeout(llm_timeout_seconds),
-                    max_retries=max_retries,
-                    base_delay=retry_base_delay,
-                    deadline_expired=_deadline_exceeded,
-                    remaining_seconds=_remaining_run_seconds,
-                    log=run_log,
+                    attempts=attempts,
                 )
         except _RunDeadlineExceeded:
             elapsed = context.elapsed()
@@ -852,9 +931,10 @@ async def run_agent(
                             "return the arguments as a JSON object matching the tool schema."
                         )
                     else:
-                        validation_error = _validate_tool_args(
-                            tool_schemas.get(tu.name), tu.input, log=run_log
+                        validator = tool_validators.get(
+                            tu.name, _PERMISSIVE_VALIDATOR
                         )
+                        validation_error = validator.validate(tu.input)
 
                     decision = (
                         policy.check(tu.name, tu.input)

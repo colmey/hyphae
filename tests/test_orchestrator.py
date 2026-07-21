@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -9,7 +10,7 @@ import pytest
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, Message, TextBlock
 from mcp_layer import ToolSnapshot
-from orchestrator import Orchestrator
+from orchestrator import Orchestrator, ToolPreferences
 from orchestrator.schemas import OrchestrationResult
 
 
@@ -92,3 +93,76 @@ def test_prompt_includes_history_only_when_present() -> None:
     assert "CONVERSATION SO FAR" in with_history
     assert "customer database" in with_history
     assert "CONVERSATION SO FAR" not in without_history
+
+
+class _PreferenceLLM(LLMClient):
+    def __init__(self) -> None:
+        self.request: GenerationRequest | None = None
+
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        self.request = request
+        return AssistantMessage(
+            content=[
+                TextBlock(
+                    '{"selected_model_id":"model","selected_tools":[],\n'
+                    '"generated_system_prompt":"selected system"}'
+                )
+            ],
+            stop_reason="end_turn",
+        )
+
+
+class _PreferenceRegistry:
+    model_ids = ["model"]
+
+    def __init__(self) -> None:
+        self.llm = _PreferenceLLM()
+
+    def default_id(self) -> str:
+        return "model"
+
+    def describe_for_prompt(self) -> str:
+        return "model: test model"
+
+    def get(self, model_id: str) -> LLMClient:
+        assert model_id == "model"
+        return self.llm
+
+
+@pytest.mark.anyio
+async def test_direct_orchestrator_preferences_remain_supported_and_sanitized() -> None:
+    registry = _PreferenceRegistry()
+    orchestrator = Orchestrator(
+        registry=registry,  # type: ignore[arg-type]
+        system_prompt="route requests",
+    )
+    snapshot = ToolSnapshot.from_llm_tools(
+        [
+            {
+                "name": "search__query",
+                "description": "Search for a query.",
+                "input_schema": {"type": "object"},
+            }
+        ]
+    )
+    preferences = ToolPreferences.from_request(
+        [
+            SimpleNamespace(
+                name="search",
+                tools={"query": ["q"], "missing": []},
+            )
+        ]
+    )
+
+    decision = await orchestrator.decide(
+        "find it",
+        snapshot,
+        preferences=preferences,
+    )
+
+    assert decision.result.selected_tools == ["search__query"]
+    assert registry.llm.request is not None
+    prompt = registry.llm.request.messages[0].content[0]
+    assert isinstance(prompt, TextBlock)
+    assert "PREFERRED TOOLS" in prompt.text
+    assert "search__query (intended arguments: q)" in prompt.text

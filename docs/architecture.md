@@ -63,10 +63,17 @@ system prompt the agent will run with. Its output is then fed into
 worlds** — the only module that touches both the LLM client and the MCP
 manager.
 
-> **Caching lives outside the harness.** Response caching is handled by a
-> separate layer/service in front of this harness, not inside it. The
-> request body is kept small and declarative (`prompt` + optional
-> `commands` + optional `MCP`) so a fronting cache can forward it unchanged.
+`TurnRunner.open()` owns the accepted-turn envelope. After the route resolves or
+creates the session identity, it claims that identity before consuming the
+latest stored history, inventory, or routing inputs. It then creates one
+`RunContext` with one run ID and absolute deadline, snapshots tools once,
+resolves the actual model, and holds the claim until event iteration and cleanup
+finish. `TurnMetadata` carries the resolved model and optional sanitized
+`OrchestrationDecisionEvent` for both buffered and streaming renderers.
+
+> **Caching lives outside the harness.** Native chat is a plain-text dumb pipe;
+> the OpenAI-compatible surface accepts the standard `messages` history. A
+> fronting cache can treat both contracts without harness-owned response state.
 
 ---
 
@@ -85,18 +92,14 @@ manager.
 
 ### Runtime conventions
 
-- **Bootstrap is in-process and explicit.** `config.load_secrets()`
-  loads the project's `.env` file into `os.environ` (via `python-dotenv`).
-  Runtime entry points (`main.py` and any future CLI)
-  calls `load_secrets()` as its first action.
-- **Config lives in `.env`.** All environment variables are kept in a
-  `.env` file at the project root (template: `.env.example`). Real
-  environment variables already set in the process win over `.env`, so the
-  same file works for local dev, containers, and CI.
-- **Settings are pulled lazily** via `config.get_settings()`.
-  Nothing in the codebase should `from config import settings` at
-  module level — the global instance doesn't exist. Lazy + cached means
-  `config.load_secrets()` runs first and is picked up correctly.
+- **Pydantic Settings owns `.env`.** `SettingsConfigDict.env_file` is the only
+  production reader. A private interpolation map retains raw, source-provided
+  declared and undeclared values without exposing undeclared keys as Settings
+  fields or mutating `os.environ`; real process values win.
+  `Settings(_env_file=None)` is the hermetic-test boundary.
+- **Settings are pulled lazily** via `config.get_settings()`. Nothing imports a
+  module-level settings instance, so importing `main` is credential-free and
+  leaves process environment state untouched.
 - **`runscript.sh`** is the canonical launcher; it cd's to the project
   root, activates the venv, prepends `.` to `PYTHONPATH` (so scripts in
   subdirs like `tests/` can still import `config`, `main`,
@@ -127,7 +130,7 @@ hyphae/
 ├── chat_client.py            # Optional interactive REPL client (uses HTTP)
 ├── harness_client.py         # Reference async Python client (orchestration-aware)
 │
-├── config/                   # Config package: Settings, schemas, loaders, load_secrets
+├── config/                   # Config package: Settings, schemas, typed loaders
 │   ├── mcp_config.yaml       #   ...plus the runtime YAML/text config it loads
 │   ├── models.yaml           # Routable model registry for the orchestrator
 │   └── orchestrator_prompt.md  # Orchestrator's own system prompt
@@ -165,15 +168,13 @@ hyphae/
 │
 ├── orchestrator/             # Routes requests to model + tool subset + system
 │   ├── __init__.py
-│   ├── schemas.py            # ModelEntry, ModelsConfig, OrchestrationResult,
-│   │                         #   OrchestrationDecision
-│   ├── config.py             # load_models_config, load_orchestrator_prompt
+│   ├── schemas.py            # OrchestrationResult / decision/preferences values
 │   ├── registry.py           # LLMRegistry (lazy LLMClient cache per model_id)
 │   └── orchestrator.py       # Orchestrator.decide() -> OrchestrationDecision
 │
 ├── api/
 │   ├── __init__.py           # Combines the routers into one
-│   ├── schemas.py            # HealthResponse, OrchestrationInfo, TokenUsage (Pydantic)
+│   ├── schemas.py            # HealthResponse and HTTP TokenUsage (Pydantic)
 │   ├── dependencies.py       # FastAPI Depends() providers (pull from app.state)
 │   ├── turn.py               # Shared orchestrate→loop core + TurnRunner seam (events/run)
 │   ├── routes.py             # Native: GET /health, POST /chat, POST /chat/stream
@@ -194,21 +195,25 @@ hyphae/
 ### Config Layer
 
 The `config` package exposes runtime `Settings` and typed file-config loading.
-`Settings` is always accessed via `get_settings()`, never instantiated at
-module import.
+`Settings` is accessed via `get_settings()` in production and never instantiated
+at module import.
 
 - `Settings.api_key_for_provider(provider)` returns the key for an
   arbitrary provider — used by each provider's builder so the orchestrator
   can spin up clients for multiple providers in one process. It checks the
   typed key fields first, then falls back to the conventional
-  `<PROVIDER>_API_KEY` env var, so a newly registered credentialed provider
-  needs no change here (and key-less providers like a local Ollama never
-  call it).
-- `Settings.required_api_key()` is a thin wrapper over
-  `api_key_for_provider(llm_provider)`, preserved for backward compatibility.
+  `<PROVIDER>_API_KEY` from the Settings-owned `.env`/process mapping, so a newly
+  registered credentialed provider needs no change here (and key-less
+  providers never call it).
+- `Settings.interpolation_environment()` exposes only raw source-provided
+  values, with the process environment overlaid last. Declared defaults are not
+  synthesized, and undeclared dotenv values remain private to this mapping.
 
-`MCPConfig` + `load_mcp_config(path)` parse `config/mcp_config.yaml` with a
-discriminated union for server transports and `enabled_servers()` for filtering.
+`load_mcp_config_from_settings(settings)` composes that mapping with the
+configured MCP path. Direct callers can instead use
+`load_mcp_config(path, environment=...)`, which defaults to `os.environ`.
+Both return `MCPConfig`, whose discriminated server-transport union and
+`enabled_servers()` method define the typed file boundary.
 
 ### MCP Layer
 
@@ -500,7 +505,7 @@ the same `session_id`.
   is an async context manager that registers the id as in-flight; a second
   concurrent `claim` of the same id raises `SessionBusyError`, which the
   route maps to **HTTP 409**. New sessions get a fresh id and never contend;
-  only client-supplied `commands.session` ids can collide.
+  only repeated client-supplied `X-Session-Id` values can collide.
 - It is **lock-free**: on the single-threaded event loop the membership
   check and the add happen with no `await` between them, so they're atomic
   relative to other tasks. To switch to wait-semantics (queue instead of
@@ -516,7 +521,7 @@ discriminators for JSON serialization at the API boundary:
 | `ToolCallEvent`                | `id, name, input`                            | Model decided to call a tool (pre-call)   |
 | `ToolResultEvent`              | `id, name, content, is_error, latency_ms`    | Tool call completed (`latency_ms` = `call_tool` duration; `None` if stall-skipped) |
 | `UsageEvent`                   | `input_tokens, output_tokens, total_tokens, thinking_tokens, cached_tokens, iteration, latency_ms` | One LLM completion finished (`latency_ms` = `complete()` duration incl. retries) |
-| `OrchestrationDecisionEvent`   | `model_id, tools, system_prompt, fallback_used` | Defined for tracing/SSE; not emitted into the plain-text `/chat` response today |
+| `OrchestrationDecisionEvent`   | `model_id, tools, system_prompt, fallback_used, thinking_level` | Emitted first for orchestrated turns; traced and exposed by native SSE |
 | `DoneEvent`                    | `reason, iterations, total_tokens, input_tokens, output_tokens, thinking_tokens` | Loop finished |
 | `ErrorEvent`                   | `message`                                    | Unrecoverable internal failure            |
 
@@ -538,30 +543,20 @@ async def run_agent(
     *,
     store: SessionStore | None = None,
     system: str | None = None,
-    max_iterations: int = 25,
-    max_tokens: int | None = None,
     tools: list[dict] | None = None,
-    llm_timeout_seconds: float | None = None,
-    tool_timeout_seconds: float | None = None,
-    max_retries: int = 0,
-    retry_base_delay: float = 0.5,
-    tool_result_max_chars: int | None = None,
-    max_run_tokens: int | None = None,
-    max_run_seconds: float | None = None,
-    abort_after_consecutive_tool_failures: int | None = None,
     thinking_level: str | None = None,
-    context_strategy: str = "naive",
-    context_window: int | None = None,
-    context_safety_margin_tokens: int = 1024,
-    context_recent_messages: int = 6,
-    context_summary_max_tokens: int = 512,
+    limits: RunLimits | None = None,
+    context: RunContext | None = None,
+    policy: ToolPolicy | None = None,
+    stream: bool = False,
 ) -> AsyncIterator[Event]:
     ...
 ```
 
-Reliability params default to legacy behavior for direct callers; routes opt in
-by passing `Settings` values. The loop owns timeout/retry policy while providers
-classify transient errors.
+`RunLimits` is the immutable policy object built once from Settings by
+`TurnRunner`; `RunContext` carries the one live run ID, absolute deadline,
+logger, and trace sequence. Direct callers may omit both to receive defaults.
+The loop owns timeout/retry policy while providers classify transient errors.
 
 Buffered and streaming generation share one private attempt-policy controller
 for attempt counts, deadline-aware timeout bounds, transient eligibility,
@@ -570,9 +565,9 @@ mechanics remain separate: buffered generation awaits one response, while
 streaming applies the configured LLM timeout to every incremental read and
 never retries after a visible delta has been emitted.
 
-**The caller appends the user message before invoking `run_agent`.** The
-loop owns assistant turns and tool round-trips. This keeps the loop
-callable identically from a CLI, a FastAPI route, or a test.
+**The caller appends the user message before invoking `run_agent`.**
+`TurnRunner` does so only on its staged copy after routing; the loop owns
+assistant turns and tool round-trips.
 
 The **`tools` parameter** is the orchestration seam. When `None`, the
 loop pulls the full MCP inventory (`mcp.get_tools_for_llm()`) — legacy
@@ -586,12 +581,10 @@ inspects it. `None` (the default) leaves the model's own default. The route
 supplies the orchestrator's chosen level here; see *Thinking level* under
 the Orchestration Layer.
 
-**The bounded-run guard params** (`max_run_tokens`, `max_run_seconds`,
-`abort_after_consecutive_tool_failures`) follow the same default-disabled
-pattern as the reliability params: `None`/`<=0` disables each dimension, so
-direct callers are unaffected. The `/chat` and `/v1` routes opt in via the
-corresponding `Settings` fields, themselves `0` (disabled) by default — an
-operator sets them explicitly. See *Bounded & safe runs* below.
+**The bounded-run guard values** on `RunLimits` follow the default-disabled
+`None`/`<=0` convention. `TurnRunner` starts the wall-clock deadline immediately
+after the session claim, so routing, model resolution, generation, tool calls,
+and backoff all consume the same budget. See *Bounded & safe runs* below.
 
 Per-iteration algorithm:
 
@@ -788,11 +781,11 @@ adds fallback metadata for in-process callers.
   wastes a few cycles but cannot produce wrong behavior.
 
 **`orchestrator/orchestrator.py`** —
-`Orchestrator.decide(user_message, preferences=None, history=None)`:
+`Orchestrator.decide(user_message, tools, preferences=None, history=None, ...)`:
 
-1. Builds the prompt: orchestrator system instruction (from the
+1. Builds the prompt from the immutable per-turn tool snapshot: orchestrator system instruction (from the
    `orchestrator_prompt.md` file) + AVAILABLE MODELS block + AVAILABLE
-   TOOLS block (live MCP inventory) + an optional CONVERSATION SO FAR
+   TOOLS block + optional PREFERRED TOOLS and CONVERSATION SO FAR
    block (see *Context-aware routing* below) + USER MESSAGE.
 2. Calls the orchestrator's own LLM client with a `GenerationRequest` carrying
    `response_schema=OrchestrationResult`. Tools are **not** exposed —
@@ -801,7 +794,7 @@ adds fallback metadata for in-process callers.
    stray markdown fences defensively. `thinking_level` is coerced
    leniently (a stray/unknown value clamps to `"medium"`) so one odd
    field can't sink an otherwise-valid decision.
-4. Sanitizes the result: drops tool names not in the live MCP inventory;
+4. Sanitizes the result against that same snapshot: drops unknown tool names;
    rewrites an unknown `selected_model_id` to the registry default.
    Sanitization is **not** counted as fallback — the orchestrator made
    a real decision, we just trimmed it.
@@ -843,45 +836,43 @@ runs in legacy mode. Prompted-tool models may still be selected for downstream
 agent turns; they are not supported as the structured-output control model in
 this v1 adapter.
 
-**The system-prompt override.** The route, not the orchestrator,
-implements precedence: if the request sets `commands.system`, that wins
-over `result.generated_system_prompt`. Orchestration still runs (to pick
-model + tools), only the system prompt is overridden. This lets a client
-pin an explicit system prompt while keeping orchestration on.
+**The system-prompt override.** `TurnRunner`, not the orchestrator, implements
+precedence: an OpenAI `system` message override wins over
+`result.generated_system_prompt`. Orchestration still runs to pick model and
+tools; native `/chat` has no per-call system field.
 
-**MCP tool preferences.** The route normalizes the request's `MCP` list
-into a `ToolPreferences` value object and hands it to
-`orchestrator.decide()`. Preferred tools are rendered into the
-orchestrator prompt as a priority hint, and `_sanitize()` unions the
-valid ones into the final selection so they're *guaranteed* exposed —
-while the orchestrator's own picks remain as fallback. It's a priority,
-not a lock-out. Per-tool argument lists are informational context only.
+**MCP tool preferences.** `ToolPreferences` remains an intentional direct
+`Orchestrator.decide()` seam. Explicit in-process callers can supply priority
+hints; `_sanitize()` unions valid preferred tools into the selection. HTTP
+routes and `TurnRunner` carry no preference value because neither HTTP surface
+accepts one.
 
-**Disabled mode.** If orchestration is disabled or its config cannot load, routes
-use the default LLM, all MCP tools, and any request system override directly.
+**Disabled mode.** If orchestration is disabled or its config cannot load,
+`TurnRunner` uses the default LLM, all MCP tools, and an optional `/v1` system
+override directly.
 
 ### HTTP Layer
 
 **`main.py`** — FastAPI entry point with a `lifespan` context manager.
 
 Startup order:
-1. `config.load_secrets()` (called at the top of `main.py`).
-2. `get_settings()` — reads from env.
-3. `build_llm_client(settings)` — fails fast if API key missing.
+1. `get_settings()` — Pydantic reads process variables and the project `.env`
+   without mutating global environment state.
+2. `build_llm_client(settings)` — fails fast if API key missing.
    This is the *legacy/default* client used when orchestration is
    disabled.
-4. `load_mcp_config(settings.mcp_config_path)`.
-5. `MCPManager(mcp_config, connect_timeout_seconds=...).startup()` — connects
+3. `load_mcp_config_from_settings(settings)` using the precedence-resolved,
+   raw Settings mapping.
+4. `MCPManager(mcp_config, connect_timeout_seconds=...).startup()` — connects
    to all enabled servers in parallel. Each transport-open + initialize +
    list operation, at startup or during lazy recovery, is bounded as one unit
    unless the setting is `<= 0`; startup failures degrade MCP health without
    aborting application startup.
-6. `InMemorySessionStore()`.
-7. `_try_build_orchestration(settings, mcp)` — returns registry/orchestrator or
+5. `InMemorySessionStore()` and `SessionGuard()`.
+6. `_try_build_orchestration(settings, mcp)` — returns registry/orchestrator or
    `(None, None)` on optional-layer failure.
-8. All values stashed on `app.state` (`settings`, `llm`, `mcp`, `store`,
-   `guard`, `registry`, `orchestrator`).
-9. A single consolidated "harness ready" INFO log line is emitted.
+7. Policy/tracer are built and all values are stashed on `app.state`.
+8. A single consolidated "harness ready" INFO log line is emitted.
 
 Shutdown attempts LLM, MCP, and tracer cleanup independently. The default LLM
 and every constructed registry client are deduplicated by object identity and
@@ -902,13 +893,15 @@ exception or cancellation that initiated shutdown.
    with the conversation in view. The new prompt is **not** appended yet — it's
    passed to the orchestrator separately, so `session.messages` at routing time
    is the prior history only.
-2. **`runner.run(...)`** — every renderer reaches the shared core through
-   **`TurnRunner`**, which bundles process-wide singletons and exposes `events()`
-   and `run()`. `_resolve_routing(...)` selects LLM, tools, system prompt,
-   thinking level, and optional orchestration metadata.
+2. **`runner.open(...)` / `runner.run(...)`** — every renderer reaches the
+   shared core through `TurnRunner`. `open()` claims the session before consuming
+   current history or inventory, creates the run context/deadline, stages the latest
+   safe checkpoint, snapshots tools once, and resolves LLM, tools, system,
+   thinking level, model ID, and optional orchestration metadata. `run()` is the
+   buffered collector over the same owned event iterator.
 3. **Per-request log line** at INFO level summarizing the routing decision
    (model, tool count, thinking level, fallback flag).
-4. Under the same-session guard, append the prompt and iterate `run_agent(...)`
+4. On the staged session, append the prompt and iterate `run_agent(...)`
    with the orchestrator's selections — including `thinking_level` — collecting
    `TextEvent` text into the answer and reading the final `DoneEvent` for the
    done-reason and token usage.
@@ -917,9 +910,9 @@ exception or cancellation that initiated shutdown.
 The full event stream is no longer serialized into the response (the body is
 plain text); routing/usage detail lives in the logs and the JSONL trace.
 
-`_turn_events` also mints the per-request **`run_id`**, tags route logs, and
-threads optional tracing into `run_agent`. Tracing is best-effort and mirrors the
-event stream; see `agent/tracing.py` and operations docs.
+The `RunContext` minted by `TurnRunner.open()` tags logs, native SSE, and trace
+records with the same **`run_id`**. Tracing is best-effort and mirrors the event
+stream; see `agent/tracing.py` and operations docs.
 
 ---
 
@@ -944,16 +937,17 @@ event stream; see `agent/tracing.py` and operations docs.
    through loop iterations via a `Session` object. A minimal abstraction
    now beats retrofitting it later.
 6. **Orchestration is a router, not a part of the loop.** It runs ONCE
-   per request, takes no tools (it must decide, not act), and produces
+   per request, receives tool descriptions but exposes no callable tools to its
+   own LLM (it must decide, not act), and produces
    a structured decision that's fed into `run_agent()` as concrete
    arguments. The loop is unchanged from the pre-orchestrator design.
 7. **A minimal, explicit boundary.** `/chat` is a plain-text dumb pipe — the
    body *is* the prompt, so there is nothing to over-accept; an empty body is
    the only rejection (400). Optional behavior travels as named headers
-   (`X-Session-Id`), never as free-form fields. JSON request schemas that do
-   survive (e.g. the planned OpenAI-compatible endpoint, `/health`) stay strict.
-   The surface is small and explicit; new capabilities are added as new typed
-   inputs, not by accepting unknown ones.
+   (`X-Session-Id`), never as free-form fields. The `/v1` adapter accepts the
+   standard OpenAI envelope, validates model identity and message ordering at
+   its boundary, and tolerates unsupported standard fields without forwarding
+   them. The surface is small and explicit.
 8. **Orchestration must never break a request.** Every failure path in
    the orchestrator (LLM error, parse error, validation error) degrades
    to a safe default (the registry's default model, all tools, generic
@@ -972,9 +966,9 @@ resolve a problem we hit; don't change them without understanding why.
    know what model is being used. Provider-specific tool schema shaping
    happens only inside the provider's `llm/providers/<name>.py` (the LLM
    layer's ABC and registry in `llm/client.py` stay SDK-free).
-2. **Settings are pulled lazily**, not snapshotted at import. Bootstrap
-   (which loads `.env` into `os.environ`) and the harness run in the same
-   process; lazy + cached means env vars are read after `config.load_secrets()`, not before.
+2. **Settings are pulled lazily**, not snapshotted at import. Pydantic Settings
+   is the sole production `.env` owner; imports remain credential-free and
+   `Settings(_env_file=None)` keeps hermetic tests isolated.
 3. **`mcp_layer/` not `mcp/`** to avoid shadowing the SDK's `mcp` package.
 4. **`__` is the tool-namespacing separator.** Config validation enforces
    that server names can't contain it.
@@ -999,8 +993,10 @@ resolve a problem we hit; don't change them without understanding why.
 12. **`SessionStore.save()` is explicit, not auto-on-mutate.** In-memory
     save is a no-op today; writing the calls explicitly now means durable
     storage can drop in without call-site changes.
-13. **The loop saves after every iteration**, not just at the end. Keeps
-    the session consistent through partial failures.
+13. **The loop publishes only safe checkpoints.** A complete non-tool response
+    or a balanced assistant-tool-call/result batch may be saved; prompt-only and
+    unmatched tool state never becomes visible. Cancellation preserves the last
+    safe checkpoint and propagates.
 14. **Tool execution is sequential, not parallel.** Some MCP tools have
     side effects; parallel makes failure modes harder to reason about.
     Wrap in `asyncio.gather` later if needed.
@@ -1008,8 +1004,9 @@ resolve a problem we hit; don't change them without understanding why.
     A `mcp.call_tool` error becomes `ToolResultBlock(is_error=True)` and
     goes back to the model. An `llm.complete` exception yields
     `ErrorEvent` + `DoneEvent("llm_error")` and stops.
-16. **Caller appends the user message before invoking `run_agent`.** The
-    loop owns only assistant turns and tool round-trips.
+16. **Caller appends the user message before invoking `run_agent`.**
+    `TurnRunner` appends it to a staged session only after routing; the loop owns
+    assistant turns and tool round-trips.
 17. **System prompt is a per-call argument, not stored on the Session.**
     Session = conversation state; system prompt = call-time configuration.
 18. **Routes use `Depends()`, not `request.app.state` directly.** Keeps
@@ -1029,10 +1026,10 @@ resolve a problem we hit; don't change them without understanding why.
     bespoke `{prompt, commands, MCP}` request and rich JSON response — the
     serialization-free contract any client can drive. Per-call `system`,
     `max_iterations`, and `MCP` tool preferences left the wire; the orchestrator
-    selects model/tools/system, the iteration cap is config-driven, and a
-    per-call system prompt belongs on the planned OpenAI-compatible endpoint
-    (the `ToolPreferences`/`_resolve_routing(preferences=...)` plumbing stays
-    in-process for an easy re-add).
+    selects model/tools/system, the iteration cap is config-driven, and `/v1`
+    system messages provide the per-call override. `ToolPreferences` remains
+    only on the intentional direct `Orchestrator.decide()` seam; route and
+    runner contracts do not carry it.
 22. **`OrchestrationResult` is lenient (no `extra="forbid"`).** Gemini's
     `response_schema` dialect doesn't accept `additionalProperties: false`,
     which Pydantic emits when a model is strict. We sanitize the result
@@ -1046,19 +1043,16 @@ resolve a problem we hit; don't change them without understanding why.
     `GenerationRequest` carries `tools=None` to enforce this.
 25. **Orchestration is optional and degradable.** Missing config files,
     failed LLM calls, or bad outputs all degrade to the legacy
-    (pre-orchestrator) behavior. The route checks
-    `app.state.orchestrator is None` and routes around it. This is what
-    lets the orchestration subsystem be installed or removed without
-    affecting anything else.
-26. **`request.system` overrides `generated_system_prompt`.** The
-    orchestrator still runs (to pick model + tools) but the user's
-    explicit system prompt wins. Keeps pre-orchestrator clients working
-    unchanged.
+    (pre-orchestrator) behavior. `TurnRunner` checks its optional orchestrator
+    and registry and resolves the legacy path when either is absent.
+26. **`TurnRequest.system_override` overrides `generated_system_prompt`.** The
+    orchestrator still runs to pick model and tools, but combined `/v1` system
+    messages win for downstream generation. Native `/chat` supplies no override.
 27. **One LLM provider's keys aren't all of them.** Each provider's builder
     pulls its own credentials via `Settings.api_key_for_provider(...)`, so one
     process can hold clients for any provider in `models.yaml`. The lookup
-    falls back to `<PROVIDER>_API_KEY` for providers without a typed field, and
-    `required_api_key()` is preserved as a thin wrapper for legacy callers.
+    falls back to `<PROVIDER>_API_KEY` from the Settings-owned environment
+    mapping for providers without a typed field.
 28. **Thinking level is a routing dimension, not just a model choice.** The
     orchestrator emits `thinking_level` (`low`/`medium`/`high`) alongside
     the model, and the loop carries it on every `GenerationRequest`. This makes

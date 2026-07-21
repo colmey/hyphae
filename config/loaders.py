@@ -4,8 +4,8 @@
 
 The loaders raise loudly on malformed input -- main.py decides whether to
 abort startup or fall back to legacy mode (see orchestration_enabled in
-Settings). Call them AFTER load_secrets(), since the MCP YAML may contain
-${ENV_VAR} references.
+Settings). MCP interpolation receives Settings-owned values explicitly in
+production and defaults to the process environment for direct callers.
 """
 
 from __future__ import annotations
@@ -13,37 +13,40 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import yaml
 from pydantic import BaseModel, ValidationError
 
 from .schemas import MCPConfig, ModelsConfig
 
+if TYPE_CHECKING:
+    from .settings import Settings
+
 logger = logging.getLogger(__name__)
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 
 
-def _interpolate_env(value: Any) -> Any:
+def _interpolate_env(value: Any, environment: Mapping[str, str]) -> Any:
     """Recursively replace ${ENV_VAR} in strings. Raises if a var is unset."""
     if isinstance(value, str):
 
         def repl(match: re.Match[str]) -> str:
             var = match.group(1)
-            if var not in os.environ:
+            if var not in environment:
                 raise ValueError(
                     f"environment variable {var!r} referenced in config is not set"
                 )
-            return os.environ[var]
+            return environment[var]
 
         return _ENV_PATTERN.sub(repl, value)
     if isinstance(value, dict):
-        return {k: _interpolate_env(v) for k, v in value.items()}
+        return {k: _interpolate_env(v, environment) for k, v in value.items()}
     if isinstance(value, list):
-        return [_interpolate_env(v) for v in value]
+        return [_interpolate_env(v, environment) for v in value]
     return value
 
 
@@ -56,6 +59,7 @@ def _load_yaml_model(
     *,
     what: str,
     interpolate: bool = False,
+    environment: Mapping[str, str] | None = None,
 ) -> _ModelT:
     """Shared pipeline: exists-check -> YAML parse -> mapping guard -> validate.
 
@@ -73,7 +77,10 @@ def _load_yaml_model(
         raise ValueError(f"{what} root must be a mapping, got {type(raw).__name__}")
 
     if interpolate:
-        raw = _interpolate_env(raw)
+        raw = _interpolate_env(
+            raw,
+            environment if environment is not None else os.environ,
+        )
 
     try:
         return model_cls.model_validate(raw)
@@ -81,9 +88,19 @@ def _load_yaml_model(
         raise ValueError(f"invalid {what} at {path}:\n{e}") from e
 
 
-def load_mcp_config(path: Path | str) -> MCPConfig:
+def load_mcp_config(
+    path: Path | str,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> MCPConfig:
     """Load and validate the MCP config YAML file (${ENV_VAR} interpolated)."""
-    cfg = _load_yaml_model(path, MCPConfig, what="MCP config", interpolate=True)
+    cfg = _load_yaml_model(
+        path,
+        MCPConfig,
+        what="MCP config",
+        interpolate=True,
+        environment=environment,
+    )
     logger.info(
         "loaded MCP config: %d servers (%d enabled), tool_policy=%s",
         len(cfg.mcp_servers),
@@ -91,6 +108,14 @@ def load_mcp_config(path: Path | str) -> MCPConfig:
         cfg.tool_policy.mode,
     )
     return cfg
+
+
+def load_mcp_config_from_settings(settings: "Settings") -> MCPConfig:
+    """Load the configured MCP file with Settings-owned interpolation values."""
+    return load_mcp_config(
+        settings.mcp_config_path,
+        environment=settings.interpolation_environment(),
+    )
 
 
 def load_models_config(

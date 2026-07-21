@@ -20,7 +20,6 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 
 from __future__ import annotations
 
-import config
 import logging
 from typing import Any
 
@@ -36,7 +35,7 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from config import get_settings, load_mcp_config, reset_settings
+from config import get_settings, load_mcp_config_from_settings, reset_settings
 from llm import build_llm_client
 from mcp_layer import MCPManager
 
@@ -126,14 +125,13 @@ async def run_scenario(
 
 
 async def test_configured_agent_scenarios() -> None:
-    config.load_secrets()
     reset_settings()
     settings = get_settings()
     print(f"using provider={settings.llm_provider} model={settings.llm_model}")
     print()
 
     llm = build_llm_client(settings)
-    mcp_config = load_mcp_config(settings.mcp_config_path)
+    mcp_config = load_mcp_config_from_settings(settings)
     mcp = MCPManager(mcp_config)
     store = InMemorySessionStore()
 

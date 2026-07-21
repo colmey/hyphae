@@ -104,12 +104,7 @@ async def _collect(events: AsyncIterator[Event], metadata: TurnMetadata) -> Turn
             text_parts.append(event.text)
         elif isinstance(event, DoneEvent):
             done_reason = event.reason
-            usage = TokenUsage(
-                input_tokens=event.input_tokens,
-                output_tokens=event.output_tokens,
-                total_tokens=event.total_tokens,
-                thinking_tokens=event.thinking_tokens,
-            )
+            usage = TokenUsage.from_done_event(event)
     return TurnResult(
         answer="".join(text_parts).strip(),
         done_reason=done_reason,

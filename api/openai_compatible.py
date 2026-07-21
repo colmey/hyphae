@@ -9,6 +9,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, Request
@@ -53,6 +54,15 @@ class _ChatCompletionRequest(BaseModel):
     messages: list[_ChatMessage] = Field(default_factory=list)
     model: Optional[str] = None
     stream: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedChat:
+    """Validated OpenAI conversation inputs for one ephemeral turn."""
+
+    system_override: str | None
+    history: tuple[tuple[str, str], ...]
+    prompt: str
 
 
 # Internal done_reason -> OpenAI finish_reason.
@@ -148,8 +158,8 @@ def _strip_tool_blocks(text: str) -> str:
 
 def _prepare(
     messages: list[_ChatMessage],
-) -> tuple[str | None, list[tuple[str, str]], str]:
-    """Map OpenAI `messages[]` to (system_override, history, prompt).
+) -> PreparedChat:
+    """Map OpenAI ``messages[]`` to a validated ephemeral chat value.
 
     The final user message is the active prompt; earlier user/assistant turns
     seed an ephemeral session. Rendered tool blocks are removed from history.
@@ -173,11 +183,15 @@ def _prepare(
     prompt = convo[-1][1]
     if not prompt:
         raise _InvalidChatRequest("no user message found in 'messages'")
-    history = [
+    history = tuple(
         (role, _strip_tool_blocks(text) if role == "assistant" else text)
         for role, text in convo[:-1]
-    ]
-    return system_override, history, prompt
+    )
+    return PreparedChat(
+        system_override=system_override,
+        history=history,
+        prompt=prompt,
+    )
 
 
 def _completion_id() -> str:
@@ -356,13 +370,13 @@ async def chat_completions(
         return _http_error_response(exc)
 
     try:
-        system_override, history, prompt = _prepare(req.messages)
+        prepared = _prepare(req.messages)
     except _InvalidChatRequest as exc:
         return _error_response(str(exc))
 
     # Fresh ephemeral session per request; the client owns durable history.
     session = Session()
-    for role, text in history:
+    for role, text in prepared.history:
         if role == "user":
             session.append_user(text)
         else:
@@ -370,10 +384,10 @@ async def chat_completions(
 
     # The runner owns singleton dependencies and resolves the executing model.
     turn = TurnRequest(
-        prompt=prompt,
+        prompt=prepared.prompt,
         session=session,
         persistence=PersistencePolicy.EPHEMERAL,
-        system_override=system_override,
+        system_override=prepared.system_override,
         model_id=req.model,
         stream=req.stream,
     )

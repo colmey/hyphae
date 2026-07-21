@@ -21,9 +21,9 @@ a request — the loop wraps every emit, and a tracer that can't open its file
 falls back to no tracing at startup.
 
 Sensitivity: the JSONL trace captures *full* message text, tool arguments, and
-tool results by default. There is no auth on the harness yet (roadmap #8), and
-traces are local debug files, so full bodies are the right default for the
-single-operator dev harness — but treat the trace file as sensitive. A
+tool results by default. Route authentication does not protect the local trace
+file, so full bodies are appropriate only for the single-operator dev harness;
+treat the trace file as sensitive. A
 metadata-only mode (omit bodies, keep names/usage/latency) is the natural next
 toggle once multi-tenant exposure exists.
 """

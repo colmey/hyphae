@@ -22,7 +22,6 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and http_server"``.
 
 from __future__ import annotations
 
-import config
 import json
 import logging
 
@@ -59,7 +58,6 @@ def _print_chat(label: str, r: httpx.Response) -> None:
 
 
 async def test_configured_http_surface() -> None:
-    config.load_secrets()
     reset_settings()
     transport = ASGITransport(app=app)
     base_url = "http://harness.local"

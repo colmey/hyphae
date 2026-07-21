@@ -327,10 +327,10 @@ async def test_lifespan_closes_default_llm_after_partial_startup_failure(
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
     monkeypatch.setattr(main_module, "build_llm_client", lambda value: default)
 
-    def fail_config(path: str) -> Any:
+    def fail_config(settings: Any) -> Any:
         raise RuntimeError("startup failed")
 
-    monkeypatch.setattr(main_module, "load_mcp_config", fail_config)
+    monkeypatch.setattr(main_module, "load_mcp_config_from_settings", fail_config)
 
     with pytest.raises(RuntimeError, match="startup failed"):
         async with lifespan(FastAPI()):
@@ -379,7 +379,11 @@ async def test_lifespan_injects_mcp_connect_timeout(
     mcp_config = MCPConfig.model_validate({"mcpServers": {}})
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
     monkeypatch.setattr(main_module, "build_llm_client", lambda value: default)
-    monkeypatch.setattr(main_module, "load_mcp_config", lambda path: mcp_config)
+    monkeypatch.setattr(
+        main_module,
+        "load_mcp_config_from_settings",
+        lambda settings: mcp_config,
+    )
     monkeypatch.setattr(main_module, "MCPManager", _Manager)
 
     async with lifespan(FastAPI()):

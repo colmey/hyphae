@@ -51,9 +51,6 @@ class ToolPolicy:
         )
 
 
-_DEFAULT_POLICY = ToolPolicy()
-
-
 def build_tool_policy(config: Any) -> ToolPolicy:
     """Build from a ToolPolicyConfig-like object without coupling config to agent."""
     return ToolPolicy(mode=config.mode, allow=config.allow)

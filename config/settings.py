@@ -1,17 +1,15 @@
 # config/settings.py
 
-"""Runtime settings, environment-driven via pydantic-settings.
-
-Settings are built lazily after load_secrets() has loaded `.env`, so modules
-should call `get_settings()` instead of importing a module-level object.
-"""
+"""Runtime settings, loaded lazily from the environment and project ``.env``."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, Self
 
-from pydantic import Field
+from pydantic import Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Anchor defaults to real locations so the server boots from any CWD:
@@ -28,6 +26,23 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # Pydantic passes its merged settings-source input through model validators,
+    # including undeclared dotenv values. Retain that raw input privately so
+    # interpolation does not expose extras or stringify validated/default values.
+    _interpolation_values: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _capture_interpolation_values(cls, values: Any, handler: Any) -> Self:
+        settings = handler(values)
+        if isinstance(values, Mapping):
+            settings._interpolation_values = {
+                str(name).upper(): str(value)
+                for name, value in values.items()
+                if value is not None
+            }
+        return settings
 
     # Only the selected provider's key must be set.
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
@@ -158,7 +173,7 @@ class Settings(BaseSettings):
 
     # Harness paths. All runtime config lives under config/ by convention.
     mcp_config_path: Path = Field(default=_CONFIG_DIR / "mcp_config.yaml")
-    max_loop_iterations: int = Field(default=10)  # was 25, find a good balance
+    max_loop_iterations: int = Field(default=10)
     log_level: str = Field(default="INFO")
 
     # Optional API-key gate for /chat, /chat/stream, and /v1/*; /health stays open.
@@ -211,13 +226,16 @@ class Settings(BaseSettings):
         ),
     )
 
-    def required_api_key(self) -> str:
-        """Return the API key matching the configured provider, or raise.
+    def interpolation_environment(self) -> dict[str, str]:
+        """Return Settings-owned values for ``${ENV_VAR}`` interpolation.
 
-        Thin wrapper over api_key_for_provider(self.llm_provider); preserved for
-        backward compatibility with callers that predate the per-provider factory.
+        Only values supplied by Settings sources are included; declared defaults
+        are not synthesized. Real process variables are applied last, preserving
+        their precedence without mutating ``os.environ``.
         """
-        return self.api_key_for_provider(self.llm_provider)
+        values = dict(self._interpolation_values)
+        values.update(os.environ)
+        return values
 
     def api_key_for_provider(self, provider: str) -> str:
         """Return the API key for a provider, or raise if it's needed but missing.
@@ -232,17 +250,19 @@ class Settings(BaseSettings):
         }
         key = typed.get(provider)
         if key is None:
-            key = os.environ.get(f"{provider.upper()}_API_KEY", "")
+            key = self.interpolation_environment().get(
+                f"{provider.upper()}_API_KEY", ""
+            )
         if not key:
             raise RuntimeError(
                 f"no API key found in env for provider {provider!r} "
-                f"(expected {provider.upper()}_API_KEY). Is it set in your "
-                ".env file, and did config.load_secrets() run first?"
+                f"(expected {provider.upper()}_API_KEY). Set it in the process "
+                "environment or project .env file."
             )
         return key
 
 
-# Lazily populated after load_secrets() has loaded environment variables.
+# Lazily populated so importing application modules never reads credentials.
 _settings_cache: Settings | None = None
 
 

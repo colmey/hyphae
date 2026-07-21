@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+import agent.tracing as tracing_module
 from agent import JSONLTracer, RunContext, RunLimits, Session, run_agent
 from agent.events import DoneEvent, ToolCallEvent, ToolResultEvent, UsageEvent
 from llm.client import GenerationRequest, LLMClient
@@ -18,6 +19,38 @@ from mcp_layer import ToolCallResult
 
 
 pytestmark = pytest.mark.anyio
+
+
+def test_done_event_trace_shape_is_byte_for_byte_stable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tracing_module, "_now_iso", lambda: "fixed-timestamp")
+
+    record = tracing_module.event_record(
+        DoneEvent(
+            reason="end_turn",
+            iterations=2,
+            input_tokens=11,
+            output_tokens=7,
+            total_tokens=18,
+            thinking_tokens=5,
+        ),
+        run_id="run-fixed",
+        step=9,
+    )
+
+    assert record == {
+        "run_id": "run-fixed",
+        "step": 9,
+        "ts": "fixed-timestamp",
+        "type": "done",
+        "reason": "end_turn",
+        "iterations": 2,
+        "total_tokens": 18,
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "thinking_tokens": 5,
+    }
 
 
 class ScriptedLLM(LLMClient):

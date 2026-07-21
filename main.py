@@ -25,15 +25,12 @@ from llm import LLMClient, build_llm_client
 from mcp_layer import MCPManager
 from config import (
     get_settings,
-    load_mcp_config,
+    load_mcp_config_from_settings,
     load_models_config,
     load_orchestrator_prompt,
-    load_secrets,
 )
 from llm.client import supported_providers
 from orchestrator import LLMRegistry, Orchestrator
-
-load_secrets()
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +205,7 @@ async def lifespan(app: FastAPI):
     registry: LLMRegistry | None = None
     tracer: Tracer | None = None
     try:
-        mcp_config = load_mcp_config(settings.mcp_config_path)
+        mcp_config = load_mcp_config_from_settings(settings)
         mcp = MCPManager(
             mcp_config,
             connect_timeout_seconds=settings.mcp_connect_timeout_seconds,

@@ -2,7 +2,8 @@
 
 Request/response contracts for the native routes and the OpenAI-compatible
 adapter. All chat surfaces drive the same shared turn core
-(`api/turn.py::_turn_events`).
+(`api/turn.py::TurnRunner`). Accepted turns run under one session claim,
+absolute deadline, run ID, immutable tool snapshot, and resolved model identity.
 
 > See also: [README.md](README.md) (overview + quick start),
 > [architecture.md](architecture.md) (how the route is wired,
@@ -115,7 +116,8 @@ The customer database contains tables including customers, orders, payments.
 - `X-Session-Id` is the session this turn ran in — pass it back on the next
   request to continue the conversation.
 - `X-Done-Reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty", "truncated",
-  "budget_exceeded", "deadline_exceeded", "no_progress"}`.
+  "budget_exceeded", "deadline_exceeded", "no_progress", "content_filter",
+  "refusal", "provider_error", "incomplete_stream"}`.
   `"truncated"` means the model stopped on `max_tokens` mid-answer. `"max_iterations"`
   means the loop hit its iteration cap and forced a best-effort wrap-up.
   `"budget_exceeded"`, `"deadline_exceeded"`, and `"no_progress"` are optional
@@ -175,15 +177,17 @@ data: {"type":"text","text":"SpaceX launched ..."}
 data: {"type":"done","reason":"end_turn","iterations":2,"total_tokens":1875}
 ```
 
-Event `type`s: `text`, `tool_call`, `tool_result`, `usage`, `done`, `error`.
+Event `type`s: `orchestration`, `text`, `tool_call`, `tool_result`, `usage`,
+`done`, `error`. When orchestration is active its sanitized decision is the
+first event and carries the same resolved model ID recorded in turn metadata.
 Provider reasoning/chain-of-thought is trace-only and is not rendered by this
 route, `/chat`, or `/v1`. A failure mid-turn is delivered as a terminal error
 frame because the SSE response is already open. Provider policy and failure
 outcomes remain explicit in `done.reason`: `content_filter`, `refusal`,
 `provider_error`, and `incomplete_stream` are never collapsed to `end_turn`.
 
-**Text is not token-streamed:** assistant text arrives as one `text` event per
-loop iteration. This endpoint streams activity, not provider tokens.
+Providers with native streaming emit incremental `text` events; complete-only
+providers emit final coarse text blocks through the common streaming fallback.
 
 ## `POST /v1/chat/completions`
 
@@ -193,6 +197,9 @@ Point the client's base URL at `/v1`.
 **Stateless.** Each request seeds a new ephemeral session from `messages`; the
 client owns durable history, and `/v1` never creates, saves, or evicts entries
 in the native bounded session store. Same-session 409 therefore never applies.
+The adapter validates message ordering and model IDs before constructing that
+ephemeral session. It reports the model ID resolved by `TurnRunner`, never an
+unverified request label.
 
 **Request** (standard OpenAI body; unknown fields like `temperature`, `top_p`
 are tolerated and ignored):
@@ -295,6 +302,13 @@ Bad input returns **400**; unexpected internal failure, including an
 unrecoverable non-streaming LLM call, returns **500** with
 `type: "server_error"`. Streaming errors are emitted in-band as SSE error
 frames and still terminate with `[DONE]`.
+
+Native persistent turns publish only protocol-safe checkpoints: a completed
+assistant response or a complete assistant-tool-call/result batch. Cancellation
+preserves earlier safe checkpoints, balances an interrupted tool batch with
+explicit synthetic results when possible, re-raises cancellation, and never
+persists a prompt-only or unmatched-tool transcript. Ephemeral `/v1` turns use
+the same staging rules but never publish to the native store.
 
 ## `GET /v1/models`
 

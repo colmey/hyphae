@@ -8,17 +8,18 @@ has no request/response body schema. What remains here are the JSON shapes the
 harness still uses:
   - HealthResponse: the GET /health body.
   - TokenUsage: internal token-cost value surfaced by buffered turns.
-  - OrchestrationInfo: legacy routing shape retained for the later boundary
-    cleanup; active turns use api.turn.TurnMetadata instead.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import BaseModel, Field
 
 from mcp_layer import MCPServerState
+
+if TYPE_CHECKING:
+    from agent import DoneEvent
 
 
 class TokenUsage(BaseModel):
@@ -29,31 +30,15 @@ class TokenUsage(BaseModel):
     total_tokens: int = 0
     thinking_tokens: int = 0
 
-
-class OrchestrationInfo(BaseModel):
-    """Legacy routing shape superseded by ``api.turn.TurnMetadata``.
-
-    Retained until the planned boundary cleanup removes old API models.
-    """
-
-    model_id: str = Field(..., description="The model_id the orchestrator selected.")
-    tools: list[str] = Field(
-        default_factory=list,
-        description="Namespaced tool names the orchestrator exposed to the agent.",
-    )
-    system_prompt: str = Field(
-        ...,
-        description="The system prompt the agent actually ran with (after override resolution).",
-    )
-    fallback_used: bool = Field(
-        default=False,
-        description="True if orchestration failed and a safe default was substituted.",
-    )
-    thinking_level: str | None = Field(
-        default=None,
-        description="Deliberation level (low/medium/high) the orchestrator chose. "
-        "Null in legacy/fallback when unset.",
-    )
+    @classmethod
+    def from_done_event(cls, event: "DoneEvent") -> Self:
+        """Convert flattened terminal-event usage at the HTTP boundary."""
+        return cls(
+            input_tokens=event.input_tokens,
+            output_tokens=event.output_tokens,
+            total_tokens=event.total_tokens,
+            thinking_tokens=event.thinking_tokens,
+        )
 
 
 class MCPServerHealth(BaseModel):

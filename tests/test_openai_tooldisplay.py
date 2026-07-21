@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from agent import ToolResultEvent
 from api.openai_compatible import (
     _ChatMessage,
+    _InvalidChatRequest,
     _prepare,
     _strip_tool_blocks,
     _tool_details,
@@ -67,11 +70,57 @@ def test_prepare_strips_assistant_history_but_not_prompt() -> None:
         _ChatMessage(role="user", content="follow-up question"),
     ]
 
-    system_override, history, prompt = _prepare(messages)
+    prepared = _prepare(messages)
 
-    assert system_override == "be terse"
-    assert prompt == "follow-up question"
-    assert [text for role, text in history if role == "assistant"] == [
+    assert prepared.system_override == "be terse"
+    assert prepared.prompt == "follow-up question"
+    assert [text for role, text in prepared.history if role == "assistant"] == [
         "I checked.Done."
     ]
-    assert all("<details>" not in text for _role, text in history)
+    assert all("<details>" not in text for _role, text in prepared.history)
+
+
+def test_prepare_preserves_order_and_combines_system_messages() -> None:
+    prepared = _prepare(
+        [
+            _ChatMessage(role="system", content="first system"),
+            _ChatMessage(role="user", content="first user"),
+            _ChatMessage(role="assistant", content="first answer"),
+            _ChatMessage(role="system", content="second system"),
+            _ChatMessage(role="user", content="active prompt"),
+        ]
+    )
+
+    assert prepared.system_override == "first system\n\nsecond system"
+    assert prepared.history == (
+        ("user", "first user"),
+        ("assistant", "first answer"),
+    )
+    assert prepared.prompt == "active prompt"
+
+
+@pytest.mark.parametrize(
+    ("messages", "error"),
+    [
+        ([], "no user message found in 'messages'"),
+        (
+            [_ChatMessage(role="assistant", content="prefill")],
+            "no user message found in 'messages'",
+        ),
+        (
+            [
+                _ChatMessage(role="user", content="question"),
+                _ChatMessage(role="assistant", content="prefill"),
+            ],
+            "the final conversational message must have role 'user'",
+        ),
+        (
+            [_ChatMessage(role="user", content="")],
+            "no user message found in 'messages'",
+        ),
+    ],
+)
+def test_prepare_preserves_validation_errors(messages, error: str) -> None:
+    with pytest.raises(_InvalidChatRequest) as exc_info:
+        _prepare(messages)
+    assert str(exc_info.value) == error

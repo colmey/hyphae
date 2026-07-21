@@ -180,38 +180,33 @@ Streaming is implemented on the OpenAI-compatible adapter: `POST
 /v1/chat/completions` with `stream: true` returns an SSE stream of
 `chat.completion.chunk` frames terminated by `data: [DONE]` (see
 [api.md](api.md#post-v1chatcompletions)). It is built on `sse-starlette`'s
-`EventSourceResponse` and iterates the shared `_turn_events` generator in
-`api/routes.py`, mapping each `TextEvent` to a `delta.content`. The loop is
-already an async generator, so no loop change was needed — orchestration runs
-once (inside `_turn_events`) before the first frame is emitted.
+`EventSourceResponse` and opens the shared `TurnRunner` event iterator, mapping
+each `TextEvent` to `delta.content`. `TurnRunner.open()` resolves routing and
+the actual model under the session guard before the first role frame is emitted.
 
 For a *live activity feed* — seeing the agent's tool calls and results as they
 happen, not just the final answer — use the native **`POST /chat/stream`** route
 (`api/routes.py`). Same dumb-pipe contract as `/chat` (plain-text body = prompt,
 optional `X-Session-Id`), but instead of collecting the events it forwards the
 loop's typed events over SSE as they occur: `text`, `tool_call`, `tool_result`,
-`usage`, `done`, `error` (see [api.md](api.md#post-chatstream)). It is the same
-kind of thin renderer as the `/v1` SSE branch — it iterates the shared
-`_turn_events` generator and serializes each event with the bytes-safe
+`usage`, `orchestration`, `done`, `error` (see [api.md](api.md#post-chatstream)).
+It is the same kind of thin renderer as the `/v1` SSE branch — it opens the
+shared turn and serializes each event with the bytes-safe
 `event_record` mapping (the same one the tracer uses; never `dataclasses.asdict`,
 since `provider_metadata` can hold bytes — events don't carry it, but reusing the
-explicit mapping keeps one source of truth). Reasoning extracted from model
-responses is included here as a `reasoning` event because this route is the raw
-debug event stream; `/chat` and `/v1` hide it. No orchestration or loop logic
-is duplicated; orchestration still runs once inside `_turn_events` before the
-first frame.
+explicit mapping keeps one source of truth). Provider reasoning is intentionally
+filtered from all HTTP surfaces. No orchestration or loop logic is duplicated;
+the sanitized orchestration decision is emitted first when routing is active.
 
 This is the design seam for *any* live-update consumer: a custom dashboard, a
 voice assistant, or an OpenWebUI **pipe** (a plug-in that lives inside OpenWebUI,
 not the harness) that renders `tool_call`/`tool_result` as status updates. The
 harness stays a dumb event source; each consumer is a renderer at the edge.
 
-Note: text is **not** token-streamed — assistant text arrives as one `text`
-event per loop iteration, not token-by-token. The harness deliberately has no
-provider-level token streaming (it would mean per-provider stream plumbing and a
-reasoning-tag stripper in the core); `/chat/stream` trades token-smooth text for
-a simple core plus live *activity* visibility. The OpenAI `/v1` SSE path is
-unaffected and still chunks text per `TextEvent`.
+Providers with native streaming produce incremental `text` events on both SSE
+surfaces. Complete-only providers use the `LLMClient.stream()` fallback and emit
+coarse final text blocks. Every provider stream has explicit cleanup ownership;
+after visible output, a broken stream is never replayed.
 
 ### Choosing a context strategy (`naive` vs `compaction`)
 
@@ -268,8 +263,8 @@ subsystem. Set `TRACE_ENABLED=true` (and optionally `TRACE_PATH`, default
 {"run_id":"a1b2…","step":8,"ts":"…","type":"done","reason":"end_turn","iterations":2,"total_tokens":39}
 ```
 
-Each record carries the per-request `run_id` (minted in `_turn_events`, so it
-covers both `/chat` and `/v1`), a monotonic `step` index, an ISO `ts`, and
+Each record carries the per-request `run_id` (minted once in the `RunContext`,
+so it covers native and `/v1` rendering), a monotonic `step` index, an ISO `ts`, and
 `latency_ms` on the LLM (`usage`) and `tool_result` records. The same `run_id`
 prefixes every log line for that turn (`[run a1b2…] chat: …`), so a log line
 points straight at its trace. Grep one run with `grep '"run_id":"a1b2…"'`.
@@ -331,8 +326,8 @@ Three knobs, all configuration-only:
 Two ways:
 
 1. Set `ORCHESTRATION_ENABLED=false`. The harness logs the disable and
-   runs in legacy mode: default LLM + all tools + `request.system` (or
-   none). Useful for dev environments or when comparing orchestrated
+   runs in legacy mode: default LLM + all tools + an optional `/v1` system
+   override. Useful for dev environments or when comparing orchestrated
    vs. unorchestrated behavior.
 2. Don't ship `config/models.yaml`. The lifespan will log a warning
    and degrade to the same legacy mode.
@@ -351,8 +346,9 @@ Two ways:
 ```
 
 `runscript.sh` (used everywhere below) activates `.venv`, prepends the
-project root to `PYTHONPATH`, and runs Python. Bootstrap loads `.env` into
-`os.environ` at the top of each entry point.
+project root to `PYTHONPATH`, and runs Python. Application startup constructs
+lazy Pydantic `Settings`, which reads the project `.env` without copying its
+contents into `os.environ`; real process variables still take precedence.
 
 ### Running the server
 
@@ -441,7 +437,7 @@ deployment requirements need active probes.
 
 | Symptom                                       | Likely cause                                                 |
 |-----------------------------------------------|--------------------------------------------------------------|
-| App fails to start with missing-key error     | API key missing from `.env`, `config.load_secrets()` didn't run, or wrong `LLM_PROVIDER` |
+| App fails to start with missing-key error     | Provider key missing from the process environment/project `.env`, or wrong `LLM_PROVIDER` |
 | `/health` is `degraded` or an MCP server is `unhealthy` | The server failed, was cancelled, exceeded `MCP_CONNECT_TIMEOUT_SECONDS` during startup/recovery, or raised a transport/protocol failure during dispatch; healthy siblings remain usable |
 | Tool result says its outcome is unknown and was not replayed | The MCP call crossed the remote invocation boundary and then failed. The server was invalidated; retry only if the operation is safe to issue as a new invocation. |
 | `/health` shows `orchestration_enabled: false` | `models.yaml` or `orchestrator_prompt.md` missing/unparseable, or `ORCHESTRATION_ENABLED=false`. Lifespan logs the reason. |
@@ -482,7 +478,7 @@ that default signal. Select all live checks, or narrow them by capability:
 ./runscript.sh -m pytest -m "live and http_server"
 ```
 
-Live checks load `.env`/`Settings`, can contact configured MCP and model endpoints,
+Live checks opt into `Settings()` and its `.env`, can contact configured MCP and model endpoints,
 and may spend model tokens. The `http_server` marker identifies checks of the fully
 configured FastAPI surface; these currently run the app in-process with its lifespan
 and do not require a separately launched Uvicorn process.

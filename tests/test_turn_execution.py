@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -13,7 +14,9 @@ from typing import Any, AsyncIterator
 import pytest
 from fastapi import HTTPException
 
-from agent import OrchestrationDecisionEvent, Session, SessionGuard, Tracer
+import api.schemas as api_schemas
+from agent import DoneEvent, OrchestrationDecisionEvent, Session, SessionGuard, Tracer
+from api.schemas import TokenUsage
 from api.turn import PersistencePolicy, TurnRequest, TurnRunner
 from config import Settings
 from llm.client import GenerationRequest, LLMClient
@@ -127,7 +130,7 @@ class FakeOrchestrator:
         self.calls = 0
 
     async def decide(
-        self, prompt, tools, preferences=None, history=None, timeout=None, log=None
+        self, prompt, tools, history=None, timeout=None, log=None
     ):
         self.calls += 1
         return OrchestrationDecision(
@@ -393,7 +396,7 @@ async def test_active_task_cancellation_releases_guard() -> None:
             self.started = asyncio.Event()
 
         async def decide(
-            self, prompt, tools, preferences=None, history=None, timeout=None, log=None
+            self, prompt, tools, history=None, timeout=None, log=None
         ):
             self.calls += 1
             self.started.set()
@@ -549,3 +552,36 @@ async def test_turn_request_rejects_untyped_persistence_policy() -> None:
             Session(),
             "persistent",  # type: ignore[arg-type]
         )
+
+
+def test_route_facing_turn_contract_has_no_preference_plumbing() -> None:
+    assert "preferences" not in TurnRequest.__dataclass_fields__
+    for method in (
+        TurnRunner.open,
+        TurnRunner.run,
+        TurnRunner._resolve_routing,
+        TurnRunner._events,
+    ):
+        assert "preferences" not in inspect.signature(method).parameters
+
+
+def test_token_usage_conversion_preserves_every_done_field() -> None:
+    event = DoneEvent(
+        reason="end_turn",
+        iterations=3,
+        input_tokens=11,
+        output_tokens=7,
+        total_tokens=18,
+        thinking_tokens=5,
+    )
+
+    assert TokenUsage.from_done_event(event).model_dump() == {
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "total_tokens": 18,
+        "thinking_tokens": 5,
+    }
+
+
+def test_obsolete_orchestration_schema_is_removed() -> None:
+    assert not hasattr(api_schemas, "OrchestrationInfo")

@@ -26,13 +26,12 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 
 from __future__ import annotations
 
-import config
 import logging
 from types import SimpleNamespace
 
 import pytest
 
-from config import get_settings, load_mcp_config, reset_settings
+from config import get_settings, load_mcp_config_from_settings, reset_settings
 from llm.schemas import Message, TextBlock
 from mcp_layer import MCPManager, ToolSnapshot
 from config import load_models_config, load_orchestrator_prompt
@@ -115,7 +114,6 @@ def _check_history_block(orch: Orchestrator) -> None:
 
 
 async def test_configured_orchestration_decisions() -> None:
-    config.load_secrets()
     reset_settings()
     settings = get_settings()
 
@@ -144,7 +142,7 @@ async def test_configured_orchestration_decisions() -> None:
     print()
 
     # ----- step 3: MCP (needed for tool inventory) -----
-    mcp_config = load_mcp_config(settings.mcp_config_path)
+    mcp_config = load_mcp_config_from_settings(settings)
     mcp = MCPManager(mcp_config)
     await mcp.startup()
     all_tool_names = {name for name, _ in mcp.list_tools()}

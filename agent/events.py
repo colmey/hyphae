@@ -5,8 +5,8 @@ Events yielded by the agent loop.
 
 The loop is an async generator that streams these events as the conversation
 unfolds. Non-streaming callers (the current /chat endpoint) collect them all
-before responding. Streaming callers (future SSE endpoint) forward them
-directly to the client.
+before responding. Native and OpenAI-compatible streaming callers render them
+as SSE frames.
 
 Events are dataclasses, not plain dicts, so callers get type checking and
 can dispatch with isinstance. The JSON serialization happens at the API

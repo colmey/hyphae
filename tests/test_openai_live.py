@@ -12,7 +12,7 @@ smoke_test_llm.py:
      receive tool_use, execute via MCPManager, send the result back, get a
      final answer.
 
-Configure via environment before running (load_secrets only sets GEMINI_API_KEY):
+Configure via the process environment or project ``.env`` before running:
     export OPENAI_BASE_URL=http://localhost:11434/v1   # for local Ollama
     export OPENAI_API_KEY=<key>                         # any non-empty value
     export OPENAI_MODEL=qwen3.6-35b-a3b                 # an `ollama list` tag
@@ -22,13 +22,11 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 
 from __future__ import annotations
 
-import config
 import logging
-import os
 
 import pytest
 
-from config import get_settings, load_mcp_config, reset_settings
+from config import get_settings, load_mcp_config_from_settings, reset_settings
 from llm import (
     GenerationRequest,
     LLMClient,
@@ -158,16 +156,16 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
 
 
 async def test_configured_openai_provider_scenarios() -> None:
-    config.load_secrets()
     reset_settings()
     settings = get_settings()
+    environment = settings.interpolation_environment()
 
     # Construct the OpenAI-compatible client directly from env so this test
     # works regardless of settings.llm_provider. OPENAI_MODEL picks the model
     # (default is a placeholder; set it to a real `ollama list` tag).
-    base_url = settings.openai_base_url or os.environ.get("OPENAI_BASE_URL", "")
-    api_key = settings.openai_api_key or os.environ.get("OPENAI_API_KEY", "")
-    model = os.environ.get("OPENAI_MODEL", "qwen3.6-35b-a3b")
+    base_url = settings.openai_base_url or environment.get("OPENAI_BASE_URL", "")
+    api_key = settings.openai_api_key or environment.get("OPENAI_API_KEY", "")
+    model = environment.get("OPENAI_MODEL", "qwen3.6-35b-a3b")
 
     if not api_key:
         raise SystemExit(
@@ -186,7 +184,7 @@ async def test_configured_openai_provider_scenarios() -> None:
         default_max_tokens=settings.llm_max_tokens,
         base_url=base_url or None,
     )
-    mcp_config = load_mcp_config(settings.mcp_config_path)
+    mcp_config = load_mcp_config_from_settings(settings)
     mcp = MCPManager(mcp_config)
     await mcp.startup()
 

@@ -24,7 +24,6 @@ from typing import Any
 
 import yaml
 
-import config
 from agent import (
     DoneEvent,
     ErrorEvent,
@@ -42,9 +41,6 @@ from llm.client import GenerationRequest, LLMClient, build_llm_client
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
 from mcp_layer.client import ToolCallResult
 from orchestrator.schemas import OrchestrationDecision, OrchestrationResult
-
-config.load_secrets()
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET = ROOT / "tests" / "eval_data" / "agent_eval_v1.yaml"
@@ -143,7 +139,7 @@ class ScriptedOrchestrator:
         self._config = config
 
     async def decide(
-        self, prompt, tools, preferences=None, history=None, timeout=None, log=None
+        self, prompt, tools, history=None, timeout=None, log=None
     ) -> OrchestrationDecision:
         result = OrchestrationResult(
             selected_model_id=self._config.get("selected_model_id", "default"),
@@ -502,7 +498,7 @@ def _evaluate(case: dict[str, Any], art: RunArtifacts) -> list[str]:
             )
     for item in expect.get("system_contains_on_calls", []):
         index = int(item["call"]) - 1
-        systems = getattr(art.llm, "systems", [])
+        systems = [request.system for request in art.llm.requests_seen]
         system = systems[index] if index < len(systems) else None
         if item["substring"] not in (system or ""):
             failures.append(

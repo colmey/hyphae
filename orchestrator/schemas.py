@@ -79,7 +79,7 @@ class ToolPreferences:
 
     @classmethod
     def from_request(cls, prefs: Iterable) -> "ToolPreferences":
-        """Normalize request `MCP` preferences into namespaced tool names."""
+        """Normalize direct-caller server preferences into namespaced tools."""
         preferred: list[str] = []
         arg_hints: dict[str, list[str]] = {}
         for server in prefs or []:

@@ -125,7 +125,7 @@ class SelectingOrchestrator:
         self.calls = 0
 
     async def decide(
-        self, prompt, tools, preferences=None, history=None, timeout=None, log=None
+        self, prompt, tools, history=None, timeout=None, log=None
     ) -> OrchestrationDecision:
         self.calls += 1
         return OrchestrationDecision(
@@ -298,6 +298,7 @@ async def test_stream_completion_emits_deltas_finish_and_done(
     assert deltas.count("Hello") == 1
     assert "".join(deltas) == "Hello, world"
     assert frames[-1]["choices"][0]["finish_reason"] == "stop"
+    assert all("usage" not in frame for frame in frames)
     assert llm.stream_calls == 1
 
 

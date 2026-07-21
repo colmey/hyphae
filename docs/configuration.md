@@ -10,12 +10,13 @@ orchestrator's system prompt).
 
 ## Environment Variables
 
-Read into `Settings` via `pydantic-settings`. They live in a `.env` file at
-the project root; `config.load_secrets()` loads it into `os.environ`
-before settings are read. Copy `.env.example` to `.env` (the `setup.sh`
-script does this for you) and fill in your values. Real environment
-variables already set in the process take precedence over `.env`, so the
-same file works for local dev, containers, and CI.
+Read lazily into `Settings` via `pydantic-settings`. `SettingsConfigDict.env_file`
+is the sole production reader for the project-root `.env`; importing `main`
+does not load credentials or mutate `os.environ`. Copy `.env.example` to `.env`
+(the `setup.sh` script does this for you) and fill in your values. Real process
+environment variables take precedence over `.env`, so the same file works for
+local dev, containers, and CI. Tests that need hermetic defaults construct
+`Settings(_env_file=None)`.
 
 | Variable                       | Default                       | Purpose                                            |
 |--------------------------------|-------------------------------|----------------------------------------------------|
@@ -28,14 +29,14 @@ same file works for local dev, containers, and CI.
 | `OPENAI_BASE_URL`              | `""`                          | Base URL for the OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1` for local Ollama). Empty targets real OpenAI |
 | `MCP_CONFIG_PATH`              | `config/mcp_config.yaml`      | Path to MCP server config                          |
 | `MCP_CONNECT_TIMEOUT_SECONDS`  | `30`                          | Cap on one complete MCP startup or lazy-recovery connection (transport open, initialize, and tool discovery); `<= 0` disables |
-| `MAX_LOOP_ITERATIONS`          | `25`                          | Cap on agent loop iterations                       |
+| `MAX_LOOP_ITERATIONS`          | `10`                          | Cap on agent loop iterations                       |
 | `LLM_TIMEOUT_SECONDS`          | `120`                         | Per-attempt cap on a single `llm.complete()` call (`<= 0` disables) |
 | `TOOL_TIMEOUT_SECONDS`         | `60`                          | Cap on a single `mcp.call_tool()`; on timeout the model gets an `is_error` tool result (`<= 0` disables) |
 | `LLM_MAX_RETRIES`              | `3`                           | Retries on transient LLM failures (429/5xx/timeout/reset) and empty responses (`0` disables) |
 | `LLM_RETRY_BASE_DELAY`         | `0.5`                         | Base seconds for jittered exponential backoff between LLM retries |
 | `TOOL_RESULT_MAX_CHARS`        | `20000`                       | Clip threshold for a single flattened tool result before it enters session history (`<= 0` disables) |
 | `MAX_RUN_TOKENS`               | `0`                           | Hard ceiling on cumulative `total_tokens` for one run; ends the run `budget_exceeded` (`<= 0` disables). When a provider reports absent/all-zero usage, the local token estimator (`agent/context.py`) fills in, so the cap works against local OpenAI-compatible servers too |
-| `MAX_RUN_SECONDS`              | `0`                           | Hard wall-clock ceiling on one run, from just before the first iteration; enforced before and during LLM/tool calls; ends the run `deadline_exceeded` (`<= 0` disables) |
+| `MAX_RUN_SECONDS`              | `0`                           | Hard wall-clock ceiling on one accepted turn, including routing, retries, LLM/tool calls, and backoff; ends the run `deadline_exceeded` (`<= 0` disables) |
 | `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` | `0`                   | Abort the run `no_progress` after this many tool-call failures in a row (a success resets the count); `<= 0` disables. Should exceed the fixed at-3 nudge so the model gets a chance to recover first |
 | `CONTEXT_STRATEGY`             | `naive`                       | How the agent loop shapes the outgoing message view per LLM call: `naive` (pass-through; over budget only logs a warning) or `compaction` (summarize the over-budget middle of the history, keep the task header + recent tail verbatim). Unknown values degrade to `naive` with a warning. The view is per-call only — session history is never rewritten |
 | `CONTEXT_DEFAULT_WINDOW_TOKENS` | `32768`                      | Assumed context window for models whose `models.yaml` entry has no `context_window`, and for legacy/no-orchestrator mode. Budget = window − max output tokens − safety margin |
@@ -104,8 +105,11 @@ tool_policy:
   **fails loudly at startup** — it would otherwise silently deny every tool.
   Visibility (orchestrator selection + `disabled_tools`) and enforcement
   (`tool_policy`) are deliberately distinct layers.
-- String values support `${ENV_VAR}` interpolation; missing vars raise
-  immediately rather than producing empty strings.
+- String values support `${ENV_VAR}` interpolation from raw, source-provided
+  Settings values plus the process environment. Undeclared `.env` names are
+  retained privately for this purpose, real process values win, declared
+  defaults are not synthesized, and missing names raise immediately rather
+  than producing empty strings.
 - Server names cannot contain `__` (reserved for tool namespacing) and
   must be alphanumeric (dashes/underscores allowed).
 - URLs are typed as `str`, not `HttpUrl`, so internal `.local` hostnames

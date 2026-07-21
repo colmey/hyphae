@@ -46,7 +46,7 @@ from .events import (
     UsageEvent,
 )
 from .session import Session, SessionStore
-from .tool_policy import _DEFAULT_POLICY, ToolPolicy, Verdict
+from .tool_policy import ToolPolicy, Verdict
 from .runtime import RunContext, RunLimits
 
 logger = logging.getLogger(__name__)
@@ -492,7 +492,7 @@ async def run_agent(
         tools = mcp.get_tools_for_llm()
     tool_validators = _compile_tool_validators(tools, log=run_log)
     # Policy controls what may run.
-    policy = policy or _DEFAULT_POLICY
+    policy = policy if policy is not None else ToolPolicy()
     iteration = 0
     cumulative = Usage()
 

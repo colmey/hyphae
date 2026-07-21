@@ -1,13 +1,13 @@
 # config/__init__.py
 
-"""The harness configuration layer: one seam for env, settings, and file config.
+"""The harness configuration layer: Settings and typed file configuration."""
 
-Import everything from this package root (`from config import ...`), never
-from submodules -- tests patch `config.load_secrets` at this boundary.
-"""
-
-from .env import load_secrets
-from .loaders import load_mcp_config, load_models_config, load_orchestrator_prompt
+from .loaders import (
+    load_mcp_config,
+    load_mcp_config_from_settings,
+    load_models_config,
+    load_orchestrator_prompt,
+)
 from .schemas import (
     MCPConfig,
     MCPServerConfig,
@@ -34,8 +34,8 @@ __all__ = [
     "ToolPolicyConfig",
     "get_settings",
     "load_mcp_config",
+    "load_mcp_config_from_settings",
     "load_models_config",
     "load_orchestrator_prompt",
-    "load_secrets",
     "reset_settings",
 ]

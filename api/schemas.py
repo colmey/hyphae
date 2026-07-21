@@ -57,7 +57,7 @@ class OrchestrationInfo(BaseModel):
 
 
 class MCPServerHealth(BaseModel):
-    """One configured enabled MCP server's startup status."""
+    """One configured enabled MCP server's current retained status."""
 
     name: str
     state: MCPServerState

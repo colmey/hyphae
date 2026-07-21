@@ -37,6 +37,14 @@ class ToolCallResult:
     is_error: bool
 
 
+class MCPTransportError(RuntimeError):
+    """Provider-neutral wrapper for an SDK call-boundary failure."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__("MCP transport/protocol failure during tool call")
+        self.cause = cause
+
+
 class MCPClient:
     """Manages the connection and session for one MCP server."""
 
@@ -158,9 +166,9 @@ class MCPClient:
 
         try:
             result = await self._session.call_tool(tool_name, arguments)
-        except Exception as e:
+        except Exception as exc:
             logger.exception("tool call %s.%s failed", self.name, tool_name)
-            return ToolCallResult(content=f"tool call failed: {e}", is_error=True)
+            raise MCPTransportError(exc) from exc
 
         parts: list[str] = []
         for block in result.content:

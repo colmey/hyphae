@@ -216,16 +216,26 @@ discriminated union for server transports and `enabled_servers()` for filtering.
 
 **`MCPClient`** wraps one server session and transport. It connects, lists tools,
 filters `disabled_tools`, calls raw tool names, and flattens MCP content blocks
-to text for v1.
+to text for v1. MCP-declared errors remain ordinary tool results; exceptions at
+the SDK call boundary become provider-neutral transport/protocol failures.
 
 **`MCPManager`** aggregates clients, connects enabled servers in parallel, and
 indexes healthy tools as `{server}__{tool}` using provider-neutral `ToolSpec`
 records. It retains a typed state record for every enabled server, bounds each
-complete startup connection, and permits partial startup: failed servers become
-`unhealthy` while healthy servers and the HTTP application remain available.
+complete startup or recovery connection, and permits partial startup: failed
+servers become `unhealthy` while healthy servers and the HTTP application remain
+available.
 Its immutable status snapshot drives `/health`; `connected_servers` remains the
-healthy-only compatibility view. Unknown or disconnected tools return
-`is_error=True`. Startup does not retry, reconnect, probe, or replay calls.
+healthy-only compatibility view.
+
+Current advertised inventory is separate from last-known route ownership.
+Transport/protocol failure removes all advertised tools for that server and
+marks it unhealthy, but retains formerly known names solely to route a later
+call into one lock-coordinated lazy reconnect. The ambiguous failed call is
+never replayed. Successful reconnect atomically replaces that server's current
+and last-known inventories; removed tools are not dispatched and newly added
+tools become visible to the next inventory snapshot. Never-seen names do not
+probe servers, and no periodic recovery task exists.
 
 ### LLM Layer
 
@@ -852,8 +862,9 @@ Startup order:
 4. `load_mcp_config(settings.mcp_config_path)`.
 5. `MCPManager(mcp_config, connect_timeout_seconds=...).startup()` — connects
    to all enabled servers in parallel. Each transport-open + initialize +
-   initial-list operation is bounded as one unit unless the setting is `<= 0`;
-   failures degrade MCP health without aborting application startup.
+   list operation, at startup or during lazy recovery, is bounded as one unit
+   unless the setting is `<= 0`; startup failures degrade MCP health without
+   aborting application startup.
 6. `InMemorySessionStore()`.
 7. `_try_build_orchestration(settings, mcp)` — returns registry/orchestrator or
    `(None, None)` on optional-layer failure.
@@ -956,9 +967,10 @@ resolve a problem we hit; don't change them without understanding why.
 3. **`mcp_layer/` not `mcp/`** to avoid shadowing the SDK's `mcp` package.
 4. **`__` is the tool-namespacing separator.** Config validation enforces
    that server names can't contain it.
-5. **Graceful, bounded MCP startup**: one bad server doesn't kill the harness.
-   Every enabled server retains an explicit state, only healthy tools are
-   advertised, and no startup failure triggers reconnect or replay.
+5. **Graceful, bounded MCP lifecycle**: one bad server doesn't kill the harness.
+   Every enabled server retains an explicit state, only healthy current tools
+   are advertised, and a formerly known tool may trigger one bounded reconnect
+   on a later call. An ambiguous failed call is never replayed.
 6. **`provider_metadata` round-trips opaque per-provider state.** Required
    for Gemini 3+'s `thought_signature`. Generic mechanism — other providers
    ignore it. Never strip this field anywhere in the pipeline.

@@ -68,8 +68,10 @@ Its state is one of `disconnected`, `connecting`, `healthy`, `unhealthy`, or
 tools. The compatibility fields remain: `connected_servers` contains healthy
 servers only and `tool_count` is the aggregate healthy inventory. Top-level
 `status` is `ok` when every enabled server is healthy (or none are enabled), and
-`degraded` otherwise. This is a startup snapshot, not an active reachability
-probe; `/health` remains HTTP 200 in either state.
+`degraded` otherwise. This is a passive current-state snapshot, not an active
+reachability probe; `/health` never initiates recovery and remains HTTP 200 in
+either state. Recovery is attempted only when a later call names a tool formerly
+known to an unhealthy server.
 
 ## `POST /chat`
 

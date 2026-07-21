@@ -336,6 +336,32 @@ async def test_shutdown_cancellation_propagates_after_cancelling_close_siblings(
     )
 
 
+async def test_repeated_shutdown_retries_cleanup_not_started_before_cancellation(
+) -> None:
+    client = _FakeClient("server", tools=[_tool("one")])
+    manager = _manager(_config("server"), {"server": client})
+    await manager.startup()
+    record = manager._records["server"]
+    await record.lock.acquire()
+    try:
+        shutdown = asyncio.create_task(manager.shutdown())
+        await asyncio.sleep(0)
+        assert manager.status_snapshot()[0].state is MCPServerState.CLOSED
+        assert client.close_started.is_set() is False
+
+        shutdown.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown
+    finally:
+        record.lock.release()
+
+    await manager.shutdown()
+
+    assert client.close_calls == 1
+    assert client.close_started.is_set() is True
+    assert manager.status_snapshot()[0].state is MCPServerState.CLOSED
+
+
 async def test_no_enabled_servers_has_empty_ok_health(
     asgi_client,
 ) -> None:

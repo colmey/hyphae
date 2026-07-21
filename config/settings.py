@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     mcp_connect_timeout_seconds: float = Field(
         default=30,
         description=(
-            "Cap on complete MCP startup connection setup, including transport, "
-            "initialization, and initial tool discovery. <=0 disables."
+            "Cap on complete MCP startup or recovery connection setup, including "
+            "transport, initialization, and tool discovery. <=0 disables."
         ),
     )
     llm_max_retries: int = Field(

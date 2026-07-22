@@ -269,14 +269,34 @@ so it covers native and `/v1` rendering), a monotonic `step` index, an ISO `ts`,
 prefixes every log line for that turn (`[run a1b2…] chat: …`), so a log line
 points straight at its trace. Grep one run with `grep '"run_id":"a1b2…"'`.
 
-The seam is `agent/tracing.py`: a `Tracer` ABC (`emit(record)` + `close()`),
-a `NoOpTracer`, and the `JSONLTracer`. It mirrors `SessionStore` — swap in an
-OpenTelemetry exporter later by adding one `Tracer` subclass and one line in
-`build_tracer`, without touching the loop. Wiring: `main.py`'s lifespan builds
-the tracer onto `app.state.tracer`; `get_tracer` injects it; `run_agent` takes
-it as an optional arg and emits every event through it. **Tracing is optional
-and best-effort:** disabled (the default) means `tracer=None` and zero hot-path
-cost; a failing or slow sink is logged and swallowed and never breaks a request.
+The seam is `agent/tracing.py`: a `Tracer` ABC with async `start()` / `aclose()`
+and synchronous `emit(record)`, a `NoOpTracer`, and the `JSONLTracer`. Lifespan
+starts the tracer before publishing it through `app.state`; a routine open
+failure degrades to `tracer=None`. **Tracing is optional and best-effort:**
+disabled (the default) creates no queue, task, directory, or file.
+
+An enabled tracer serializes each event before submitting it to a bounded queue;
+`emit()` never waits or performs filesystem I/O. Policy is fixed at a 4096-record
+queue, batches of at most 100, and a 250 ms deadline from the first record in a
+partial batch. One writer task appends and flushes each batch off the event-loop
+thread, preserving submission order. If the queue fills, the newest submission
+is dropped so older queued records retain their order; the warning is emitted
+immediately and then at most once every 60 seconds.
+
+The read-only counters mean:
+
+- `accepted`: records successfully placed on the queue;
+- `written`: records in completely successful append-and-flush batches;
+- `dropped`: rejected submissions plus accepted records lost to writer failure;
+- `writer_failures`: the first append/flush failure that permanently disabled
+  the sink.
+
+Shutdown logs all four counters. A healthy graceful shutdown stops acceptance,
+drains every accepted record, flushes, and closes the file. A process crash or
+hard kill can lose queued records; JSONL tracing does not provide crash-durable
+delivery. After the first filesystem write/flush failure, the tracer drops the
+failed batch and backlog, rejects later records, and performs no further writes,
+preventing repeated disk-error spinning while requests continue normally.
 
 Events map to JSON **explicitly** (never `dataclasses.asdict`) and the JSONL
 writer base64-encodes any stray `bytes` (e.g. a provider's `thought_signature`)
@@ -382,14 +402,19 @@ LLM and lazy registry cache are
 combined by object identity, so a client reachable through both paths is closed
 once. Prompted-tool wrappers forward lifecycle ownership to their inner
 provider. One cleanup failure is logged and does not skip the remaining LLMs or
-the MCP/tracer owners; an active task cancellation is preserved.
+the MCP/tracer owners; an active task cancellation is preserved. Healthy tracer
+shutdown drains all accepted buffered records before closing and logs its final
+`accepted`, `written`, `dropped`, and `writer_failures` counters. A trace writer
+failure permanently disables further writes and discards its remaining backlog
+so shutdown does not retry-spin.
 
 For OpenAI streaming, the agent loop closes the provider generator and the
 provider generator closes its inner SDK stream. This releases the HTTP response
 on normal completion, timeout, provider failure, cancellation, and clients that
 stop reading early. Repeated graceful shutdown is safe. A forced process kill
 (`SIGKILL`, container hard-stop, or equivalent) bypasses Python lifespan hooks,
-so the operating system must reclaim any remaining sockets and file handles.
+so the operating system must reclaim any remaining sockets and file handles;
+queued trace records may be lost.
 
 ### Logs
 
@@ -402,6 +427,8 @@ Logging is `INFO` by default. Key log lines to know:
 | `chat: legacy mode (orchestration disabled), tools=N`                             | Per request, when orchestration is off.            |
 | `chat: done reason=... iterations=... tokens=... session=...`                    | At the end of every request.                       |
 | `orchestration fallback in effect: ...`                                          | Per request when the orchestrator's LLM call fails.|
+| `trace queue full ... dropping newest record`                                    | Trace storage is behind; warning is rate-limited. |
+| `tracing stopped: ... accepted=... written=... dropped=... writer_failures=...`  | Final trace accounting after shutdown.            |
 
 `httpx` and `mcp.client.*` are chatty — each MCP request and each LLM
 API call shows up at INFO. For production quieting:

@@ -146,8 +146,30 @@ class RecordingTracer(Tracer):
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
 
+    async def start(self) -> None:
+        pass
+
     def emit(self, record: dict) -> None:
         self.records.append(record)
+
+    async def aclose(self) -> None:
+        pass
+
+    @property
+    def accepted(self) -> int:
+        return len(self.records)
+
+    @property
+    def written(self) -> int:
+        return len(self.records)
+
+    @property
+    def dropped(self) -> int:
+        return 0
+
+    @property
+    def writer_failures(self) -> int:
+        return 0
 
 
 def _settings(**overrides: Any) -> Settings:

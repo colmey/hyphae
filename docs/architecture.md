@@ -163,7 +163,7 @@ hyphae/
 │   │                         #   DoneEvent / ErrorEvent
 │   ├── context.py            # assemble_context() seam: token estimator, budget,
 │   │                         #   naive / compaction strategies (view-only)
-│   ├── tracing.py            # Tracer ABC / NoOpTracer / JSONLTracer + run_id log adapter
+│   ├── tracing.py            # Async bounded JSONL tracing + run_id log adapter
 │   └── loop.py               # run_agent() - the async-generator reasoning loop
 │
 ├── orchestrator/             # Routes requests to model + tool subset + system
@@ -871,7 +871,10 @@ Startup order:
 5. `InMemorySessionStore()` and `SessionGuard()`.
 6. `_try_build_orchestration(settings, mcp)` — returns registry/orchestrator or
    `(None, None)` on optional-layer failure.
-7. Policy/tracer are built and all values are stashed on `app.state`.
+7. Policy and tracer are built. An enabled tracer opens its sink and starts its
+   bounded writer after the event loop exists; routine tracer startup failure
+   degrades to `None`. Only the successfully started tracer is published on
+   `app.state`.
 8. A single consolidated "harness ready" INFO log line is emitted.
 
 Shutdown attempts LLM, MCP, and tracer cleanup independently. The default LLM
@@ -879,7 +882,9 @@ and every constructed registry client are deduplicated by object identity and
 closed once; never-constructed lazy clients have no resources to release.
 Provider generators own their SDK streams, while the agent loop owns only the
 provider generator. Cleanup failures are logged without replacing the request
-exception or cancellation that initiated shutdown.
+exception or cancellation that initiated shutdown. Tracer cleanup first stops
+acceptance, then drains healthy accepted records through the background writer;
+its final counters are logged before active cancellation is re-raised.
 
 **`api/dependencies.py`** — `Depends()` providers that pull from `app.state`.
 `require_api_key` is the optional route-layer auth gate for `/chat`,
@@ -912,7 +917,13 @@ plain text); routing/usage detail lives in the logs and the JSONL trace.
 
 The `RunContext` minted by `TurnRunner.open()` tags logs, native SSE, and trace
 records with the same **`run_id`**. Tracing is best-effort and mirrors the event
-stream; see `agent/tracing.py` and operations docs.
+stream. `emit()` serializes and submits synchronously to a 4096-record bounded
+queue but performs no file I/O and never waits. One writer task preserves FIFO
+order and performs append-plus-flush batches off the event-loop thread: at most
+100 records, or a partial batch after 250 ms from its first record. A full queue
+drops the newest submission, preserving older queued records. The first sink
+write failure permanently disables tracing and accounts for the failed batch
+and backlog as dropped; see `agent/tracing.py` and operations docs.
 
 ---
 

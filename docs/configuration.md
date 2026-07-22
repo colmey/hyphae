@@ -56,6 +56,12 @@ local dev, containers, and CI. Tests that need hermetic defaults construct
 | `GOOGLE_TOOLBOX_URL`           | _(none)_                      | Endpoint for the `google-toolbox` MCP server, interpolated into `mcp_config.yaml` |
 | `OPEN_WEBSEARCH_URL`           | _(none)_                      | Endpoint for the `open-websearch` MCP server, interpolated into `mcp_config.yaml` |
 
+Trace buffering is fixed internal policy, not environment configuration: the
+queue holds 4096 records, batches contain at most 100 records, partial batches
+flush after 250 ms, and overflow warnings repeat at most once per 60 seconds.
+There are deliberately no queue-size, batch-size, flush-interval, warning-rate,
+or overflow-policy settings.
+
 ## MCP Config YAML — `config/mcp_config.yaml`
 
 ```yaml

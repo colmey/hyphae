@@ -97,7 +97,10 @@ class _Tracer:
         self.close_calls = 0
         self.failure = failure
 
-    def close(self) -> None:
+    async def start(self) -> None:
+        pass
+
+    async def aclose(self) -> None:
         self.close_calls += 1
         if self.failure is not None:
             raise self.failure
@@ -390,4 +393,74 @@ async def test_lifespan_injects_mcp_connect_timeout(
         pass
 
     assert captured == {"timeout": 17.5}
+    assert default.close_calls == 1
+
+
+@pytest.mark.parametrize("fail_start", [False, True])
+async def test_lifespan_starts_tracer_before_publish_and_degrades_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    fail_start: bool,
+) -> None:
+    default = _ClosingClient()
+    app = FastAPI()
+
+    class _Manager:
+        connected_servers: list[str] = []
+
+        def __init__(self, config: MCPConfig, *, connect_timeout_seconds: float) -> None:
+            pass
+
+        async def startup(self) -> None:
+            pass
+
+        async def shutdown(self) -> None:
+            pass
+
+        def list_tools(self) -> list[Any]:
+            return []
+
+        def status_snapshot(self) -> tuple[Any, ...]:
+            return ()
+
+    class _StartupTracer(_Tracer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.start_calls = 0
+
+        async def start(self) -> None:
+            self.start_calls += 1
+            assert not hasattr(app.state, "tracer")
+            if fail_start:
+                raise OSError("trace open failed")
+
+    settings = SimpleNamespace(
+        log_level="INFO",
+        llm_provider="test",
+        llm_model="test-model",
+        mcp_config_path="mcp.yaml",
+        mcp_connect_timeout_seconds=17.5,
+        orchestration_enabled=False,
+        session_ttl_seconds=0,
+        session_max_count=0,
+        trace_enabled=True,
+        trace_path=tmp_path / "trace.jsonl",
+    )
+    tracer = _StartupTracer()
+    mcp_config = MCPConfig.model_validate({"mcpServers": {}})
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "build_llm_client", lambda value: default)
+    monkeypatch.setattr(
+        main_module,
+        "load_mcp_config_from_settings",
+        lambda settings: mcp_config,
+    )
+    monkeypatch.setattr(main_module, "MCPManager", _Manager)
+    monkeypatch.setattr(main_module, "build_tracer", lambda **kwargs: tracer)
+
+    async with lifespan(app):
+        assert app.state.tracer is (None if fail_start else tracer)
+
+    assert tracer.start_calls == 1
+    assert tracer.close_calls == 1
     assert default.close_calls == 1

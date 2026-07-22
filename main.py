@@ -72,13 +72,26 @@ async def _close_application_resources(
         await _run_async_cleanup("MCP", mcp.shutdown)
 
     if tracer is not None:
-        try:
-            tracer.close()
-        except Exception:  # noqa: BLE001 -- shutdown is best-effort.
-            logger.warning("tracer cleanup failed", exc_info=True)
+        await _run_async_cleanup("tracer", tracer.aclose)
 
     if active_cancellation is not None:
         raise active_cancellation
+
+
+async def _start_optional_tracer(tracer: Tracer | None) -> Tracer | None:
+    """Start optional tracing without turning an observability failure fatal."""
+    if tracer is None:
+        return None
+    try:
+        await tracer.start()
+    except Exception:  # noqa: BLE001 -- tracing is an optional layer.
+        logger.warning("tracing startup failed; running without traces", exc_info=True)
+        try:
+            await tracer.aclose()
+        except Exception:  # noqa: BLE001 -- startup remains best-effort.
+            logger.warning("failed tracer cleanup failed", exc_info=True)
+        return None
+    return tracer
 
 
 def _try_build_orchestration(
@@ -224,7 +237,9 @@ async def lifespan(app: FastAPI):
 
         registry, orchestrator = _try_build_orchestration(settings, mcp)
 
-        tracer = build_tracer(enabled=settings.trace_enabled, path=settings.trace_path)
+        tracer = await _start_optional_tracer(
+            build_tracer(enabled=settings.trace_enabled, path=settings.trace_path)
+        )
 
         app.state.settings = settings
         app.state.llm = llm

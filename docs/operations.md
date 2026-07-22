@@ -607,9 +607,9 @@ extension path described above.
   stall a request indefinitely. A timeout cancels the in-flight call and
   abandons it; for the LLM that feeds the retry path, for a tool it becomes an
   `is_error` result. `MAX_RUN_TOKENS` and `MAX_RUN_SECONDS` (both `0`/disabled
-  by default) additionally bound *total* run cost/duration across all
-  iterations; the wall-clock budget is also applied to in-flight LLM/tool calls
-  and retry sleeps. See [configuration.md](configuration.md) and the *Bounded &
+  by default) additionally bound *total* run cost/duration. The wall-clock
+  budget begins after the session claim and covers routing, retries, generation,
+  tool calls, and backoff. See [configuration.md](configuration.md) and the *Bounded &
   safe runs* section of [architecture.md](architecture.md). The token cap
   works even against a provider that reports all-zero usage — the local
   token estimator (`agent/context.py`) fills in from the outgoing messages

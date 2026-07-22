@@ -35,7 +35,7 @@ def wired_app(
     previous = dict(app.state._state)
     settings = Settings(_env_file=None, orchestration_enabled=False)
     app.state.settings = settings
-    app.state.llm = llm
+    app.state.legacy_llm = llm
     app.state.mcp = mcp if mcp is not None else EmptyMCP()
     app.state.store = InMemorySessionStore(
         ttl_seconds=settings.session_ttl_seconds,

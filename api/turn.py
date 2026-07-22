@@ -117,7 +117,7 @@ async def _collect(events: AsyncIterator[Event], metadata: TurnMetadata) -> Turn
 class TurnRunner:
     """Own the complete lifecycle of an accepted turn."""
 
-    llm: LLMClient
+    legacy_llm: LLMClient | None
     mcp: MCPManager
     store: SessionStore
     guard: SessionGuard
@@ -165,11 +165,13 @@ class TurnRunner:
         context: RunContext,
     ) -> _ResolvedRouting:
         if self.orchestrator is None or self.registry is None:
+            if self.legacy_llm is None:
+                raise RuntimeError("legacy LLM client is unavailable")
             context.logger.info(
                 "chat: legacy mode (orchestration disabled), tools=%d", len(tools.tools)
             )
             return _ResolvedRouting(
-                llm=self.llm,
+                llm=self.legacy_llm,
                 tools=tools.as_llm_tools(),
                 system_prompt=request.system_override,
                 thinking_level=None,

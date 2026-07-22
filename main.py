@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 async def _close_application_resources(
     *,
-    llm: LLMClient,
+    legacy_llm: LLMClient | None,
     registry: LLMRegistry | None,
     mcp: MCPManager | None,
     tracer: Tracer | None,
@@ -61,12 +61,13 @@ async def _close_application_resources(
             logger.warning("%s cleanup failed", label, exc_info=True)
 
     if registry is not None:
+        additional_clients = (legacy_llm,) if legacy_llm is not None else ()
         await _run_async_cleanup(
             "LLM",
-            lambda: registry.aclose(additional_clients=(llm,)),
+            lambda: registry.aclose(additional_clients=additional_clients),
         )
-    else:
-        await _run_async_cleanup("LLM", llm.aclose)
+    elif legacy_llm is not None:
+        await _run_async_cleanup("LLM", legacy_llm.aclose)
 
     if mcp is not None:
         await _run_async_cleanup("MCP", mcp.shutdown)
@@ -84,6 +85,14 @@ async def _start_optional_tracer(tracer: Tracer | None) -> Tracer | None:
         return None
     try:
         await tracer.start()
+    except asyncio.CancelledError:
+        try:
+            await tracer.aclose()
+        except BaseException:  # noqa: BLE001 -- preserve startup cancellation.
+            logger.warning(
+                "tracer cleanup after cancelled startup failed", exc_info=True
+            )
+        raise
     except Exception:  # noqa: BLE001 -- tracing is an optional layer.
         logger.warning("tracing startup failed; running without traces", exc_info=True)
         try:
@@ -95,7 +104,7 @@ async def _start_optional_tracer(tracer: Tracer | None) -> Tracer | None:
 
 
 def _try_build_orchestration(
-    settings, mcp: MCPManager
+    settings,
 ) -> tuple[LLMRegistry | None, Orchestrator | None]:
     """Attempt to construct (LLMRegistry, Orchestrator). Returns (None, None) on any failure.
 
@@ -200,7 +209,8 @@ def _log_ready_summary(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
-    # Settings and default LLM fail loud if env/config is broken.
+    # Settings fail loud if env/config is broken. The legacy LLM is constructed
+    # only when orchestration is disabled or unavailable.
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level,
@@ -212,8 +222,7 @@ async def lifespan(app: FastAPI):
         settings.llm_model,
     )
 
-    llm = build_llm_client(settings)
-
+    legacy_llm: LLMClient | None = None
     mcp: MCPManager | None = None
     registry: LLMRegistry | None = None
     tracer: Tracer | None = None
@@ -235,14 +244,16 @@ async def lifespan(app: FastAPI):
         )
         guard = SessionGuard()
 
-        registry, orchestrator = _try_build_orchestration(settings, mcp)
+        registry, orchestrator = _try_build_orchestration(settings)
+        if registry is None or orchestrator is None:
+            legacy_llm = build_llm_client(settings)
 
         tracer = await _start_optional_tracer(
             build_tracer(enabled=settings.trace_enabled, path=settings.trace_path)
         )
 
         app.state.settings = settings
-        app.state.llm = llm
+        app.state.legacy_llm = legacy_llm
         app.state.mcp = mcp
         app.state.store = store
         app.state.guard = guard
@@ -261,7 +272,7 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("shutting down harness")
         await _close_application_resources(
-            llm=llm,
+            legacy_llm=legacy_llm,
             registry=registry,
             mcp=mcp,
             tracer=tracer,

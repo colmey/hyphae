@@ -21,15 +21,10 @@ from typing import Optional
 from fastapi import HTTPException, Request
 
 from agent import SessionGuard, SessionStore, ToolPolicy, Tracer
-from llm.client import LLMClient
 from mcp_layer import MCPManager
 from orchestrator import LLMRegistry, Orchestrator
 
 from .turn import TurnRunner
-
-
-async def get_llm(request: Request) -> LLMClient:
-    return request.app.state.llm
 
 
 async def get_mcp(request: Request) -> MCPManager:
@@ -119,7 +114,7 @@ async def get_turn_runner(request: Request) -> TurnRunner:
     smoke tests free of an extra field while staying override-friendly.
     """
     return TurnRunner(
-        llm=request.app.state.llm,
+        legacy_llm=request.app.state.legacy_llm,
         mcp=request.app.state.mcp,
         store=request.app.state.store,
         guard=request.app.state.guard,

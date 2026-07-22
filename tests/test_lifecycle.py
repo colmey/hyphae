@@ -20,7 +20,7 @@ from llm.prompted_tools import PromptedToolLLMClient
 from llm.providers.gemini import GeminiLLMClient
 from llm.providers.openai import OpenAILLMClient
 from llm.schemas import AssistantMessage
-from main import _close_application_resources, lifespan
+from main import _close_application_resources, _start_optional_tracer, lifespan
 from orchestrator import LLMRegistry
 
 pytestmark = pytest.mark.anyio
@@ -104,6 +104,59 @@ class _Tracer:
         self.close_calls += 1
         if self.failure is not None:
             raise self.failure
+
+
+class _AppMCPManager:
+    connected_servers: list[str] = []
+    instances: list[_AppMCPManager] = []
+
+    def __init__(self, config: MCPConfig, *, connect_timeout_seconds: float) -> None:
+        self.connect_timeout_seconds = connect_timeout_seconds
+        self.shutdown_calls = 0
+        self.instances.append(self)
+
+    async def startup(self) -> None:
+        pass
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+    def list_tools(self) -> list[Any]:
+        return []
+
+    def status_snapshot(self) -> tuple[Any, ...]:
+        return ()
+
+
+def _wire_lifespan_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    *,
+    orchestration_enabled: bool = False,
+    trace_enabled: bool = False,
+) -> SimpleNamespace:
+    settings = SimpleNamespace(
+        log_level="INFO",
+        llm_provider="test",
+        llm_model="test-model",
+        mcp_config_path="mcp.yaml",
+        mcp_connect_timeout_seconds=17.5,
+        orchestration_enabled=orchestration_enabled,
+        session_ttl_seconds=0,
+        session_max_count=0,
+        trace_enabled=trace_enabled,
+        trace_path=tmp_path / "trace.jsonl",
+    )
+    mcp_config = MCPConfig.model_validate({"mcpServers": {}})
+    _AppMCPManager.instances.clear()
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        main_module,
+        "load_mcp_config_from_settings",
+        lambda value: mcp_config,
+    )
+    monkeypatch.setattr(main_module, "MCPManager", _AppMCPManager)
+    return settings
 
 
 def _models_config() -> ModelsConfig:
@@ -232,7 +285,7 @@ async def test_application_cleanup_deduplicates_default_and_registry_alias() -> 
     tracer = _Tracer()
 
     await _close_application_resources(
-        llm=default,
+        legacy_llm=default,
         registry=registry,
         mcp=mcp,
         tracer=tracer,
@@ -241,6 +294,26 @@ async def test_application_cleanup_deduplicates_default_and_registry_alias() -> 
     assert default.close_calls == 1
     assert mcp.shutdown_calls == 1
     assert tracer.close_calls == 1
+
+
+async def test_application_cleanup_supports_registry_without_legacy_client() -> None:
+    registry = _registry()
+    cached = _ClosingClient()
+    registry._clients["cached"] = cached
+    mcp = _MCP()
+    tracer = _Tracer()
+
+    for _ in range(2):
+        await _close_application_resources(
+            legacy_llm=None,
+            registry=registry,
+            mcp=mcp,
+            tracer=tracer,
+        )
+
+    assert cached.close_calls == 1
+    assert mcp.shutdown_calls == 2
+    assert tracer.close_calls == 2
 
 
 async def test_application_cleanup_isolates_llm_mcp_and_tracer_failures() -> None:
@@ -252,7 +325,7 @@ async def test_application_cleanup_isolates_llm_mcp_and_tracer_failures() -> Non
     tracer = _Tracer(failure=RuntimeError("tracer close failed"))
 
     await _close_application_resources(
-        llm=default,
+        legacy_llm=default,
         registry=registry,
         mcp=mcp,
         tracer=tracer,
@@ -265,21 +338,31 @@ async def test_application_cleanup_isolates_llm_mcp_and_tracer_failures() -> Non
 
 
 async def test_repeated_application_cleanup_is_safe() -> None:
-    default = _IdempotentClosingClient()
+    legacy_only = _IdempotentClosingClient()
+    for _ in range(2):
+        await _close_application_resources(
+            legacy_llm=legacy_only,
+            registry=None,
+            mcp=None,
+            tracer=None,
+        )
+
+    aliased = _IdempotentClosingClient()
     registry = _registry()
-    registry._clients["default"] = default
+    registry._clients.update({"default": aliased, "alias": aliased})
     mcp = _MCP()
     tracer = _Tracer()
 
     for _ in range(2):
         await _close_application_resources(
-            llm=default,
+            legacy_llm=aliased,
             registry=registry,
             mcp=mcp,
             tracer=tracer,
         )
 
-    assert default.close_calls == 1
+    assert legacy_only.close_calls == 1
+    assert aliased.close_calls == 1
     assert mcp.shutdown_calls == 2
     assert tracer.close_calls == 2
 
@@ -299,7 +382,7 @@ async def test_active_application_cancellation_survives_remaining_cleanup() -> N
     tracer = _Tracer()
     task = asyncio.create_task(
         _close_application_resources(
-            llm=default,
+            legacy_llm=default,
             registry=None,
             mcp=mcp,
             tracer=tracer,
@@ -316,7 +399,26 @@ async def test_active_application_cancellation_survives_remaining_cleanup() -> N
     assert tracer.close_calls == 1
 
 
-async def test_lifespan_closes_default_llm_after_partial_startup_failure(
+async def test_cancelled_tracer_start_closes_once_and_reraises() -> None:
+    started = asyncio.Event()
+
+    class _BlockingStartupTracer(_Tracer):
+        async def start(self) -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+    tracer = _BlockingStartupTracer()
+    task = asyncio.create_task(_start_optional_tracer(tracer))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert tracer.close_calls == 1
+
+
+async def test_lifespan_does_not_build_legacy_llm_before_it_is_needed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     default = _ClosingClient()
@@ -328,7 +430,14 @@ async def test_lifespan_closes_default_llm_after_partial_startup_failure(
     )
 
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "build_llm_client", lambda value: default)
+    build_calls = 0
+
+    def build_legacy(value: Any) -> LLMClient:
+        nonlocal build_calls
+        build_calls += 1
+        return default
+
+    monkeypatch.setattr(main_module, "build_llm_client", build_legacy)
 
     def fail_config(settings: Any) -> Any:
         raise RuntimeError("startup failed")
@@ -339,60 +448,92 @@ async def test_lifespan_closes_default_llm_after_partial_startup_failure(
         async with lifespan(FastAPI()):
             raise AssertionError("startup failure must prevent lifespan entry")
 
-    assert default.close_calls == 1
+    assert build_calls == 0
+    assert default.close_calls == 0
 
 
-async def test_lifespan_injects_mcp_connect_timeout(
+async def test_orchestrated_lifespan_skips_legacy_client_and_closes_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    app = FastAPI()
+    control = _ClosingClient()
+    registry = _registry()
+    registry._clients["control"] = control
+    _wire_lifespan_dependencies(
+        monkeypatch,
+        tmp_path,
+        orchestration_enabled=True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "build_llm_client",
+        lambda value: pytest.fail("orchestrated startup must not build legacy LLM"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_try_build_orchestration",
+        lambda value: (registry, object()),
+    )
+
+    async with lifespan(app):
+        assert app.state.legacy_llm is None
+
+    assert control.close_calls == 1
+    assert _AppMCPManager.instances[0].shutdown_calls == 1
+
+
+async def test_orchestration_fallback_builds_one_legacy_client(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     default = _ClosingClient()
-    captured: dict[str, float] = {}
+    build_calls = 0
 
-    class _Manager:
-        connected_servers: list[str] = []
+    def build_legacy(value: Any) -> LLMClient:
+        nonlocal build_calls
+        build_calls += 1
+        return default
 
-        def __init__(self, config: MCPConfig, *, connect_timeout_seconds: float) -> None:
-            captured["timeout"] = connect_timeout_seconds
-
-        async def startup(self) -> None:
-            pass
-
-        async def shutdown(self) -> None:
-            pass
-
-        def list_tools(self) -> list[Any]:
-            return []
-
-        def status_snapshot(self) -> tuple[Any, ...]:
-            return ()
-
-    settings = SimpleNamespace(
-        log_level="INFO",
-        llm_provider="test",
-        llm_model="test-model",
-        mcp_config_path="mcp.yaml",
-        mcp_connect_timeout_seconds=17.5,
-        orchestration_enabled=False,
-        session_ttl_seconds=0,
-        session_max_count=0,
-        trace_enabled=False,
-        trace_path=tmp_path / "trace.jsonl",
+    _wire_lifespan_dependencies(
+        monkeypatch,
+        tmp_path,
+        orchestration_enabled=True,
     )
-    mcp_config = MCPConfig.model_validate({"mcpServers": {}})
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "build_llm_client", lambda value: default)
+    monkeypatch.setattr(main_module, "build_llm_client", build_legacy)
     monkeypatch.setattr(
         main_module,
-        "load_mcp_config_from_settings",
-        lambda settings: mcp_config,
+        "_try_build_orchestration",
+        lambda value: (None, None),
     )
-    monkeypatch.setattr(main_module, "MCPManager", _Manager)
+
+    async with lifespan(FastAPI()) as _:
+        pass
+
+    assert build_calls == 1
+    assert default.close_calls == 1
+
+
+async def test_disabled_orchestration_builds_one_legacy_and_injects_mcp_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    default = _ClosingClient()
+    build_calls = 0
+
+    def build_legacy(value: Any) -> LLMClient:
+        nonlocal build_calls
+        build_calls += 1
+        return default
+
+    _wire_lifespan_dependencies(monkeypatch, tmp_path)
+    monkeypatch.setattr(main_module, "build_llm_client", build_legacy)
 
     async with lifespan(FastAPI()):
         pass
 
-    assert captured == {"timeout": 17.5}
+    assert _AppMCPManager.instances[0].connect_timeout_seconds == 17.5
+    assert build_calls == 1
     assert default.close_calls == 1
 
 
@@ -405,24 +546,6 @@ async def test_lifespan_starts_tracer_before_publish_and_degrades_failure(
     default = _ClosingClient()
     app = FastAPI()
 
-    class _Manager:
-        connected_servers: list[str] = []
-
-        def __init__(self, config: MCPConfig, *, connect_timeout_seconds: float) -> None:
-            pass
-
-        async def startup(self) -> None:
-            pass
-
-        async def shutdown(self) -> None:
-            pass
-
-        def list_tools(self) -> list[Any]:
-            return []
-
-        def status_snapshot(self) -> tuple[Any, ...]:
-            return ()
-
     class _StartupTracer(_Tracer):
         def __init__(self) -> None:
             super().__init__()
@@ -434,28 +557,9 @@ async def test_lifespan_starts_tracer_before_publish_and_degrades_failure(
             if fail_start:
                 raise OSError("trace open failed")
 
-    settings = SimpleNamespace(
-        log_level="INFO",
-        llm_provider="test",
-        llm_model="test-model",
-        mcp_config_path="mcp.yaml",
-        mcp_connect_timeout_seconds=17.5,
-        orchestration_enabled=False,
-        session_ttl_seconds=0,
-        session_max_count=0,
-        trace_enabled=True,
-        trace_path=tmp_path / "trace.jsonl",
-    )
     tracer = _StartupTracer()
-    mcp_config = MCPConfig.model_validate({"mcpServers": {}})
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    _wire_lifespan_dependencies(monkeypatch, tmp_path, trace_enabled=True)
     monkeypatch.setattr(main_module, "build_llm_client", lambda value: default)
-    monkeypatch.setattr(
-        main_module,
-        "load_mcp_config_from_settings",
-        lambda settings: mcp_config,
-    )
-    monkeypatch.setattr(main_module, "MCPManager", _Manager)
     monkeypatch.setattr(main_module, "build_tracer", lambda **kwargs: tracer)
 
     async with lifespan(app):
@@ -464,3 +568,64 @@ async def test_lifespan_starts_tracer_before_publish_and_degrades_failure(
     assert tracer.start_calls == 1
     assert tracer.close_calls == 1
     assert default.close_calls == 1
+
+
+@pytest.mark.parametrize("orchestrated", [False, True], ids=["legacy", "registry"])
+async def test_lifespan_cancellation_during_tracer_start_closes_all_owners(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    orchestrated: bool,
+) -> None:
+    app = FastAPI()
+    owned_client = _ClosingClient()
+    tracer_started = asyncio.Event()
+
+    class _BlockingStartupTracer(_Tracer):
+        async def start(self) -> None:
+            tracer_started.set()
+            await asyncio.Event().wait()
+
+    tracer = _BlockingStartupTracer()
+    _wire_lifespan_dependencies(
+        monkeypatch,
+        tmp_path,
+        orchestration_enabled=orchestrated,
+        trace_enabled=True,
+    )
+    if orchestrated:
+        registry = _registry()
+        registry._clients["control"] = owned_client
+        monkeypatch.setattr(
+            main_module,
+            "_try_build_orchestration",
+            lambda value: (registry, object()),
+        )
+        monkeypatch.setattr(
+            main_module,
+            "build_llm_client",
+            lambda value: pytest.fail(
+                "orchestrated startup must not build legacy LLM"
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            main_module,
+            "build_llm_client",
+            lambda value: owned_client,
+        )
+    monkeypatch.setattr(main_module, "build_tracer", lambda **kwargs: tracer)
+
+    async def run_lifespan() -> None:
+        async with lifespan(app):
+            raise AssertionError("cancelled startup must not enter lifespan")
+
+    task = asyncio.create_task(run_lifespan())
+    await tracer_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert tracer.close_calls == 1
+    assert owned_client.close_calls == 1
+    assert _AppMCPManager.instances[0].shutdown_calls == 1

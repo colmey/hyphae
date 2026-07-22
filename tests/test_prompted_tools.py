@@ -485,7 +485,7 @@ models:
         orchestrator_model_id="",
         llm_max_tokens=128,
     )
-    registry, orchestrator = _try_build_orchestration(settings, FakeMCP())
+    registry, orchestrator = _try_build_orchestration(settings)
 
     check(
         registry is None and orchestrator is None,

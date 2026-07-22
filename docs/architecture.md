@@ -634,7 +634,7 @@ never a silent truncation:
 | Guard | Settings field | Checked | `done_reason` |
 |---|---|---|---|
 | Token budget | `max_run_tokens` | Before each iteration and immediately after each reported `Usage.total_tokens` update | `budget_exceeded` |
-| Wall clock | `max_run_seconds` | Before each iteration and around in-flight LLM/tool calls/retry sleeps | `deadline_exceeded` |
+| Wall clock | `max_run_seconds` | Starts after the session claim; covers routing, retries, generation, tool calls, and backoff | `deadline_exceeded` |
 | No-progress abort | `abort_after_consecutive_tool_failures` | After each tool result, against the consecutive-failure counter | `no_progress` |
 
 All three default to `0` (disabled) in `Settings`, matching the repo's
@@ -869,8 +869,10 @@ Startup order:
    unless the setting is `<= 0`; startup failures degrade MCP health without
    aborting application startup.
 5. `InMemorySessionStore()` and `SessionGuard()`.
-6. `_try_build_orchestration(settings, mcp)` — returns registry/orchestrator or
-   `(None, None)` on optional-layer failure.
+6. `_try_build_orchestration(settings)` — returns registry/orchestrator or
+   `(None, None)` on optional-layer failure. The legacy default LLM is built
+   only for that fallback path; successful orchestration owns its clients
+   exclusively through the registry.
 7. Policy and tracer are built. An enabled tracer opens its sink and starts its
    bounded writer after the event loop exists; routine tracer startup failure
    degrades to `None`. Only the successfully started tracer is published on

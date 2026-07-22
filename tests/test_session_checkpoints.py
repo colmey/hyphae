@@ -207,7 +207,7 @@ def _runner(
         max_loop_iterations=5,
     )
     return TurnRunner(
-        llm=llm,
+        legacy_llm=llm,
         mcp=mcp,  # type: ignore[arg-type]
         store=store,
         guard=SessionGuard(),

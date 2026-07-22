@@ -120,9 +120,10 @@ class Settings(BaseSettings):
     max_run_seconds: float = Field(
         default=0,
         description=(
-            "Hard wall-clock ceiling on one run, measured from the first "
-            "iteration and enforced during LLM/tool calls; ends the run "
-            "deadline_exceeded with the partial answer. <=0 disables."
+            "Hard wall-clock ceiling on one accepted turn, measured immediately "
+            "after the session claim and enforced across routing, retries, LLM/tool "
+            "calls, and backoff; ends the run deadline_exceeded with the partial "
+            "answer. <=0 disables."
         ),
     )
     abort_after_consecutive_tool_failures: int = Field(

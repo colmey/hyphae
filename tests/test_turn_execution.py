@@ -15,6 +15,8 @@ import pytest
 from fastapi import HTTPException
 
 import api.schemas as api_schemas
+import api.dependencies as api_dependencies
+import main as main_module
 from agent import DoneEvent, OrchestrationDecisionEvent, Session, SessionGuard, Tracer
 from api.schemas import TokenUsage
 from api.turn import PersistencePolicy, TurnRequest, TurnRunner
@@ -195,7 +197,7 @@ def _runner(
 
     store = InMemorySessionStore()
     return TurnRunner(
-        llm=agent,
+        legacy_llm=agent,
         mcp=mcp,  # type: ignore[arg-type]
         store=store,
         guard=SessionGuard(),
@@ -585,6 +587,15 @@ def test_route_facing_turn_contract_has_no_preference_plumbing() -> None:
         TurnRunner._events,
     ):
         assert "preferences" not in inspect.signature(method).parameters
+
+
+def test_runtime_wiring_names_optional_legacy_client_and_removes_dead_helpers() -> None:
+    assert "legacy_llm" in TurnRunner.__dataclass_fields__
+    assert "llm" not in TurnRunner.__dataclass_fields__
+    assert not hasattr(api_dependencies, "get_llm")
+    assert list(inspect.signature(main_module._try_build_orchestration).parameters) == [
+        "settings"
+    ]
 
 
 def test_token_usage_conversion_preserves_every_done_field() -> None:

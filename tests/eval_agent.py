@@ -321,7 +321,7 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
         )
         orch_cfg = case.get("orchestration") or {}
         runner = TurnRunner(
-            llm=llm,
+            legacy_llm=llm,
             mcp=mcp,
             store=store,
             guard=SessionGuard(),

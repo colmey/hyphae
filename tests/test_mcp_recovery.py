@@ -316,7 +316,7 @@ async def test_in_flight_turn_keeps_snapshot_while_next_turn_sees_refresh() -> N
     llm = _SnapshotLLM()
     store = InMemorySessionStore()
     runner = TurnRunner(
-        llm=llm,
+        legacy_llm=llm,
         mcp=manager,
         store=store,
         guard=SessionGuard(),

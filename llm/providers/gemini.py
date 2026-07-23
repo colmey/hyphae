@@ -140,7 +140,7 @@ class GeminiLLMClient(LLMClient):
             "gemini complete: model=%s messages=%d tools=%s schema=%s thinking=%s",
             self._model,
             len(contents),
-            len(genai_tools[0].function_declarations) if genai_tools else 0,
+            len(genai_tools[0].function_declarations or []) if genai_tools else 0,
             request.response_schema.__name__ if request.response_schema else None,
             request.thinking_level,
         )
@@ -193,7 +193,7 @@ class GeminiLLMClient(LLMClient):
                         parts.append(genai_types.Part(**part_kwargs))
                 elif isinstance(block, ToolUseBlock):
                     # Echo the original thought_signature or Gemini may return 400.
-                    part_kwargs: dict[str, Any] = {
+                    tool_part_kwargs: dict[str, Any] = {
                         "function_call": genai_types.FunctionCall(
                             name=block.name,
                             args=block.input,
@@ -201,8 +201,8 @@ class GeminiLLMClient(LLMClient):
                     }
                     sig = block.provider_metadata.get("thought_signature")
                     if sig is not None:
-                        part_kwargs["thought_signature"] = sig
-                    parts.append(genai_types.Part(**part_kwargs))
+                        tool_part_kwargs["thought_signature"] = sig
+                    parts.append(genai_types.Part(**tool_part_kwargs))
                 elif isinstance(block, ToolResultBlock):
                     # Keep both tool content and error state visible to Gemini.
                     response_payload: dict[str, Any] = {"content": block.content}

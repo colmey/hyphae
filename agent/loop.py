@@ -521,7 +521,7 @@ async def run_agent(
 
     def _token_budget_exceeded() -> bool:
         return (
-            bool(max_run_tokens)
+            max_run_tokens is not None
             and max_run_tokens > 0
             and cumulative.total_tokens >= max_run_tokens
         )
@@ -609,9 +609,11 @@ async def run_agent(
 
         # Final iteration: withhold tools and ask for a best-effort answer.
         is_final_iteration = iteration >= max_iterations
+        effective_system: str | None
+        effective_tools: list[dict[str, Any]] | None
         if is_final_iteration:
             effective_system = _with_wrapup(system)
-            effective_tools: list[dict[str, Any]] | None = None
+            effective_tools = None
         else:
             effective_system = system
             effective_tools = tools
@@ -925,6 +927,7 @@ async def run_agent(
                     is_error = True
                 else:
                     seen_calls.add(call_key)
+                    validation_error: str | None
                     if tu.parse_error is not None:
                         validation_error = (
                             f"tool call arguments were not valid JSON ({tu.parse_error}); "
@@ -949,7 +952,9 @@ async def run_agent(
                         is_error = True
                     elif decision is not None and decision.verdict is Verdict.DENY:
                         run_log.info("policy denied %s", tu.name)
-                        content = decision.reason
+                        reason = decision.reason
+                        assert reason is not None
+                        content = reason
                         is_error = True
                     else:
                         tool_started = time.perf_counter()

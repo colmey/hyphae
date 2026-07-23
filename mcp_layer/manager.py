@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
@@ -155,12 +155,14 @@ class MCPManager:
         self,
         records: Sequence[_ServerRecord],
         *,
-        operation: Callable[[_ServerRecord], Awaitable[None]],
+        operation: Callable[[_ServerRecord], Coroutine[Any, Any, None]],
         context: str,
     ) -> None:
         if not records:
             return
-        tasks = [asyncio.create_task(operation(record)) for record in records]
+        tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(operation(record)) for record in records
+        ]
         try:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         except asyncio.CancelledError:

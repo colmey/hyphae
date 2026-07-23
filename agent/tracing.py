@@ -441,7 +441,9 @@ class _RunLogAdapter(logging.LoggerAdapter):
     with their trace, regardless of the root formatter's layout."""
 
     def process(self, msg, kwargs):
-        return f"[run {self.extra['run_id']}] {msg}", kwargs
+        extra = self.extra
+        assert extra is not None
+        return f"[run {extra['run_id']}] {msg}", kwargs
 
 
 def run_logger(base: logging.Logger, run_id: str) -> logging.LoggerAdapter:

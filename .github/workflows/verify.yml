@@ -1,0 +1,40 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: Mypy
+        run: uv run mypy agent api config llm mcp_layer orchestrator main.py
+
+      - name: Compile
+        run: >-
+          uv run python -m compileall -q
+          agent api config llm mcp_layer orchestrator main.py tests
+
+      - name: Collect live tests
+        run: uv run pytest --collect-only -q -m live
+
+      - name: Hermetic tests
+        run: uv run pytest -q

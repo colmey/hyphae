@@ -29,7 +29,7 @@ from .dependencies import (
     get_turn_runner,
     require_api_key,
 )
-from .schemas import HealthResponse
+from .schemas import HealthResponse, MCPServerHealth
 from .turn import PersistencePolicy, TurnRequest, TurnRunner
 
 logger = logging.getLogger(__name__)
@@ -75,12 +75,12 @@ async def health(
         connected_servers=mcp.connected_servers,
         tool_count=len(mcp.list_tools()),
         mcp_servers=[
-            {
-                "name": status.name,
-                "state": status.state,
-                "last_error": status.last_error,
-                "tool_count": status.tool_count,
-            }
+            MCPServerHealth(
+                name=status.name,
+                state=status.state,
+                last_error=status.last_error,
+                tool_count=status.tool_count,
+            )
             for status in server_statuses
         ],
         orchestration_enabled=registry is not None,

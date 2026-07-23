@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh -- create the project virtualenv and install dependencies with uv.
+# setup.sh -- sync the project virtualenv and locked dependencies with uv.
 #
 # Uses `uv` (https://docs.astral.sh/uv/), which bundles its own Python and
 # venv machinery, so it works even where the system `python3-venv`/`ensurepip`
@@ -29,17 +29,19 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
   fi
   # The installer drops uv in ~/.local/bin (or $XDG_BIN_HOME); make it visible.
-  export PATH="$HOME/.local/bin:$PATH"
+  UV_INSTALL_BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
+  export PATH="$UV_INSTALL_BIN:$PATH"
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "error: uv installer completed but uv is not on PATH." >&2
+    exit 1
+  fi
 fi
 
 echo "==> uv version: $(uv --version)"
 
-# --- Create the venv and install dependencies -------------------------------
-echo "==> Creating virtualenv at $VENV"
-uv venv --clear "$VENV"
-
-echo "==> Installing dependencies from requirements.txt"
-uv pip install --python "$VENV/bin/python" -r requirements.txt
+# --- Sync the venv and locked dependencies ----------------------------------
+echo "==> Syncing locked dependencies into $VENV"
+UV_PROJECT_ENVIRONMENT="$VENV" uv sync --frozen --group dev
 
 # --- Seed .env --------------------------------------------------------------
 if [ ! -f "$ROOT/.env" ]; then

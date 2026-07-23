@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sse_starlette.sse import EventSourceResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
 
 from agent import (
     DoneEvent,
@@ -222,12 +223,14 @@ def _http_error_response(exc: StarletteHTTPException) -> JSONResponse:
 
 
 async def openai_auth_exception_handler(
-    request: Request, exc: StarletteHTTPException
-) -> JSONResponse:
+    request: Request, exc: Exception
+) -> Response:
     """Reshape a /v1 401 into the OpenAI error envelope; delegate everything else.
 
     Registered app-wide but scoped to /v1 401s, leaving native /chat untouched.
     """
+    if not isinstance(exc, StarletteHTTPException):
+        raise exc
     if exc.status_code == 401 and request.url.path.startswith("/v1"):
         return _error_response(exc.detail, status=401, err_type="invalid_request_error")
     return await http_exception_handler(request, exc)

@@ -157,6 +157,7 @@ def _split_reasoning(text: str | None) -> tuple[str | None, str]:
     """Return provider-emitted reasoning and visible content separately."""
     if not text:
         return None, ""
+    reasoning: str | None
     m = _THINK_BLOCK.match(text)
     if not m:
         candidate = text.lstrip()

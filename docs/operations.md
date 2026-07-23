@@ -359,7 +359,7 @@ Two ways:
 ### First-time setup
 
 ```bash
-# Creates .venv, installs requirements.txt, and seeds .env from .env.example
+# Syncs .venv from pyproject.toml + uv.lock and seeds .env from .env.example
 ./setup.sh
 
 # Then edit .env and set your API keys (e.g. GEMINI_API_KEY) and MCP URLs.

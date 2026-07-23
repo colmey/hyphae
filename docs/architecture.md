@@ -123,9 +123,10 @@ finish. `TurnMetadata` carries the resolved model and optional sanitized
 ```
 hyphae/
 ├── main.py                   # FastAPI app, lifespan, wires everything
-├── requirements.txt
+├── pyproject.toml            # Direct dependencies and tool configuration
+├── uv.lock                   # Exact tested dependency graph
 ├── .env.example              # Template for .env (copy and fill in)
-├── setup.sh                  # Creates .venv + installs deps + seeds .env
+├── setup.sh                  # Frozen uv sync + one-time .env seeding
 ├── runscript.sh              # Standard launcher (venv + PYTHONPATH + python)
 ├── chat_client.py            # Optional interactive REPL client (uses HTTP)
 ├── harness_client.py         # Reference async Python client (orchestration-aware)

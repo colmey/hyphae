@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, AsyncIterator, Optional
+from typing import Any, Optional, cast
 
 from fastapi import HTTPException
 
@@ -243,7 +244,7 @@ class TurnRunner:
         routing: _ResolvedRouting,
         limits: RunLimits,
         context: RunContext,
-    ) -> AsyncIterator[Event]:
+    ) -> AsyncGenerator[Event, None]:
         request.session.append_user(request.prompt)
 
         if routing.orchestration is not None:
@@ -266,18 +267,23 @@ class TurnRunner:
         else:  # Defensive against future enum members.
             raise ValueError(f"unsupported persistence policy: {request.persistence!r}")
 
-        agent_events = run_agent(
-            session=request.session,
-            llm=routing.llm,
-            mcp=self.mcp,
-            store=store,
-            system=routing.system_prompt,
-            tools=routing.tools,
-            thinking_level=routing.thinking_level,
-            limits=limits,
-            context=context,
-            policy=self.policy,
-            stream=request.stream,
+        # run_agent is implemented as an async generator; its public return
+        # annotation remains the broader AsyncIterator compatibility surface.
+        agent_events = cast(
+            AsyncGenerator[Event, None],
+            run_agent(
+                session=request.session,
+                llm=routing.llm,
+                mcp=self.mcp,
+                store=store,
+                system=routing.system_prompt,
+                tools=routing.tools,
+                thinking_level=routing.thinking_level,
+                limits=limits,
+                context=context,
+                policy=self.policy,
+                stream=request.stream,
+            ),
         )
         try:
             async for event in agent_events:

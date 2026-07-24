@@ -6,10 +6,40 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Protocol
 
 from .events import Event
 from .tracing import Tracer, event_record, run_logger
+
+
+class RunSettings(Protocol):
+    """Settings values used to construct immutable run limits."""
+
+    max_loop_iterations: int
+    llm_max_tokens: int
+    llm_timeout_seconds: float
+    tool_timeout_seconds: float
+    llm_max_retries: int
+    llm_retry_base_delay: float
+    tool_result_max_chars: int
+    max_run_tokens: int
+    max_run_seconds: float
+    abort_after_consecutive_tool_failures: int
+    context_strategy: str
+    context_default_window_tokens: int
+    context_safety_margin_tokens: int
+    context_recent_messages: int
+    context_summary_max_tokens: int
+
+
+class ModelLimits(Protocol):
+    """Per-model output and context limits used by the agent."""
+
+    @property
+    def max_tokens(self) -> int | None: ...
+
+    @property
+    def context_window(self) -> int | None: ...
 
 
 @dataclass(frozen=True)
@@ -33,7 +63,7 @@ class RunLimits:
     context_summary_max_tokens: int = 512
 
     @classmethod
-    def from_settings(cls, settings: Any) -> "RunLimits":
+    def from_settings(cls, settings: RunSettings) -> "RunLimits":
         return cls(
             max_iterations=settings.max_loop_iterations,
             max_tokens=settings.llm_max_tokens,
@@ -52,14 +82,13 @@ class RunLimits:
             context_summary_max_tokens=settings.context_summary_max_tokens,
         )
 
-    def for_model(self, model_entry: Any | None) -> "RunLimits":
+    def for_model(self, model_entry: ModelLimits | None) -> "RunLimits":
         if model_entry is None:
             return self
         return replace(
             self,
-            max_tokens=getattr(model_entry, "max_tokens", None) or self.max_tokens,
-            context_window=getattr(model_entry, "context_window", None)
-            or self.context_window,
+            max_tokens=model_entry.max_tokens or self.max_tokens,
+            context_window=model_entry.context_window or self.context_window,
         )
 
 

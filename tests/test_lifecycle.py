@@ -128,6 +128,14 @@ class _AppMCPManager:
         return ()
 
 
+class _RegistrySettings:
+    llm_max_tokens = 4096
+    openai_base_url = ""
+
+    def api_key_for_provider(self, provider: str) -> str:
+        raise AssertionError(f"unexpected provider construction: {provider}")
+
+
 def _wire_lifespan_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
@@ -173,7 +181,7 @@ def _models_config() -> ModelsConfig:
 
 
 def _registry() -> LLMRegistry:
-    return LLMRegistry(_models_config(), SimpleNamespace())
+    return LLMRegistry(_models_config(), _RegistrySettings())
 
 
 async def test_inherited_llm_close_is_a_safe_noop() -> None:
@@ -285,7 +293,7 @@ async def test_application_cleanup_deduplicates_default_and_registry_alias() -> 
     tracer = _Tracer()
 
     await _close_application_resources(
-        legacy_llm=default,
+        unorchestrated_llm=default,
         registry=registry,
         mcp=mcp,
         tracer=tracer,
@@ -296,7 +304,7 @@ async def test_application_cleanup_deduplicates_default_and_registry_alias() -> 
     assert tracer.close_calls == 1
 
 
-async def test_application_cleanup_supports_registry_without_legacy_client() -> None:
+async def test_application_cleanup_supports_registry_without_unorchestrated_client() -> None:
     registry = _registry()
     cached = _ClosingClient()
     registry._clients["cached"] = cached
@@ -305,7 +313,7 @@ async def test_application_cleanup_supports_registry_without_legacy_client() -> 
 
     for _ in range(2):
         await _close_application_resources(
-            legacy_llm=None,
+            unorchestrated_llm=None,
             registry=registry,
             mcp=mcp,
             tracer=tracer,
@@ -325,7 +333,7 @@ async def test_application_cleanup_isolates_llm_mcp_and_tracer_failures() -> Non
     tracer = _Tracer(failure=RuntimeError("tracer close failed"))
 
     await _close_application_resources(
-        legacy_llm=default,
+        unorchestrated_llm=default,
         registry=registry,
         mcp=mcp,
         tracer=tracer,
@@ -338,10 +346,10 @@ async def test_application_cleanup_isolates_llm_mcp_and_tracer_failures() -> Non
 
 
 async def test_repeated_application_cleanup_is_safe() -> None:
-    legacy_only = _IdempotentClosingClient()
+    unorchestrated_only = _IdempotentClosingClient()
     for _ in range(2):
         await _close_application_resources(
-            legacy_llm=legacy_only,
+            unorchestrated_llm=unorchestrated_only,
             registry=None,
             mcp=None,
             tracer=None,
@@ -355,13 +363,13 @@ async def test_repeated_application_cleanup_is_safe() -> None:
 
     for _ in range(2):
         await _close_application_resources(
-            legacy_llm=aliased,
+            unorchestrated_llm=aliased,
             registry=registry,
             mcp=mcp,
             tracer=tracer,
         )
 
-    assert legacy_only.close_calls == 1
+    assert unorchestrated_only.close_calls == 1
     assert aliased.close_calls == 1
     assert mcp.shutdown_calls == 2
     assert tracer.close_calls == 2
@@ -382,7 +390,7 @@ async def test_active_application_cancellation_survives_remaining_cleanup() -> N
     tracer = _Tracer()
     task = asyncio.create_task(
         _close_application_resources(
-            legacy_llm=default,
+            unorchestrated_llm=default,
             registry=None,
             mcp=mcp,
             tracer=tracer,
@@ -418,7 +426,7 @@ async def test_cancelled_tracer_start_closes_once_and_reraises() -> None:
     assert tracer.close_calls == 1
 
 
-async def test_lifespan_does_not_build_legacy_llm_before_it_is_needed(
+async def test_lifespan_does_not_build_unorchestrated_llm_before_it_is_needed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     default = _ClosingClient()
@@ -432,12 +440,12 @@ async def test_lifespan_does_not_build_legacy_llm_before_it_is_needed(
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
     build_calls = 0
 
-    def build_legacy(value: Any) -> LLMClient:
+    def build_unorchestrated(value: Any) -> LLMClient:
         nonlocal build_calls
         build_calls += 1
         return default
 
-    monkeypatch.setattr(main_module, "build_llm_client", build_legacy)
+    monkeypatch.setattr(main_module, "build_llm_client", build_unorchestrated)
 
     def fail_config(settings: Any) -> Any:
         raise RuntimeError("startup failed")
@@ -452,7 +460,7 @@ async def test_lifespan_does_not_build_legacy_llm_before_it_is_needed(
     assert default.close_calls == 0
 
 
-async def test_orchestrated_lifespan_skips_legacy_client_and_closes_registry(
+async def test_orchestrated_lifespan_skips_unorchestrated_client_and_closes_registry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -468,7 +476,9 @@ async def test_orchestrated_lifespan_skips_legacy_client_and_closes_registry(
     monkeypatch.setattr(
         main_module,
         "build_llm_client",
-        lambda value: pytest.fail("orchestrated startup must not build legacy LLM"),
+        lambda value: pytest.fail(
+            "orchestrated startup must not build an unorchestrated LLM"
+        ),
     )
     monkeypatch.setattr(
         main_module,
@@ -477,20 +487,20 @@ async def test_orchestrated_lifespan_skips_legacy_client_and_closes_registry(
     )
 
     async with lifespan(app):
-        assert app.state.legacy_llm is None
+        assert app.state.unorchestrated_llm is None
 
     assert control.close_calls == 1
     assert _AppMCPManager.instances[0].shutdown_calls == 1
 
 
-async def test_orchestration_fallback_builds_one_legacy_client(
+async def test_orchestration_setup_failure_builds_one_unorchestrated_client(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     default = _ClosingClient()
     build_calls = 0
 
-    def build_legacy(value: Any) -> LLMClient:
+    def build_unorchestrated(value: Any) -> LLMClient:
         nonlocal build_calls
         build_calls += 1
         return default
@@ -500,7 +510,7 @@ async def test_orchestration_fallback_builds_one_legacy_client(
         tmp_path,
         orchestration_enabled=True,
     )
-    monkeypatch.setattr(main_module, "build_llm_client", build_legacy)
+    monkeypatch.setattr(main_module, "build_llm_client", build_unorchestrated)
     monkeypatch.setattr(
         main_module,
         "_try_build_orchestration",
@@ -514,20 +524,20 @@ async def test_orchestration_fallback_builds_one_legacy_client(
     assert default.close_calls == 1
 
 
-async def test_disabled_orchestration_builds_one_legacy_and_injects_mcp_timeout(
+async def test_disabled_orchestration_builds_one_unorchestrated_client_and_injects_mcp_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     default = _ClosingClient()
     build_calls = 0
 
-    def build_legacy(value: Any) -> LLMClient:
+    def build_unorchestrated(value: Any) -> LLMClient:
         nonlocal build_calls
         build_calls += 1
         return default
 
     _wire_lifespan_dependencies(monkeypatch, tmp_path)
-    monkeypatch.setattr(main_module, "build_llm_client", build_legacy)
+    monkeypatch.setattr(main_module, "build_llm_client", build_unorchestrated)
 
     async with lifespan(FastAPI()):
         pass
@@ -570,7 +580,9 @@ async def test_lifespan_starts_tracer_before_publish_and_degrades_failure(
     assert default.close_calls == 1
 
 
-@pytest.mark.parametrize("orchestrated", [False, True], ids=["legacy", "registry"])
+@pytest.mark.parametrize(
+    "orchestrated", [False, True], ids=["unorchestrated", "registry"]
+)
 async def test_lifespan_cancellation_during_tracer_start_closes_all_owners(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -604,7 +616,7 @@ async def test_lifespan_cancellation_during_tracer_start_closes_all_owners(
             main_module,
             "build_llm_client",
             lambda value: pytest.fail(
-                "orchestrated startup must not build legacy LLM"
+                "orchestrated startup must not build an unorchestrated LLM"
             ),
         )
     else:

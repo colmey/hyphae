@@ -3,7 +3,7 @@
 """File-config loaders: one shared YAML pipeline plus the prompt loader.
 
 The loaders raise loudly on malformed input -- main.py decides whether to
-abort startup or fall back to legacy mode (see orchestration_enabled in
+abort startup or use unorchestrated mode (see orchestration_enabled in
 Settings). MCP interpolation receives Settings-owned values explicitly in
 production and defaults to the process environment for direct callers.
 """

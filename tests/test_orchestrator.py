@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from agent.runtime import ModelLimits
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, Message, TextBlock
 from mcp_layer import ToolSnapshot
@@ -37,11 +38,23 @@ def test_thinking_level_is_normalized(value: str | None, expected: str) -> None:
 
 
 class _RegistryStub:
+    model_ids = ["model"]
+
     def default_id(self) -> str:
         return "model"
 
     def describe_for_prompt(self) -> str:
         return "model: test model"
+
+    def get(self, model_id: str) -> LLMClient:
+        raise AssertionError(f"unexpected registry lookup: {model_id}")
+
+    def get_or_default(self, model_id: str | None) -> tuple[str, LLMClient]:
+        resolved = model_id or self.default_id()
+        return resolved, self.get(resolved)
+
+    def get_entry(self, model_id: str) -> ModelLimits:
+        return SimpleNamespace(max_tokens=None, context_window=None)
 
 
 class _RecordingLLM(LLMClient):
@@ -59,7 +72,7 @@ class _RecordingLLM(LLMClient):
 @pytest.mark.anyio
 async def test_orchestration_constructs_structured_generation_request() -> None:
     orchestrator = Orchestrator(
-        registry=_RegistryStub(),  # type: ignore[arg-type]
+        registry=_RegistryStub(),
         system_prompt="route requests",
     )
     llm = _RecordingLLM()
@@ -76,7 +89,7 @@ async def test_orchestration_constructs_structured_generation_request() -> None:
 
 def test_prompt_includes_history_only_when_present() -> None:
     orchestrator = Orchestrator(
-        registry=_RegistryStub(),  # type: ignore[arg-type]
+        registry=_RegistryStub(),
         system_prompt="route requests",
     )
     history = [
@@ -128,12 +141,20 @@ class _PreferenceRegistry:
         assert model_id == "model"
         return self.llm
 
+    def get_or_default(self, model_id: str | None) -> tuple[str, LLMClient]:
+        resolved = model_id if model_id in self.model_ids else self.default_id()
+        return resolved, self.get(resolved)
+
+    def get_entry(self, model_id: str) -> ModelLimits:
+        assert model_id == "model"
+        return SimpleNamespace(max_tokens=None, context_window=None)
+
 
 @pytest.mark.anyio
 async def test_direct_orchestrator_preferences_remain_supported_and_sanitized() -> None:
     registry = _PreferenceRegistry()
     orchestrator = Orchestrator(
-        registry=registry,  # type: ignore[arg-type]
+        registry=registry,
         system_prompt="route requests",
     )
     snapshot = ToolSnapshot.from_llm_tools(

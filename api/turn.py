@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Optional, cast
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -26,9 +26,11 @@ from agent import (
     Tracer,
     run_agent,
 )
+from agent.contracts import ToolRuntime
+from agent.runtime import ModelLimits
 from llm.client import LLMClient
-from mcp_layer import MCPManager, ToolSnapshot
-from orchestrator import LLMRegistry, Orchestrator
+from mcp_layer import ToolSnapshot
+from orchestrator.contracts import ModelRegistry, RoutingService
 
 from .schemas import TokenUsage
 
@@ -85,6 +87,26 @@ class TurnResult:
     metadata: TurnMetadata
 
 
+@dataclass(frozen=True, slots=True)
+class UnorchestratedRouting:
+    """Fixed client and model used when no routing service is active."""
+
+    llm: LLMClient | None
+    model_id: str
+    inventory: ModelRegistry | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OrchestratedRouting:
+    """Routing service and registry used for per-turn model selection."""
+
+    orchestrator: RoutingService
+    registry: ModelRegistry
+
+
+type RoutingRuntime = UnorchestratedRouting | OrchestratedRouting
+
+
 @dataclass(frozen=True)
 class _ResolvedRouting:
     llm: LLMClient
@@ -92,7 +114,7 @@ class _ResolvedRouting:
     system_prompt: str | None
     thinking_level: str | None
     model_id: str
-    model_entry: Any = None
+    model_entry: ModelLimits | None = None
     orchestration: OrchestrationDecisionEvent | None = None
 
 
@@ -118,26 +140,22 @@ async def _collect(events: AsyncIterator[Event], metadata: TurnMetadata) -> Turn
 class TurnRunner:
     """Own the complete lifecycle of an accepted turn."""
 
-    legacy_llm: LLMClient | None
-    mcp: MCPManager
+    routing: RoutingRuntime
+    limits: RunLimits
+    mcp: ToolRuntime
     store: SessionStore
     guard: SessionGuard
-    settings: Any
-    orchestrator: Optional[Orchestrator]
-    registry: Optional[LLMRegistry]
-    policy: Optional[ToolPolicy]
-    tracer: Optional[Tracer]
-    limits: RunLimits = field(init=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "limits", RunLimits.from_settings(self.settings))
+    policy: ToolPolicy | None
+    tracer: Tracer | None
 
     def available_model_ids(self) -> list[str]:
         """Return the model IDs accepted by the OpenAI-compatible boundary."""
         try:
-            if self.registry is not None:
-                return self.registry.model_ids
-            return [self.settings.llm_model]
+            if isinstance(self.routing, OrchestratedRouting):
+                return self.routing.registry.model_ids
+            if self.routing.inventory is not None:
+                return self.routing.inventory.model_ids
+            return [self.routing.model_id]
         except Exception as exc:
             logger.exception("failed to read model inventory")
             raise HTTPException(
@@ -165,21 +183,21 @@ class TurnRunner:
         tools: ToolSnapshot,
         context: RunContext,
     ) -> _ResolvedRouting:
-        if self.orchestrator is None or self.registry is None:
-            if self.legacy_llm is None:
-                raise RuntimeError("legacy LLM client is unavailable")
+        if isinstance(self.routing, UnorchestratedRouting):
+            if self.routing.llm is None:
+                raise RuntimeError("unorchestrated LLM client is unavailable")
             context.logger.info(
-                "chat: legacy mode (orchestration disabled), tools=%d", len(tools.tools)
+                "chat: unorchestrated mode, tools=%d", len(tools.tools)
             )
             return _ResolvedRouting(
-                llm=self.legacy_llm,
+                llm=self.routing.llm,
                 tools=tools.as_llm_tools(),
                 system_prompt=request.system_override,
                 thinking_level=None,
-                model_id=self.settings.llm_model,
+                model_id=self.routing.model_id,
             )
 
-        decision = await self.orchestrator.decide(
+        decision = await self.routing.orchestrator.decide(
             request.prompt,
             tools,
             history=request.session.messages,
@@ -194,13 +212,13 @@ class TurnRunner:
 
         if request.model_id is not None:
             resolved_id = request.model_id
-            selected_llm = self.registry.get(resolved_id)
+            selected_llm = self.routing.registry.get(resolved_id)
         else:
-            resolved_id, selected_llm = self.registry.get_or_default(
+            resolved_id, selected_llm = self.routing.registry.get_or_default(
                 result.selected_model_id
             )
         try:
-            model_entry = self.registry.get_entry(resolved_id)
+            model_entry = self.routing.registry.get_entry(resolved_id)
         except (AttributeError, KeyError):
             model_entry = None
 
@@ -267,23 +285,18 @@ class TurnRunner:
         else:  # Defensive against future enum members.
             raise ValueError(f"unsupported persistence policy: {request.persistence!r}")
 
-        # run_agent is implemented as an async generator; its public return
-        # annotation remains the broader AsyncIterator compatibility surface.
-        agent_events = cast(
-            AsyncGenerator[Event, None],
-            run_agent(
-                session=request.session,
-                llm=routing.llm,
-                mcp=self.mcp,
-                store=store,
-                system=routing.system_prompt,
-                tools=routing.tools,
-                thinking_level=routing.thinking_level,
-                limits=limits,
-                context=context,
-                policy=self.policy,
-                stream=request.stream,
-            ),
+        agent_events = run_agent(
+            session=request.session,
+            llm=routing.llm,
+            mcp=self.mcp,
+            store=store,
+            system=routing.system_prompt,
+            tools=routing.tools,
+            thinking_level=routing.thinking_level,
+            limits=limits,
+            context=context,
+            policy=self.policy,
+            stream=request.stream,
         )
         try:
             async for event in agent_events:

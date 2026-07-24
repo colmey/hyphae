@@ -10,7 +10,7 @@ clean and makes them trivially testable with overrides.
 
 Orchestration deps may be None at runtime when settings.orchestration_enabled
 is false (or when models.yaml is missing). Routes must handle the None case
-and fall back to legacy behavior; see api/routes.py.
+and use the unorchestrated client; see api/routes.py.
 """
 
 from __future__ import annotations
@@ -20,11 +20,16 @@ from typing import Optional
 
 from fastapi import HTTPException, Request
 
-from agent import SessionGuard, SessionStore, ToolPolicy, Tracer
+from agent import RunLimits, SessionGuard, SessionStore, ToolPolicy, Tracer
 from mcp_layer import MCPManager
 from orchestrator import LLMRegistry, Orchestrator
 
-from .turn import TurnRunner
+from .turn import (
+    OrchestratedRouting,
+    RoutingRuntime,
+    TurnRunner,
+    UnorchestratedRouting,
+)
 
 
 async def get_mcp(request: Request) -> MCPManager:
@@ -113,14 +118,27 @@ async def get_turn_runner(request: Request) -> TurnRunner:
     (rather than stashing one on app.state) keeps lifespan and the hand-wired
     smoke tests free of an extra field while staying override-friendly.
     """
+    settings = request.app.state.settings
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    registry = getattr(request.app.state, "registry", None)
+    routing: RoutingRuntime
+    if orchestrator is not None and registry is not None:
+        routing = OrchestratedRouting(
+            orchestrator=orchestrator,
+            registry=registry,
+        )
+    else:
+        routing = UnorchestratedRouting(
+            llm=request.app.state.unorchestrated_llm,
+            model_id=settings.llm_model,
+            inventory=registry,
+        )
     return TurnRunner(
-        legacy_llm=request.app.state.legacy_llm,
+        routing=routing,
+        limits=RunLimits.from_settings(settings),
         mcp=request.app.state.mcp,
         store=request.app.state.store,
         guard=request.app.state.guard,
-        settings=request.app.state.settings,
-        orchestrator=getattr(request.app.state, "orchestrator", None),
-        registry=getattr(request.app.state, "registry", None),
         policy=getattr(request.app.state, "policy", None),
         tracer=getattr(request.app.state, "tracer", None),
     )

@@ -19,7 +19,6 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import yaml
@@ -35,7 +34,7 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from api.turn import PersistencePolicy, TurnRequest, TurnRunner
+from api.turn import OrchestratedRouting, PersistencePolicy, TurnRequest, TurnRunner
 from config import get_settings
 from llm.client import GenerationRequest, LLMClient, build_llm_client
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
@@ -290,44 +289,19 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
 
     events: list[Any] = []
     if case.get("mode") == "turn_runner":
-        settings = SimpleNamespace(
-            max_loop_iterations=(case.get("run") or {}).get("max_iterations", 10),
-            llm_timeout_seconds=(case.get("run") or {}).get("llm_timeout_seconds", 0),
-            tool_timeout_seconds=(case.get("run") or {}).get("tool_timeout_seconds", 0),
-            llm_max_retries=(case.get("run") or {}).get("max_retries", 0),
-            llm_retry_base_delay=(case.get("run") or {}).get("retry_base_delay", 0.0),
-            tool_result_max_chars=(case.get("run") or {}).get(
-                "tool_result_max_chars", 0
-            ),
-            max_run_tokens=(case.get("run") or {}).get("max_run_tokens", 0),
-            max_run_seconds=(case.get("run") or {}).get("max_run_seconds", 0),
-            abort_after_consecutive_tool_failures=(case.get("run") or {}).get(
-                "abort_after_consecutive_tool_failures", 0
-            ),
-            llm_max_tokens=(case.get("run") or {}).get("max_tokens", 4096),
-            context_strategy=(case.get("run") or {}).get("context_strategy", "naive"),
-            context_default_window_tokens=(case.get("run") or {}).get(
-                "context_default_window_tokens", 32768
-            ),
-            context_safety_margin_tokens=(case.get("run") or {}).get(
-                "context_safety_margin_tokens", 1024
-            ),
-            context_recent_messages=(case.get("run") or {}).get(
-                "context_recent_messages", 6
-            ),
-            context_summary_max_tokens=(case.get("run") or {}).get(
-                "context_summary_max_tokens", 512
-            ),
-        )
+        run_options = _run_kwargs(case)
+        run_options.pop("thinking_level", None)
         orch_cfg = case.get("orchestration") or {}
+        routing = OrchestratedRouting(
+            orchestrator=ScriptedOrchestrator(orch_cfg),
+            registry=ScriptedRegistry(llm, model_ids=["default"]),
+        )
         runner = TurnRunner(
-            legacy_llm=llm,
+            routing=routing,
+            limits=RunLimits(**run_options),
             mcp=mcp,
             store=store,
             guard=SessionGuard(),
-            settings=settings,
-            orchestrator=ScriptedOrchestrator(orch_cfg),
-            registry=ScriptedRegistry(llm, model_ids=["default"]),
             policy=None,
             tracer=None,
         )

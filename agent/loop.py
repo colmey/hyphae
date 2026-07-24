@@ -9,6 +9,7 @@ import json
 import logging
 import random
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
@@ -27,8 +28,7 @@ from llm.schemas import (
     ToolUseBlock,
     Usage,
 )
-from mcp_layer import MCPManager
-
+from .contracts import ToolRuntime
 from .context import (
     ContextBudget,
     assemble_context,
@@ -447,7 +447,7 @@ def _backoff_delay(base_delay: float, attempt: int) -> float:
 async def run_agent(
     session: Session,
     llm: LLMClient,
-    mcp: MCPManager,
+    mcp: ToolRuntime,
     *,
     store: SessionStore | None = None,
     system: str | None = None,
@@ -457,7 +457,7 @@ async def run_agent(
     context: RunContext | None = None,
     policy: ToolPolicy | None = None,
     stream: bool = False,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Drive a conversation to completion, yielding events along the way.
 
     The caller appends the user turn first. The loop handles assistant turns,

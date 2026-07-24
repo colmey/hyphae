@@ -17,9 +17,23 @@ from fastapi import HTTPException
 import api.schemas as api_schemas
 import api.dependencies as api_dependencies
 import main as main_module
-from agent import DoneEvent, OrchestrationDecisionEvent, Session, SessionGuard, Tracer
+from agent import (
+    DoneEvent,
+    OrchestrationDecisionEvent,
+    RunLimits,
+    Session,
+    SessionGuard,
+    Tracer,
+)
+from agent.runtime import ModelLimits
 from api.schemas import TokenUsage
-from api.turn import PersistencePolicy, TurnRequest, TurnRunner
+from api.turn import (
+    OrchestratedRouting,
+    PersistencePolicy,
+    TurnRequest,
+    TurnRunner,
+    UnorchestratedRouting,
+)
 from config import Settings
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
@@ -29,7 +43,9 @@ from llm.schemas import (
     TextDelta,
     Usage,
 )
+from mcp_layer import ToolCallResult
 from orchestrator import Orchestrator
+from orchestrator.contracts import ModelRegistry, RoutingService
 from orchestrator.schemas import OrchestrationDecision, OrchestrationResult
 from tests._app_support import wired_app
 
@@ -59,6 +75,11 @@ class CountingMCP:
 
     def list_tools(self) -> list[Any]:
         raise AssertionError("routing must use the turn snapshot, not live inventory")
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> ToolCallResult:
+        raise AssertionError(f"unexpected tool dispatch: {name} {arguments!r}")
 
 
 class AnswerLLM(LLMClient):
@@ -123,7 +144,7 @@ class RegistryStub:
         resolved = model_id if model_id in self.model_ids else "agent"
         return resolved, self.get(resolved)
 
-    def get_entry(self, model_id: str) -> Any:
+    def get_entry(self, model_id: str) -> ModelLimits:
         return SimpleNamespace(max_tokens=256, context_window=4096)
 
 
@@ -177,7 +198,7 @@ class RecordingTracer(Tracer):
 def _settings(**overrides: Any) -> Settings:
     values = {
         "orchestration_enabled": True,
-        "llm_model": "legacy-executing-model",
+        "llm_model": "unorchestrated-executing-model",
         "llm_max_retries": 0,
     }
     values.update(overrides)
@@ -189,21 +210,30 @@ def _runner(
     agent: LLMClient,
     mcp: CountingMCP,
     settings: Settings | None = None,
-    orchestrator: Any | None = None,
-    registry: Any | None = None,
+    orchestrator: RoutingService | None = None,
+    registry: ModelRegistry | None = None,
     tracer: Tracer | None = None,
 ) -> TurnRunner:
     from agent import InMemorySessionStore
 
     store = InMemorySessionStore()
+    resolved_settings = settings or _settings()
+    if orchestrator is not None and registry is not None:
+        routing = OrchestratedRouting(
+            orchestrator=orchestrator,
+            registry=registry,
+        )
+    else:
+        routing = UnorchestratedRouting(
+            llm=agent,
+            model_id=resolved_settings.llm_model,
+        )
     return TurnRunner(
-        legacy_llm=agent,
-        mcp=mcp,  # type: ignore[arg-type]
+        routing=routing,
+        limits=RunLimits.from_settings(resolved_settings),
+        mcp=mcp,
         store=store,
         guard=SessionGuard(),
-        settings=settings or _settings(),
-        orchestrator=orchestrator,
-        registry=registry,
         policy=None,
         tracer=tracer,
     )
@@ -269,7 +299,7 @@ async def test_routing_timeout_falls_back_while_turn_budget_remains() -> None:
     router = RoutingLLM({})
     registry = RegistryStub(agent, router)
     orchestrator = Orchestrator(
-        registry=registry,  # type: ignore[arg-type]
+        registry=registry,
         system_prompt="route",
         model_id="router",
     )
@@ -303,7 +333,7 @@ async def test_routing_consumes_absolute_deadline_and_skips_agent_model() -> Non
     router = RoutingLLM({})
     registry = RegistryStub(agent, router)
     orchestrator = Orchestrator(
-        registry=registry,  # type: ignore[arg-type]
+        registry=registry,
         system_prompt="route",
         model_id="router",
     )
@@ -338,7 +368,7 @@ async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> 
     )
     registry = RegistryStub(agent, router)
     orchestrator = Orchestrator(
-        registry=registry,  # type: ignore[arg-type]
+        registry=registry,
         system_prompt="route",
         model_id="router",
     )
@@ -358,6 +388,10 @@ async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> 
     assert [tool["name"] for tool in agent.requests_seen[0].tools or []] == [
         "srv__one"
     ]
+    assert agent.requests_seen[0].max_tokens == 256
+    model_limits = runner.limits.for_model(registry.get_entry("agent"))
+    assert model_limits.max_tokens == 256
+    assert model_limits.context_window == 4096
 
 
 async def test_guard_releases_after_normal_completion_and_exception() -> None:
@@ -473,7 +507,7 @@ async def test_native_sse_trace_and_logs_share_one_run_id(
     assert any(f"[run {run_id}]" in record.getMessage() for record in caplog.records)
 
 
-async def test_legacy_metadata_reports_executing_model_without_decision() -> None:
+async def test_unorchestrated_metadata_reports_executing_model_without_decision() -> None:
     agent = AnswerLLM()
     runner = _runner(
         agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False)
@@ -484,7 +518,7 @@ async def test_legacy_metadata_reports_executing_model_without_decision() -> Non
         "hello",
         session,
         PersistencePolicy.PERSISTENT,
-        model_id="legacy-executing-model",
+        model_id="unorchestrated-executing-model",
     )
     async with runner.open(request) as execution:
         events = [event async for event in execution.events]
@@ -494,18 +528,18 @@ async def test_legacy_metadata_reports_executing_model_without_decision() -> Non
             "again",
             session,
             PersistencePolicy.PERSISTENT,
-            model_id="legacy-executing-model",
+            model_id="unorchestrated-executing-model",
         )
     )
 
     assert not any(isinstance(event, OrchestrationDecisionEvent) for event in events)
-    assert result.metadata.model_id == "legacy-executing-model"
+    assert result.metadata.model_id == "unorchestrated-executing-model"
     assert result.metadata.orchestration is None
 
 
-async def test_model_inventory_uses_registry_or_legacy_setting() -> None:
+async def test_model_inventory_uses_registry_or_unorchestrated_setting() -> None:
     agent = AnswerLLM()
-    legacy = _runner(
+    unorchestrated = _runner(
         agent=agent,
         mcp=CountingMCP(),
         settings=_settings(orchestration_enabled=False),
@@ -517,7 +551,9 @@ async def test_model_inventory_uses_registry_or_legacy_setting() -> None:
         registry=RegistryStub(agent),
     )
 
-    assert legacy.available_model_ids() == ["legacy-executing-model"]
+    assert unorchestrated.available_model_ids() == [
+        "unorchestrated-executing-model"
+    ]
     assert orchestrated.available_model_ids() == ["agent", "router"]
 
 
@@ -589,8 +625,23 @@ def test_route_facing_turn_contract_has_no_preference_plumbing() -> None:
         assert "preferences" not in inspect.signature(method).parameters
 
 
-def test_runtime_wiring_names_optional_legacy_client_and_removes_dead_helpers() -> None:
-    assert "legacy_llm" in TurnRunner.__dataclass_fields__
+def test_runtime_wiring_names_optional_unorchestrated_client_and_removes_dead_helpers() -> None:
+    assert list(inspect.signature(TurnRunner).parameters) == [
+        "routing",
+        "limits",
+        "mcp",
+        "store",
+        "guard",
+        "policy",
+        "tracer",
+    ]
+    assert "routing" in TurnRunner.__dataclass_fields__
+    assert "unorchestrated_llm" not in TurnRunner.__dataclass_fields__
+    assert "unorchestrated_model_id" not in TurnRunner.__dataclass_fields__
+    assert "orchestrator" not in TurnRunner.__dataclass_fields__
+    assert "registry" not in TurnRunner.__dataclass_fields__
+    assert "limits" in TurnRunner.__dataclass_fields__
+    assert "settings" not in TurnRunner.__dataclass_fields__
     assert "llm" not in TurnRunner.__dataclass_fields__
     assert not hasattr(api_dependencies, "get_llm")
     assert list(inspect.signature(main_module._try_build_orchestration).parameters) == [

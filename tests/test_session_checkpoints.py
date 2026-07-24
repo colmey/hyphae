@@ -11,13 +11,19 @@ from agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
+    RunLimits,
     Session,
     SessionGuard,
     TextEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
-from api.turn import PersistencePolicy, TurnRequest, TurnRunner
+from api.turn import (
+    PersistencePolicy,
+    TurnRequest,
+    TurnRunner,
+    UnorchestratedRouting,
+)
 from config import Settings
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
@@ -207,13 +213,14 @@ def _runner(
         max_loop_iterations=5,
     )
     return TurnRunner(
-        legacy_llm=llm,
-        mcp=mcp,  # type: ignore[arg-type]
+        routing=UnorchestratedRouting(
+            llm=llm,
+            model_id=settings.llm_model,
+        ),
+        limits=RunLimits.from_settings(settings),
+        mcp=mcp,
         store=store,
         guard=SessionGuard(),
-        settings=settings,
-        orchestrator=None,
-        registry=None,
         policy=None,
         tracer=None,
     )

@@ -149,7 +149,7 @@ class Settings(BaseSettings):
         default=32768,
         description=(
             "Assumed context window (tokens) for models whose models.yaml entry "
-            "has no context_window, and for legacy/no-orchestrator mode."
+            "has no context_window, and for unorchestrated mode."
         ),
     )
     context_safety_margin_tokens: int = Field(

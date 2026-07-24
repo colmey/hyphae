@@ -14,7 +14,7 @@ from llm.client import GenerationRequest, LLMClient
 from llm.schemas import Message, Role, TextBlock
 from mcp_layer import ToolSnapshot
 
-from .registry import LLMRegistry
+from .contracts import ModelRegistry
 from .schemas import OrchestrationDecision, OrchestrationResult, ToolPreferences
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ class Orchestrator:
     def __init__(
         self,
         *,
-        registry: LLMRegistry,
+        registry: ModelRegistry,
         system_prompt: str,
         model_id: str | None = None,
         fallback_system_prompt: str | None = None,

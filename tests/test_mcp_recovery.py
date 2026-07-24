@@ -10,8 +10,13 @@ from typing import Any
 
 import pytest
 
-from agent import InMemorySessionStore, SessionGuard
-from api.turn import PersistencePolicy, TurnRequest, TurnRunner
+from agent import InMemorySessionStore, RunLimits, SessionGuard
+from api.turn import (
+    PersistencePolicy,
+    TurnRequest,
+    TurnRunner,
+    UnorchestratedRouting,
+)
 from config import MCPConfig, Settings
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, Usage
@@ -315,18 +320,20 @@ async def test_in_flight_turn_keeps_snapshot_while_next_turn_sees_refresh() -> N
     await manager.startup()
     llm = _SnapshotLLM()
     store = InMemorySessionStore()
+    settings = Settings(
+        _env_file=None,
+        orchestration_enabled=False,
+        llm_max_retries=0,
+    )
     runner = TurnRunner(
-        legacy_llm=llm,
+        routing=UnorchestratedRouting(
+            llm=llm,
+            model_id=settings.llm_model,
+        ),
+        limits=RunLimits.from_settings(settings),
         mcp=manager,
         store=store,
         guard=SessionGuard(),
-        settings=Settings(
-            _env_file=None,
-            orchestration_enabled=False,
-            llm_max_retries=0,
-        ),
-        orchestrator=None,
-        registry=None,
         policy=None,
         tracer=None,
     )

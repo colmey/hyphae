@@ -409,13 +409,23 @@ async def test_factory_selection() -> None:
     print("--- factory selection by profile ---")
     import llm.client as client_module
 
-    def build_fake(*, model, max_tokens, settings, profile=None):
+    specs = []
+
+    def build_fake(*, spec, settings):
+        specs.append(spec)
         return ScriptedLLM([])
+
+    class FactorySettings:
+        llm_max_tokens = 111
+        openai_base_url = ""
+
+        def api_key_for_provider(self, provider: str) -> str:
+            raise AssertionError(f"unexpected provider construction: {provider}")
 
     original = dict(client_module._PROVIDERS)
     try:
         client_module._PROVIDERS["fake"] = build_fake
-        settings = SimpleNamespace(llm_max_tokens=111)
+        settings = FactorySettings()
 
         native_entry = ModelEntry(
             provider="fake",
@@ -453,6 +463,19 @@ async def test_factory_selection() -> None:
         )
         check(
             isinstance(prompted.inner, ScriptedLLM), "wrapper contains base fake client"
+        )
+        check(
+            [spec.model for spec in specs] == ["native", "native-true", "prompted"],
+            "builder receives each model through the typed construction spec",
+        )
+        check(
+            all(spec.max_tokens == 111 for spec in specs),
+            "builder spec retains the settings token fallback",
+        )
+        check(
+            [spec.profile.supports_native_tools for spec in specs]
+            == [True, True, False],
+            "builder spec carries the resolved model profile",
         )
     finally:
         client_module._PROVIDERS.clear()

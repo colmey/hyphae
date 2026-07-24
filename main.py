@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 async def _close_application_resources(
     *,
-    legacy_llm: LLMClient | None,
+    unorchestrated_llm: LLMClient | None,
     registry: LLMRegistry | None,
     mcp: MCPManager | None,
     tracer: Tracer | None,
@@ -61,13 +61,15 @@ async def _close_application_resources(
             logger.warning("%s cleanup failed", label, exc_info=True)
 
     if registry is not None:
-        additional_clients = (legacy_llm,) if legacy_llm is not None else ()
+        additional_clients = (
+            (unorchestrated_llm,) if unorchestrated_llm is not None else ()
+        )
         await _run_async_cleanup(
             "LLM",
             lambda: registry.aclose(additional_clients=additional_clients),
         )
-    elif legacy_llm is not None:
-        await _run_async_cleanup("LLM", legacy_llm.aclose)
+    elif unorchestrated_llm is not None:
+        await _run_async_cleanup("LLM", unorchestrated_llm.aclose)
 
     if mcp is not None:
         await _run_async_cleanup("MCP", mcp.shutdown)
@@ -121,14 +123,14 @@ def _try_build_orchestration(
     except FileNotFoundError:
         logger.warning(
             "orchestration enabled but models config not found at %s; "
-            "running in legacy (no-orchestration) mode.",
+            "running in unorchestrated mode.",
             settings.models_config_path,
         )
         return None, None
     except Exception as e:
         logger.warning(
             "orchestration enabled but models config failed to load: %s; "
-            "running in legacy mode.",
+            "running in unorchestrated mode.",
             e,
         )
         return None, None
@@ -137,12 +139,14 @@ def _try_build_orchestration(
         orch_prompt = load_orchestrator_prompt(settings.orchestrator_prompt_path)
     except FileNotFoundError:
         logger.warning(
-            "orchestrator prompt not found at %s; running in legacy mode.",
+            "orchestrator prompt not found at %s; running in unorchestrated mode.",
             settings.orchestrator_prompt_path,
         )
         return None, None
     except Exception as e:
-        logger.warning("orchestrator prompt failed to load: %s; legacy mode.", e)
+        logger.warning(
+            "orchestrator prompt failed to load: %s; unorchestrated mode.", e
+        )
         return None, None
 
     registry = LLMRegistry(models_config, settings)
@@ -155,7 +159,7 @@ def _try_build_orchestration(
             logger.warning(
                 "orchestrator_model_id=%r declares supports_native_tools:false; "
                 "prompted-tool models are not supported as orchestrator control "
-                "models. running in legacy mode.",
+                "models. running in unorchestrated mode.",
                 orch_model_id,
             )
             return None, None
@@ -163,7 +167,7 @@ def _try_build_orchestration(
     except Exception as e:
         logger.warning(
             "could not build LLM client for orchestrator_model_id=%r: %s; "
-            "running in legacy mode.",
+            "running in unorchestrated mode.",
             orch_model_id,
             e,
         )
@@ -209,8 +213,8 @@ def _log_ready_summary(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
-    # Settings fail loud if env/config is broken. The legacy LLM is constructed
-    # only when orchestration is disabled or unavailable.
+    # Settings fail loud if env/config is broken. The unorchestrated LLM is
+    # constructed only when orchestration is disabled or unavailable.
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level,
@@ -222,7 +226,7 @@ async def lifespan(app: FastAPI):
         settings.llm_model,
     )
 
-    legacy_llm: LLMClient | None = None
+    unorchestrated_llm: LLMClient | None = None
     mcp: MCPManager | None = None
     registry: LLMRegistry | None = None
     tracer: Tracer | None = None
@@ -246,14 +250,14 @@ async def lifespan(app: FastAPI):
 
         registry, orchestrator = _try_build_orchestration(settings)
         if registry is None or orchestrator is None:
-            legacy_llm = build_llm_client(settings)
+            unorchestrated_llm = build_llm_client(settings)
 
         tracer = await _start_optional_tracer(
             build_tracer(enabled=settings.trace_enabled, path=settings.trace_path)
         )
 
         app.state.settings = settings
-        app.state.legacy_llm = legacy_llm
+        app.state.unorchestrated_llm = unorchestrated_llm
         app.state.mcp = mcp
         app.state.store = store
         app.state.guard = guard
@@ -272,7 +276,7 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("shutting down harness")
         await _close_application_resources(
-            legacy_llm=legacy_llm,
+            unorchestrated_llm=unorchestrated_llm,
             registry=registry,
             mcp=mcp,
             tracer=tracer,

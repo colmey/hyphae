@@ -7,6 +7,7 @@ from typing import Any, Iterator
 
 from agent import InMemorySessionStore, SessionGuard
 from config import Settings
+from mcp_layer import ToolCallResult
 
 
 class EmptyMCP:
@@ -20,6 +21,11 @@ class EmptyMCP:
 
     def list_tools(self) -> list[Any]:
         return []
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> ToolCallResult:
+        raise AssertionError(f"unexpected tool dispatch: {name} {arguments!r}")
 
 
 @contextmanager
@@ -35,7 +41,7 @@ def wired_app(
     previous = dict(app.state._state)
     settings = Settings(_env_file=None, orchestration_enabled=False)
     app.state.settings = settings
-    app.state.legacy_llm = llm
+    app.state.unorchestrated_llm = llm
     app.state.mcp = mcp if mcp is not None else EmptyMCP()
     app.state.store = InMemorySessionStore(
         ttl_seconds=settings.session_ttl_seconds,

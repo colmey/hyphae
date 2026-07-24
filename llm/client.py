@@ -33,7 +33,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Protocol
 
 from .schemas import (
     AssistantMessage,
@@ -46,6 +46,76 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _ProviderConstructionSettings(Protocol):
+    """Credentials and endpoint configuration used by provider builders."""
+
+    @property
+    def openai_base_url(self) -> str: ...
+
+    def api_key_for_provider(self, provider: str) -> str: ...
+
+
+class _DefaultClientSettings(_ProviderConstructionSettings, Protocol):
+    """Global defaults used when a model entry omits a value."""
+
+    @property
+    def llm_max_tokens(self) -> int: ...
+
+
+class _UnorchestratedClientSettings(_DefaultClientSettings, Protocol):
+    """Selection defaults required by the unorchestrated client factory."""
+
+    @property
+    def llm_provider(self) -> str: ...
+
+    @property
+    def llm_model(self) -> str: ...
+
+
+class _SamplingConfig(Protocol):
+    """Optional sampling values declared by one model entry."""
+
+    @property
+    def temperature(self) -> float | None: ...
+
+    @property
+    def top_p(self) -> float | None: ...
+
+    @property
+    def top_k(self) -> int | None: ...
+
+
+class _ModelEntry(Protocol):
+    """Model configuration required by provider construction."""
+
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def model(self) -> str: ...
+
+    @property
+    def max_tokens(self) -> int | None: ...
+
+    @property
+    def supports_native_tools(self) -> bool: ...
+
+    @property
+    def thinking(self) -> str: ...
+
+    @property
+    def sampling(self) -> _SamplingConfig | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderBuildSpec:
+    """Provider-neutral values needed to construct one client."""
+
+    model: str
+    max_tokens: int
+    profile: ModelProfile | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -126,26 +196,41 @@ class LLMClient(ABC):
 # Provider registry
 # ---------------------------------------------------------------------------
 # Each builder lazily imports its provider module so importing this file never
-# drags in a provider SDK. Builders take the duck-typed `settings` and pull
-# whatever they need themselves (an API key, a base_url, nothing) -- this keeps
-# the registry contract stable across very different providers.
+# drags in a provider SDK. Builders receive one immutable construction spec plus
+# the narrow settings capability used to resolve credentials and endpoint
+# configuration.
+
+
+class _ProviderBuilder(Protocol):
+    """Construction callable stored in the provider registry."""
+
+    def __call__(
+        self,
+        *,
+        spec: _ProviderBuildSpec,
+        settings: _ProviderConstructionSettings,
+    ) -> LLMClient: ...
 
 
 def _build_gemini(
-    *, model: str, max_tokens: int, settings: Any, profile: Any = None
+    *,
+    spec: _ProviderBuildSpec,
+    settings: _ProviderConstructionSettings,
 ) -> LLMClient:
     from llm.providers.gemini import GeminiLLMClient
 
     return GeminiLLMClient(
         api_key=settings.api_key_for_provider("gemini"),
-        model=model,
-        default_max_tokens=max_tokens,
-        profile=profile,
+        model=spec.model,
+        default_max_tokens=spec.max_tokens,
+        profile=spec.profile,
     )
 
 
 def _build_openai(
-    *, model: str, max_tokens: int, settings: Any, profile: Any = None
+    *,
+    spec: _ProviderBuildSpec,
+    settings: _ProviderConstructionSettings,
 ) -> LLMClient:
     from llm.providers.openai import OpenAILLMClient
 
@@ -154,17 +239,17 @@ def _build_openai(
     # even when the server ignores it.
     return OpenAILLMClient(
         api_key=settings.api_key_for_provider("openai"),
-        model=model,
-        default_max_tokens=max_tokens,
+        model=spec.model,
+        default_max_tokens=spec.max_tokens,
         base_url=settings.openai_base_url or None,
-        profile=profile,
+        profile=spec.profile,
     )
 
 
 # THE one place a provider is declared. Adding a provider = one file in
 # llm/providers/ + one entry here. Nothing else in the harness enumerates
 # providers (config validators key off supported_providers()).
-_PROVIDERS: dict[str, Callable[..., LLMClient]] = {
+_PROVIDERS: dict[str, _ProviderBuilder] = {
     "gemini": _build_gemini,
     # `openai` is OpenAI-compatible: point Settings.openai_base_url at an
     # alternate /v1 endpoint (e.g. local Ollama) to reuse the same client.
@@ -179,7 +264,10 @@ def supported_providers() -> frozenset[str]:
 
 
 def _build_client(
-    provider: str, *, model: str, max_tokens: int, settings: Any, profile: Any = None
+    provider: str,
+    *,
+    spec: _ProviderBuildSpec,
+    settings: _ProviderConstructionSettings,
 ) -> LLMClient:
     """Dispatch to the registered builder for `provider`.
 
@@ -190,7 +278,7 @@ def _build_client(
         build = _PROVIDERS[provider]
     except KeyError:
         raise NotImplementedError(f"LLM provider {provider!r} is not implemented yet")
-    return build(model=model, max_tokens=max_tokens, settings=settings, profile=profile)
+    return build(spec=spec, settings=settings)
 
 
 # ---------------------------------------------------------------------------
@@ -198,24 +286,26 @@ def _build_client(
 # ---------------------------------------------------------------------------
 
 
-def build_llm_client(settings: Any) -> LLMClient:
+def build_llm_client(settings: _UnorchestratedClientSettings) -> LLMClient:
     """Construct the LLM client matching settings.llm_provider.
 
     Takes Settings duck-typed to avoid a circular import with the config layer.
 
-    Preserved for the legacy/default path. The orchestration layer uses
+    Preserved for the unorchestrated path. The orchestration layer uses
     `build_llm_client_from_entry` instead, which is parameterized by a
     ModelEntry rather than the global Settings.
     """
     return _build_client(
         settings.llm_provider,
-        model=settings.llm_model,
-        max_tokens=settings.llm_max_tokens,
+        spec=_ProviderBuildSpec(
+            model=settings.llm_model,
+            max_tokens=settings.llm_max_tokens,
+        ),
         settings=settings,
     )
 
 
-def profile_from_entry(entry: Any) -> ModelProfile:
+def profile_from_entry(entry: _ModelEntry) -> ModelProfile:
     """Build the ModelProfile declared by one models.yaml entry.
 
     `entry` is duck-typed (config.ModelEntry shape: supports_native_tools,
@@ -231,7 +321,9 @@ def profile_from_entry(entry: Any) -> ModelProfile:
     )
 
 
-def build_llm_client_from_entry(entry: Any, settings: Any) -> LLMClient:
+def build_llm_client_from_entry(
+    entry: _ModelEntry, settings: _DefaultClientSettings
+) -> LLMClient:
     """Construct an LLM client for one ModelEntry from models.yaml.
 
     This is the multi-model variant of build_llm_client. The builder pulls the
@@ -244,10 +336,12 @@ def build_llm_client_from_entry(entry: Any, settings: Any) -> LLMClient:
     profile = profile_from_entry(entry)
     client = _build_client(
         entry.provider,
-        model=entry.model,
-        max_tokens=entry.max_tokens or settings.llm_max_tokens,
+        spec=_ProviderBuildSpec(
+            model=entry.model,
+            max_tokens=entry.max_tokens or settings.llm_max_tokens,
+            profile=profile,
+        ),
         settings=settings,
-        profile=profile,
     )
     if profile.supports_native_tools is False:
         from llm.prompted_tools import PromptedToolLLMClient

@@ -23,9 +23,12 @@ import asyncio
 import logging
 from collections.abc import Iterable
 from itertools import chain
-from typing import Any
 
-from llm.client import LLMClient, build_llm_client_from_entry
+from llm.client import (
+    LLMClient,
+    _DefaultClientSettings,
+    build_llm_client_from_entry,
+)
 
 from config import ModelEntry, ModelsConfig
 
@@ -35,7 +38,9 @@ logger = logging.getLogger(__name__)
 class LLMRegistry:
     """Holds the model inventory and lazily builds LLMClient instances."""
 
-    def __init__(self, models_config: ModelsConfig, settings: Any) -> None:
+    def __init__(
+        self, models_config: ModelsConfig, settings: _DefaultClientSettings
+    ) -> None:
         """
         Args:
           models_config: the parsed models.yaml.

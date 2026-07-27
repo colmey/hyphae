@@ -36,7 +36,7 @@ from llm.schemas import (
     TextDelta,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 from mcp_layer.client import ToolCallResult
 
@@ -91,7 +91,7 @@ class AnswerLLM(LLMClient):
         return AssistantMessage(
             content=[TextBlock("follow-up")],
             stop_reason="end_turn",
-            usage=Usage(total_tokens=1),
+            usage=CompletionUsage(total_tokens=1),
         )
 
 
@@ -157,7 +157,7 @@ class ToolBatchLLM(LLMClient):
                     for i in range(3)
                 ],
                 stop_reason="tool_use",
-                usage=Usage(total_tokens=1),
+                usage=CompletionUsage(total_tokens=1),
             )
         await asyncio.Event().wait()
 
@@ -185,7 +185,7 @@ class ToolThenBlockingStreamLLM(LLMClient):
                         )
                     ],
                     stop_reason="tool_use",
-                    usage=Usage(total_tokens=1),
+                    usage=CompletionUsage(total_tokens=1),
                 )
             )
             return
@@ -204,18 +204,20 @@ def _runner(
     settings = Settings(
         _env_file=None,
         orchestration_enabled=False,
-        llm_model="test-model",
-        llm_max_retries=retries,
-        llm_retry_base_delay=0,
-        llm_timeout_seconds=0,
+        llm={
+            "model_name": "test-model",
+            "max_retries": retries,
+            "retry_base_delay": 0,
+            "timeout_seconds": 0,
+        },
         tool_timeout_seconds=0,
-        max_run_seconds=0,
-        max_loop_iterations=5,
+        run_max_seconds=0,
+        loop_max_iterations=5,
     )
     return TurnRunner(
         routing=UnorchestratedRouting(
             llm=llm,
-            model_id=settings.llm_model,
+            model_id=settings.llm.model_name,
         ),
         limits=RunLimits.from_settings(settings),
         mcp=mcp,
@@ -346,7 +348,7 @@ async def test_empty_silent_exhaustion_retries_without_prompt_duplication() -> N
     answer = AssistantMessage(
         content=[TextBlock("answer")],
         stop_reason="end_turn",
-        usage=Usage(total_tokens=1),
+        usage=CompletionUsage(total_tokens=1),
     )
     llm = ScriptedStreamLLM([[], [TextDelta("answer"), StreamEnd(answer)]])
     runner = _runner(llm, ToolMCP(), store, retries=1)
@@ -375,7 +377,7 @@ async def test_normal_stream_end_is_authoritative_without_delta_duplication() ->
     answer = AssistantMessage(
         content=[TextBlock("joined")],
         stop_reason="end_turn",
-        usage=Usage(total_tokens=1),
+        usage=CompletionUsage(total_tokens=1),
     )
     llm = ScriptedStreamLLM([[TextDelta("join"), TextDelta("ed"), StreamEnd(answer)]])
     runner = _runner(llm, ToolMCP(), store)
@@ -480,7 +482,10 @@ async def test_intermediate_checkpoint_is_detached_from_later_tool_batch() -> No
     ) as execution:
         seen_second_batch = False
         async for event in execution.events:
-            if isinstance(event, ToolCallEvent) and event.id == "batch-1-call-0":
+            if (
+                isinstance(event, ToolCallEvent)
+                and event.id == "batch-1-call-0"
+            ):
                 seen_second_batch = True
                 published = await store.get(original.session_id)
                 assert len(published.messages) == 3
@@ -574,7 +579,7 @@ async def test_normal_native_turn_commits_once(stream: bool) -> None:
         answer = AssistantMessage(
             content=[TextBlock("answer")],
             stop_reason="end_turn",
-            usage=Usage(total_tokens=1),
+            usage=CompletionUsage(total_tokens=1),
         )
         llm: LLMClient = ScriptedStreamLLM([[TextDelta("answer"), StreamEnd(answer)]])
     else:

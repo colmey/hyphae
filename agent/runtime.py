@@ -12,18 +12,24 @@ from .events import Event
 from .tracing import Tracer, event_record, run_logger
 
 
+class LLMRunSettings(Protocol):
+    """Nested LLM execution values used to construct immutable run limits."""
+
+    max_tokens: int
+    timeout_seconds: float
+    max_retries: int
+    retry_base_delay: float
+
+
 class RunSettings(Protocol):
     """Settings values used to construct immutable run limits."""
 
-    max_loop_iterations: int
-    llm_max_tokens: int
-    llm_timeout_seconds: float
+    loop_max_iterations: int
+    llm: LLMRunSettings
     tool_timeout_seconds: float
-    llm_max_retries: int
-    llm_retry_base_delay: float
     tool_result_max_chars: int
-    max_run_tokens: int
-    max_run_seconds: float
+    run_max_tokens: int
+    run_max_seconds: float
     abort_after_consecutive_tool_failures: int
     context_strategy: str
     context_default_window_tokens: int
@@ -65,15 +71,15 @@ class RunLimits:
     @classmethod
     def from_settings(cls, settings: RunSettings) -> "RunLimits":
         return cls(
-            max_iterations=settings.max_loop_iterations,
-            max_tokens=settings.llm_max_tokens,
-            llm_timeout_seconds=settings.llm_timeout_seconds,
+            max_iterations=settings.loop_max_iterations,
+            max_tokens=settings.llm.max_tokens,
+            llm_timeout_seconds=settings.llm.timeout_seconds,
             tool_timeout_seconds=settings.tool_timeout_seconds,
-            max_retries=settings.llm_max_retries,
-            retry_base_delay=settings.llm_retry_base_delay,
+            max_retries=settings.llm.max_retries,
+            retry_base_delay=settings.llm.retry_base_delay,
             tool_result_max_chars=settings.tool_result_max_chars,
-            max_run_tokens=settings.max_run_tokens,
-            max_run_seconds=settings.max_run_seconds,
+            max_run_tokens=settings.run_max_tokens,
+            max_run_seconds=settings.run_max_seconds,
             abort_after_consecutive_tool_failures=settings.abort_after_consecutive_tool_failures,
             context_strategy=settings.context_strategy,
             context_window=settings.context_default_window_tokens,
@@ -127,20 +133,20 @@ class RunContext:
             tracer=tracer,
         )
 
-    def elapsed(self) -> float:
+    def elapsed_seconds(self) -> float:
         return time.perf_counter() - self.started_at
 
-    def remaining(self) -> float | None:
+    def remaining_seconds(self) -> float | None:
         if self.deadline is None:
             return None
         return self.deadline - time.perf_counter()
 
     def deadline_exceeded(self) -> bool:
-        remaining = self.remaining()
+        remaining = self.remaining_seconds()
         return remaining is not None and remaining <= 0
 
     def effective_timeout(self, per_call_timeout: float | None) -> float | None:
-        remaining = self.remaining()
+        remaining = self.remaining_seconds()
         if remaining is not None and remaining <= 0:
             return 0.0
         enabled = [

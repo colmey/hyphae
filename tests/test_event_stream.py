@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
+from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from tests._app_support import wired_app
 
 
@@ -26,13 +26,13 @@ class FakeToolLLM(LLMClient):
                 content=[ToolUseBlock(id="c1", name="echo", input={"value": "hi"})],
                 stop_reason="end_turn",
                 model="fake",
-                usage=Usage(total_tokens=5),
+                usage=CompletionUsage(total_tokens=5),
             )
         return AssistantMessage(
             content=[TextBlock(text="The tool said hi.")],
             stop_reason="end_turn",
             model="fake",
-            usage=Usage(total_tokens=7),
+            usage=CompletionUsage(total_tokens=7),
         )
 
 
@@ -42,7 +42,7 @@ class FakePlainLLM(LLMClient):
             content=[TextBlock(text="Just an answer.")],
             stop_reason="end_turn",
             model="fake",
-            usage=Usage(total_tokens=4),
+            usage=CompletionUsage(total_tokens=4),
         )
 
 
@@ -62,7 +62,7 @@ class FakeOutcomeLLM(LLMClient):
             raw_stop_reason="raw-provider-reason",
             reasoning="private-chain-of-thought",
             model="fake",
-            usage=Usage(total_tokens=4),
+            usage=CompletionUsage(total_tokens=4),
         )
 
 

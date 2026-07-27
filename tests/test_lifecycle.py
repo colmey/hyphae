@@ -16,9 +16,9 @@ import main as main_module
 import orchestrator.registry as registry_module
 from config import MCPConfig, ModelEntry, ModelsConfig
 from llm.client import GenerationRequest, LLMClient
-from llm.prompted_tools import PromptedToolLLMClient
+from llm.tool_prompt_protocol import PromptedToolLLMClient
 from llm.providers.gemini import GeminiLLMClient
-from llm.providers.openai import OpenAILLMClient
+from llm.providers.openai_compatible import OpenAICompatibleLLMClient
 from llm.schemas import AssistantMessage
 from main import _close_application_resources, _start_optional_tracer, lifespan
 from orchestrator import LLMRegistry
@@ -129,8 +129,8 @@ class _AppMCPManager:
 
 
 class _RegistrySettings:
-    llm_max_tokens = 4096
-    openai_base_url = ""
+    llm = SimpleNamespace(max_tokens=4096)
+    openai_compat_base_url = ""
 
     def api_key_for_provider(self, provider: str) -> str:
         raise AssertionError(f"unexpected provider construction: {provider}")
@@ -145,15 +145,18 @@ def _wire_lifespan_dependencies(
 ) -> SimpleNamespace:
     settings = SimpleNamespace(
         log_level="INFO",
-        llm_provider="test",
-        llm_model="test-model",
+        llm=SimpleNamespace(
+            provider="test",
+            model_name="test-model",
+            max_tokens=4096,
+        ),
         mcp_config_path="mcp.yaml",
         mcp_connect_timeout_seconds=17.5,
         orchestration_enabled=orchestration_enabled,
         session_ttl_seconds=0,
-        session_max_count=0,
+        session_capacity=0,
         trace_enabled=trace_enabled,
-        trace_path=tmp_path / "trace.jsonl",
+        trace_jsonl_path=tmp_path / "trace.jsonl",
     )
     mcp_config = MCPConfig.model_validate({"mcpServers": {}})
     _AppMCPManager.instances.clear()
@@ -192,7 +195,7 @@ async def test_inherited_llm_close_is_a_safe_noop() -> None:
 
 async def test_provider_and_prompted_clients_delegate_close_once() -> None:
     openai_sdk = _SDKAsyncClose()
-    openai_client = object.__new__(OpenAILLMClient)
+    openai_client = object.__new__(OpenAICompatibleLLMClient)
     openai_client._client = openai_sdk
     openai_client._closed = False
 
@@ -432,8 +435,11 @@ async def test_lifespan_does_not_build_unorchestrated_llm_before_it_is_needed(
     default = _ClosingClient()
     settings = SimpleNamespace(
         log_level="INFO",
-        llm_provider="test",
-        llm_model="test-model",
+        llm=SimpleNamespace(
+            provider="test",
+            model_name="test-model",
+            max_tokens=4096,
+        ),
         mcp_config_path="missing-mcp.yaml",
     )
 

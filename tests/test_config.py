@@ -11,12 +11,55 @@ import pytest
 from pydantic import ValidationError
 
 from config import (
+    LLMSettings,
     MCPConfig,
     Settings,
     ToolPolicyConfig,
     load_mcp_config,
     load_mcp_config_from_settings,
 )
+
+_RENAMED_SETTING_CASES = [
+    (
+        "OPENAI_COMPAT_BASE_URL",
+        "OPENAI_PROVIDER_BASE_URL",
+        "openai_compat_base_url",
+        "https://canonical.example/v1",
+        "https://legacy.example/v1",
+    ),
+    (
+        "LLM_MODEL_NAME",
+        "LLM_MODEL",
+        "llm.model_name",
+        "canonical-model",
+        "legacy-model",
+    ),
+    (
+        "LOOP_MAX_ITERATIONS",
+        "MAX_LOOP_ITERATIONS",
+        "loop_max_iterations",
+        "17",
+        "12",
+    ),
+    ("RUN_MAX_TOKENS", "MAX_RUN_TOKENS", "run_max_tokens", "1700", "1200"),
+    ("RUN_MAX_SECONDS", "MAX_RUN_SECONDS", "run_max_seconds", "17.5", "12.5"),
+    ("SESSION_CAPACITY", "SESSION_MAX_COUNT", "session_capacity", "170", "120"),
+    ("HYPHAE_API_KEY", "HARNESS_API_KEY", "hyphae_api_key", "canonical", "legacy"),
+    (
+        "TRACE_JSONL_PATH",
+        "TRACE_PATH",
+        "trace_jsonl_path",
+        "traces/canonical.jsonl",
+        "traces/legacy.jsonl",
+    ),
+]
+
+
+def _setting_value(settings: Settings, field_path: str):
+    value = settings
+    for field_name in field_path.split("."):
+        value = getattr(value, field_name)
+    return value
 
 
 @pytest.mark.parametrize(
@@ -49,14 +92,141 @@ def test_settings_load_without_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     # exported harness configuration as well as their .env file.
     for field_name in Settings.model_fields:
         monkeypatch.delenv(field_name.upper(), raising=False)
+    for field_name in LLMSettings.model_fields:
+        monkeypatch.delenv(f"LLM_{field_name.upper()}", raising=False)
+    for _, legacy_name, _, _, _ in _RENAMED_SETTING_CASES:
+        monkeypatch.delenv(legacy_name, raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
     settings = Settings(_env_file=None)
 
-    assert settings.llm_provider
-    assert settings.llm_model
-    assert settings.llm_max_tokens > 0
-    assert settings.max_loop_iterations > 0
+    assert settings.llm.provider
+    assert settings.llm.model_name
+    assert settings.llm.max_tokens > 0
+    assert settings.loop_max_iterations > 0
     assert settings.mcp_connect_timeout_seconds == 30
+    assert settings.openai_compat_tool_activity_mode == "reasoning"
+    assert settings.openai_compat_tool_activity_max_chars == 2000
+
+
+@pytest.mark.parametrize(
+    ("canonical_name", "legacy_name", "field_name", "_canonical", "legacy"),
+    _RENAMED_SETTING_CASES,
+)
+def test_renamed_setting_legacy_environment_aliases_remain_supported(
+    monkeypatch: pytest.MonkeyPatch,
+    canonical_name: str,
+    legacy_name: str,
+    field_name: str,
+    _canonical: str,
+    legacy: str,
+) -> None:
+    monkeypatch.delenv(canonical_name, raising=False)
+    monkeypatch.setenv(legacy_name, legacy)
+
+    settings = Settings(_env_file=None)
+
+    assert str(_setting_value(settings, field_name)) == legacy
+    assert legacy_name.lower() not in settings.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("canonical_name", "legacy_name", "field_name", "canonical", "legacy"),
+    _RENAMED_SETTING_CASES,
+)
+def test_renamed_setting_canonical_names_win_over_legacy_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    canonical_name: str,
+    legacy_name: str,
+    field_name: str,
+    canonical: str,
+    legacy: str,
+) -> None:
+    monkeypatch.setenv(canonical_name, canonical)
+    monkeypatch.setenv(legacy_name, legacy)
+
+    settings = Settings(_env_file=None)
+
+    assert str(_setting_value(settings, field_name)) == canonical
+
+
+def test_llm_settings_are_nested_without_flat_runtime_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("LLM_MODEL_NAME", "nested-model")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "123")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "4.5")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
+    monkeypatch.setenv("LLM_RETRY_BASE_DELAY", "0.25")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.llm == LLMSettings(
+        provider="openai_compatible",
+        model_name="nested-model",
+        max_tokens=123,
+        timeout_seconds=4.5,
+        max_retries=2,
+        retry_base_delay=0.25,
+    )
+    assert not hasattr(settings, "llm_provider")
+    assert not hasattr(settings, "llm_model_name")
+
+
+def test_openai_compat_tool_activity_settings_load_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_COMPAT_TOOL_ACTIVITY_MODE", "hidden")
+    monkeypatch.setenv("OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS", "1234")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.openai_compat_tool_activity_mode == "hidden"
+    assert settings.openai_compat_tool_activity_max_chars == 1234
+
+
+def test_oldest_openai_base_url_alias_remains_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://oldest.example/v1")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.openai_compat_base_url == "https://oldest.example/v1"
+
+
+def test_legacy_openai_tool_activity_setting_names_remain_input_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_COMPAT_TOOL_ACTIVITY", "hidden")
+    monkeypatch.setenv("OPENAI_TOOL_BLOCK_MAX_CHARS", "987")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.openai_compat_tool_activity_mode == "hidden"
+    assert settings.openai_compat_tool_activity_max_chars == 987
+    assert "openai_compat_tool_activity" not in settings.model_dump()
+    assert "openai_tool_block_max_chars" not in settings.model_dump()
+
+
+def test_canonical_openai_tool_activity_names_win_over_legacy_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_COMPAT_TOOL_ACTIVITY_MODE", "reasoning")
+    monkeypatch.setenv("OPENAI_COMPAT_TOOL_ACTIVITY", "hidden")
+    monkeypatch.setenv("OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS", "4321")
+    monkeypatch.setenv("OPENAI_TOOL_BLOCK_MAX_CHARS", "987")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.openai_compat_tool_activity_mode == "reasoning"
+    assert settings.openai_compat_tool_activity_max_chars == 4321
+
+
+def test_openai_compat_tool_activity_mode_rejects_unknown_value() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, openai_compat_tool_activity_mode="content")
 
 
 @pytest.mark.parametrize("value", [0, -1, 12.5])
@@ -122,6 +292,10 @@ def test_settings_owns_dotenv_values_without_mutating_process_environment(
     environment = settings.interpolation_environment()
 
     assert settings.api_key_for_provider("gemini") == "dotenv-gemini"
+    assert (
+        settings.api_key_for_provider("openai_compatible")
+        == "process-openai"
+    )
     assert settings.api_key_for_provider("openai") == "process-openai"
     assert settings.api_key_for_provider("future") == "process-future"
     assert settings.api_key_for_provider("dotenv_only") == "dotenv-only"

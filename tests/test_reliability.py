@@ -27,7 +27,7 @@ from agent import (
     TextEvent,
     ToolResultEvent,
 )
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
+from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 
 logging.basicConfig(
     level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s"
@@ -49,17 +49,17 @@ class TransientError(Exception):
 
 def text_response(text: str, stop_reason: str = "end_turn") -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text=text)], stop_reason=stop_reason, usage=Usage()
+        content=[TextBlock(text=text)], stop_reason=stop_reason, usage=CompletionUsage()
     )
 
 
 def empty_response() -> AssistantMessage:
-    return AssistantMessage(content=[], stop_reason="empty", usage=Usage())
+    return AssistantMessage(content=[], stop_reason="empty", usage=CompletionUsage())
 
 
 def truncated_response(text: str) -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text=text)], stop_reason="max_tokens", usage=Usage()
+        content=[TextBlock(text=text)], stop_reason="max_tokens", usage=CompletionUsage()
     )
 
 
@@ -67,7 +67,7 @@ def tool_call_response(name: str = "srv__tool") -> AssistantMessage:
     return AssistantMessage(
         content=[ToolUseBlock(id="call_1", name=name, input={})],
         stop_reason="tool_use",
-        usage=Usage(),
+        usage=CompletionUsage(),
     )
 
 
@@ -168,7 +168,7 @@ async def test_abnormal_outcomes_are_not_retried_or_laundered(
         content=[TextBlock(text="provider text")],
         stop_reason=stop_reason,
         raw_stop_reason="raw-provider-reason",
-        usage=Usage(),
+        usage=CompletionUsage(),
     )
     llm = scripted_llm_factory([response])
 
@@ -200,7 +200,7 @@ async def test_real_tool_blocks_override_inconsistent_provider_reason(
         content=[ToolUseBlock(id="call_1", name="srv__tool", input={})],
         stop_reason=stop_reason,
         raw_stop_reason="unknown-provider-reason",
-        usage=Usage(),
+        usage=CompletionUsage(),
     )
     llm = scripted_llm_factory([inconsistent, text_response("tool completed")])
     mcp = scripted_mcp_factory()

@@ -20,13 +20,14 @@ from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     Message,
+    ReasoningDelta,
     StreamChunk,
     StreamEnd,
     TextBlock,
     TextDelta,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 from .contracts import ToolRuntime
 from .context import (
@@ -46,7 +47,7 @@ from .events import (
     UsageEvent,
 )
 from .session import Session, SessionStore
-from .tool_policy import ToolPolicy, Verdict
+from .tool_policy import ToolPolicy, PolicyVerdict
 from .runtime import RunContext, RunLimits
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ class _AttemptController:
 
     def timeout_bound(self) -> _TimeoutBound:
         """Return the smaller enabled LLM timeout and remaining run budget."""
-        remaining = self.context.remaining()
+        remaining = self.context.remaining_seconds()
         if remaining is not None and remaining <= 0:
             raise _RunDeadlineExceeded()
 
@@ -147,8 +148,8 @@ class _AttemptController:
         if not eligible or attempt_index >= self.total_attempts - 1:
             return False
 
-        delay = _backoff_delay(self.limits.retry_base_delay, attempt_index)
-        remaining = self.context.remaining()
+        delay = _backoff_delay_seconds(self.limits.retry_base_delay, attempt_index)
+        remaining = self.context.remaining_seconds()
         if remaining is not None:
             if remaining <= 0:
                 raise _RunDeadlineExceeded() from cause
@@ -190,7 +191,10 @@ class _ActiveToolBatch:
 
     def complete(self, result: ToolResultBlock) -> None:
         expected = self.tool_uses[self._next_index]
-        if (result.tool_use_id, result.name) != (expected.id, expected.name):
+        if (result.tool_use_id, result.name) != (
+            expected.id,
+            expected.name,
+        ):
             raise ValueError("tool result does not match the next tool call")
         self._results.append(result)
         self._next_index += 1
@@ -198,7 +202,9 @@ class _ActiveToolBatch:
 
     def complete_remaining(self, results: list[ToolResultBlock]) -> None:
         remaining = self.tool_uses[self._next_index :]
-        expected = [(tool_use.id, tool_use.name) for tool_use in remaining]
+        expected = [
+            (tool_use.id, tool_use.name) for tool_use in remaining
+        ]
         actual = [(result.tool_use_id, result.name) for result in results]
         if actual != expected:
             raise ValueError("synthetic results must match every remaining tool call")
@@ -437,7 +443,7 @@ async def _close_stream(
         log.warning("failed to close LLM stream", exc_info=True)
 
 
-def _backoff_delay(base_delay: float, attempt: int) -> float:
+def _backoff_delay_seconds(base_delay: float, attempt: int) -> float:
     """Jittered exponential backoff, capped."""
     return min(_RETRY_BACKOFF_CAP_SECONDS, base_delay * (2**attempt)) + random.uniform(
         0, base_delay
@@ -494,7 +500,7 @@ async def run_agent(
     # Policy controls what may run.
     policy = policy if policy is not None else ToolPolicy()
     iteration = 0
-    cumulative = Usage()
+    cumulative = CompletionUsage()
 
     # Run-scoped state for repeat-call detection and failure nudging.
     seen_calls: set[tuple[str, str]] = set()
@@ -547,10 +553,10 @@ async def run_agent(
         batch.balance_after_interruption()
         await _publish_tool_batch(batch, continue_work=False)
 
-    def _skipped_result(tu: ToolUseBlock, content: str) -> ToolResultBlock:
+    def _skipped_result(tool_use: ToolUseBlock, content: str) -> ToolResultBlock:
         return ToolResultBlock(
-            tool_use_id=tu.id,
-            name=tu.name,
+            tool_use_id=tool_use.id,
+            name=tool_use.name,
             content=content,
             is_error=True,
         )
@@ -588,7 +594,7 @@ async def run_agent(
     while iteration < max_iterations:
         # Bounded-run guards before spending another LLM call.
         if _deadline_exceeded():
-            elapsed = context.elapsed()
+            elapsed = context.elapsed_seconds()
             run_log.warning(
                 "run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
                 max_run_seconds,
@@ -665,11 +671,13 @@ async def run_agent(
         )
         llm_started = time.perf_counter()
         attempts = _AttemptController(limits=limits, context=context, log=run_log)
+        streamed_reasoning = False
         try:
             if stream:
                 response: AssistantMessage | None = None
 
                 for attempt_index in attempts.indexes():
+                    streamed_reasoning = False
                     attempts.ensure_before_attempt()
                     visible_deltas: list[str] = []
                     chunks: AsyncIterator[StreamChunk] | None = None
@@ -688,6 +696,12 @@ async def run_agent(
                                 if chunk.text:
                                     visible_deltas.append(chunk.text)
                                     yield await _emit(TextEvent(text=chunk.text))
+                            elif isinstance(chunk, ReasoningDelta):
+                                if chunk.text:
+                                    streamed_reasoning = True
+                                    yield await _emit(
+                                        ReasoningEvent(text=chunk.text)
+                                    )
                             elif isinstance(chunk, StreamEnd):
                                 attempt_response = chunk.message
                                 break
@@ -698,14 +712,14 @@ async def run_agent(
                                     content=[TextBlock(text="".join(visible_deltas))],
                                     stop_reason="incomplete_stream",
                                     model=None,
-                                    usage=Usage(),
+                                    usage=CompletionUsage(),
                                 )
                             else:
                                 attempt_response = AssistantMessage(
                                     content=[],
                                     stop_reason="empty",
                                     model=None,
-                                    usage=Usage(),
+                                    usage=CompletionUsage(),
                                 )
                     except _RunDeadlineExceeded:
                         raise
@@ -759,7 +773,7 @@ async def run_agent(
                     attempts=attempts,
                 )
         except _RunDeadlineExceeded:
-            elapsed = context.elapsed()
+            elapsed = context.elapsed_seconds()
             run_log.warning(
                 "run exceeded max_run_seconds=%.1f during LLM call (elapsed=%.1fs)",
                 max_run_seconds,
@@ -805,7 +819,7 @@ async def run_agent(
                 )
             )
 
-            if response.reasoning:
+            if response.reasoning and not streamed_reasoning:
                 yield await _emit(ReasoningEvent(text=response.reasoning))
 
             for block in response.content:
@@ -849,7 +863,7 @@ async def run_agent(
                     )
                     active_tool_batch = None
                 if guard_reason == "deadline_exceeded":
-                    elapsed = context.elapsed()
+                    elapsed = context.elapsed_seconds()
                     run_log.warning(
                         "run exceeded max_run_seconds=%.1f (elapsed=%.1fs)",
                         max_run_seconds,
@@ -892,8 +906,14 @@ async def run_agent(
                 return
 
             # Execute tools sequentially; some MCP tools may have side effects.
-            for tool_index, tu in enumerate(tool_uses):
-                yield await _emit(ToolCallEvent(id=tu.id, name=tu.name, input=tu.input))
+            for tool_index, tool_use in enumerate(tool_uses):
+                yield await _emit(
+                    ToolCallEvent(
+                        id=tool_use.id,
+                        name=tool_use.name,
+                        input=tool_use.input,
+                    )
+                )
 
                 if _deadline_exceeded():
                     events, skipped_results = _skipped_tool_events(
@@ -906,7 +926,7 @@ async def run_agent(
                         yield await _emit(event)
                     await _publish_tool_batch(active_tool_batch, continue_work=False)
                     active_tool_batch = None
-                    elapsed = context.elapsed()
+                    elapsed = context.elapsed_seconds()
                     run_log.warning(
                         "run exceeded max_run_seconds=%.1f before tool dispatch (elapsed=%.1fs)",
                         max_run_seconds,
@@ -916,58 +936,70 @@ async def run_agent(
                     return
 
                 # Exact repeat calls get a synthetic error instead of re-execution.
-                call_key = (tu.name, _canonical_args(tu.input))
+                call_key = (
+                    tool_use.name,
+                    _canonical_args(tool_use.input),
+                )
                 tool_latency_ms: float | None = None
                 if call_key in seen_calls:
                     run_log.info(
                         "stall: repeat call to %s with identical args; skipping",
-                        tu.name,
+                        tool_use.name,
                     )
                     content = _STALL_MESSAGE
                     is_error = True
                 else:
                     seen_calls.add(call_key)
                     validation_error: str | None
-                    if tu.parse_error is not None:
+                    if tool_use.parse_error is not None:
                         validation_error = (
-                            f"tool call arguments were not valid JSON ({tu.parse_error}); "
+                            "tool call arguments were not valid JSON "
+                            f"({tool_use.parse_error}); "
                             "return the arguments as a JSON object matching the tool schema."
                         )
                     else:
                         validator = tool_validators.get(
-                            tu.name, _PERMISSIVE_VALIDATOR
+                            tool_use.name, _PERMISSIVE_VALIDATOR
                         )
-                        validation_error = validator.validate(tu.input)
+                        validation_error = validator.validate(tool_use.input)
 
                     decision = (
-                        policy.check(tu.name, tu.input)
+                        policy.check(tool_use.name, tool_use.input)
                         if validation_error is None
                         else None
                     )
                     if validation_error is not None:
                         run_log.info(
-                            "invalid args for %s: %s", tu.name, validation_error
+                            "invalid args for %s: %s",
+                            tool_use.name,
+                            validation_error,
                         )
                         content = validation_error
                         is_error = True
-                    elif decision is not None and decision.verdict is Verdict.DENY:
-                        run_log.info("policy denied %s", tu.name)
+                    elif decision is not None and decision.verdict is PolicyVerdict.DENY:
+                        run_log.info("policy denied %s", tool_use.name)
                         reason = decision.reason
                         assert reason is not None
                         content = reason
                         is_error = True
                     else:
                         tool_started = time.perf_counter()
-                        active_tool_batch.start_dispatch(tu)
+                        active_tool_batch.start_dispatch(tool_use)
                         try:
                             effective_tool_timeout = _effective_timeout(
                                 tool_timeout_seconds
                             )
                             if effective_tool_timeout and effective_tool_timeout > 0:
                                 async with asyncio.timeout(effective_tool_timeout):
-                                    call_result = await mcp.call_tool(tu.name, tu.input)
+                                    call_result = await mcp.call_tool(
+                                        tool_use.name,
+                                        tool_use.input,
+                                    )
                             else:
-                                call_result = await mcp.call_tool(tu.name, tu.input)
+                                call_result = await mcp.call_tool(
+                                    tool_use.name,
+                                    tool_use.input,
+                                )
                             content = call_result.content
                             is_error = call_result.is_error
                         except TimeoutError:
@@ -985,7 +1017,7 @@ async def run_agent(
                                     continue_work=False,
                                 )
                                 active_tool_batch = None
-                                elapsed = context.elapsed()
+                                elapsed = context.elapsed_seconds()
                                 run_log.warning(
                                     "run exceeded max_run_seconds=%.1f during tool "
                                     "dispatch (elapsed=%.1fs)",
@@ -996,13 +1028,18 @@ async def run_agent(
                                 return
                             run_log.warning(
                                 "tool %s timed out after %ss",
-                                tu.name,
+                                tool_use.name,
                                 tool_timeout_seconds,
                             )
-                            content = f"tool {tu.name!r} timed out after {tool_timeout_seconds}s"
+                            content = (
+                                f"tool {tool_use.name!r} timed out after "
+                                f"{tool_timeout_seconds}s"
+                            )
                             is_error = True
                         except Exception as exc:
-                            run_log.exception("tool execution raised for %s", tu.name)
+                            run_log.exception(
+                                "tool execution raised for %s", tool_use.name
+                            )
                             content = f"tool execution raised: {exc}"
                             is_error = True
                         tool_latency_ms = round(
@@ -1018,16 +1055,16 @@ async def run_agent(
                     content = f"{content}\n\n{_FAILURE_NUDGE}"
 
                 result = ToolResultBlock(
-                    tool_use_id=tu.id,
-                    name=tu.name,
+                    tool_use_id=tool_use.id,
+                    name=tool_use.name,
                     content=content,
                     is_error=is_error,
                 )
                 active_tool_batch.complete(result)
                 yield await _emit(
                     ToolResultEvent(
-                        id=tu.id,
-                        name=tu.name,
+                        id=tool_use.id,
+                        name=tool_use.name,
                         content=content,
                         is_error=is_error,
                         latency_ms=tool_latency_ms,

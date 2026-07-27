@@ -65,7 +65,7 @@ class _FakeClient:
             self.connect_cancelled = True
             raise
 
-    async def close(self) -> None:
+    async def aclose(self) -> None:
         self.close_calls += 1
         self.close_started.set()
         try:
@@ -395,8 +395,8 @@ async def test_health_reports_mixed_startup_and_preserves_compatibility_fields(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "degraded"
-    assert body["provider"] == settings.llm_provider
-    assert body["model"] == settings.llm_model
+    assert body["provider"] == settings.llm.provider
+    assert body["model"] == settings.llm.model_name
     assert body["connected_servers"] == ["healthy"]
     assert body["tool_count"] == 1
     assert body["orchestration_enabled"] is False

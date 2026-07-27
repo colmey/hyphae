@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, Usage
+from llm.schemas import AssistantMessage, TextBlock, CompletionUsage
 from tests._app_support import wired_app
 
 
@@ -19,13 +19,13 @@ class FakeLLM(LLMClient):
             content=[TextBlock(text="ok")],
             stop_reason="end_turn",
             model="fake",
-            usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+            usage=CompletionUsage(input_tokens=1, output_tokens=1, total_tokens=2),
         )
 
 
 async def test_auth_disabled_leaves_protected_routes_open(asgi_client) -> None:
     with wired_app(FakeLLM()) as (app, settings):
-        settings.harness_api_key = ""
+        settings.hyphae_api_key = ""
         client = asgi_client(app)
         assert (await client.post("/chat", content="hello")).status_code == 200
         response = await client.post(
@@ -50,7 +50,7 @@ async def test_auth_enabled_rejects_invalid_credentials(
     asgi_client, route, headers
 ) -> None:
     with wired_app(FakeLLM()) as (app, settings):
-        settings.harness_api_key = API_KEY
+        settings.hyphae_api_key = API_KEY
         client = asgi_client(app)
         if route.startswith("/v1"):
             response = await client.post(
@@ -78,7 +78,7 @@ async def test_auth_enabled_accepts_valid_credentials(
     asgi_client, route, headers
 ) -> None:
     with wired_app(FakeLLM()) as (app, settings):
-        settings.harness_api_key = API_KEY
+        settings.hyphae_api_key = API_KEY
         client = asgi_client(app)
         if route.startswith("/v1"):
             response = await client.post(
@@ -93,5 +93,5 @@ async def test_auth_enabled_accepts_valid_credentials(
 
 async def test_health_remains_open_when_auth_enabled(asgi_client) -> None:
     with wired_app(FakeLLM()) as (app, settings):
-        settings.harness_api_key = API_KEY
+        settings.hyphae_api_key = API_KEY
         assert (await asgi_client(app).get("/health")).status_code == 200

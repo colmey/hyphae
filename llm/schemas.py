@@ -103,7 +103,7 @@ ContentBlock = Union[TextBlock, ToolUseBlock, ToolResultBlock]
 
 
 @dataclass
-class Usage:
+class CompletionUsage:
     """Token usage for a single LLM completion. Provider-agnostic.
 
     Each LLMClient maps its SDK's figures onto these fields; a provider that
@@ -119,8 +119,8 @@ class Usage:
     thinking_tokens: int = 0
     cached_tokens: int = 0
 
-    def __add__(self, other: "Usage") -> "Usage":
-        return Usage(
+    def __add__(self, other: "CompletionUsage") -> "CompletionUsage":
+        return CompletionUsage(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
             total_tokens=self.total_tokens + other.total_tokens,
@@ -196,9 +196,9 @@ class AssistantMessage:
     content: list[ContentBlock]
     stop_reason: CanonicalStopReason | None = None
     model: str | None = None
-    usage: Usage | None = None
-    # Provider-extracted chain-of-thought; trace-only, never replayed to the
-    # model or sent on the OpenAI-compatible response wire.
+    usage: CompletionUsage | None = None
+    # Provider-extracted reasoning; never replayed to the model. Streaming
+    # adapters may expose it through an explicitly configured reasoning channel.
     reasoning: str | None = None
     raw_stop_reason: str | None = None
 
@@ -221,6 +221,14 @@ class TextDelta:
 
 
 @dataclass
+class ReasoningDelta:
+    """A sanitized reasoning fragment produced mid-generation."""
+
+    text: str
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+
+
+@dataclass
 class StreamEnd:
     """Terminal stream chunk carrying the fully assembled assistant turn."""
 
@@ -228,4 +236,4 @@ class StreamEnd:
     type: Literal["stream_end"] = "stream_end"
 
 
-StreamChunk = Union[TextDelta, StreamEnd]
+StreamChunk = Union[TextDelta, ReasoningDelta, StreamEnd]

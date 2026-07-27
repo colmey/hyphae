@@ -204,7 +204,7 @@ class TurnRunner:
             timeout=context.effective_timeout(self.limits.llm_timeout_seconds),
             log=context.logger,
         )
-        result = decision.result
+        proposal = decision.result
         if decision.fallback_used:
             context.logger.info(
                 "orchestration fallback in effect: %s", decision.fallback_reason
@@ -215,31 +215,31 @@ class TurnRunner:
             selected_llm = self.routing.registry.get(resolved_id)
         else:
             resolved_id, selected_llm = self.routing.registry.get_or_default(
-                result.selected_model_id
+                proposal.selected_model_id
             )
         try:
             model_entry = self.routing.registry.get_entry(resolved_id)
         except (AttributeError, KeyError):
             model_entry = None
 
-        selected_tools = tools.selected(result.selected_tools)
+        selected_tools = tools.select(proposal.selected_tools)
         system_prompt = (
             request.system_override
             if request.system_override is not None
-            else result.generated_system_prompt
+            else proposal.generated_system_prompt
         )
         event = OrchestrationDecisionEvent(
             model_id=resolved_id,
             tools=[tool.name for tool in selected_tools.tools],
             system_prompt=system_prompt,
             fallback_used=decision.fallback_used,
-            thinking_level=result.thinking_level,
+            thinking_level=proposal.thinking_level,
         )
         context.logger.info(
             "chat: orchestrator picked model=%s tools=%d thinking=%s fallback=%s",
             resolved_id,
             len(selected_tools.tools),
-            result.thinking_level,
+            proposal.thinking_level,
             decision.fallback_used,
         )
         context.logger.debug(
@@ -249,7 +249,7 @@ class TurnRunner:
             llm=selected_llm,
             tools=selected_tools.as_llm_tools(),
             system_prompt=system_prompt,
-            thinking_level=result.thinking_level,
+            thinking_level=proposal.thinking_level,
             model_id=resolved_id,
             model_entry=model_entry,
             orchestration=event,
@@ -271,7 +271,7 @@ class TurnRunner:
         if context.deadline_exceeded():
             context.logger.warning(
                 "turn deadline exhausted during routing (elapsed=%.3fs)",
-                context.elapsed(),
+                context.elapsed_seconds(),
             )
             yield await context.emit(
                 DoneEvent(reason="deadline_exceeded", iterations=0)

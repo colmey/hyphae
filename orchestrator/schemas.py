@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from mcp_layer.contracts import NAMESPACE_SEP
 
 
-class OrchestrationResult(BaseModel):
+class OrchestrationProposal(BaseModel):
     """The structured output the orchestrator LLM must produce.
 
     Deliberately leaves `extra="forbid"` off because Gemini rejects the
@@ -59,7 +59,7 @@ class OrchestrationResult(BaseModel):
 class OrchestrationDecision:
     """Orchestrator output plus fallback metadata."""
 
-    result: OrchestrationResult
+    result: OrchestrationProposal
     fallback_used: bool = False
     fallback_reason: str | None = None
 

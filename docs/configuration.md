@@ -18,25 +18,34 @@ environment variables take precedence over `.env`, so the same file works for
 local dev, containers, and CI. Tests that need hermetic defaults construct
 `Settings(_env_file=None)`.
 
+LLM values are grouped in application code under the typed `settings.llm`
+object (`settings.llm.provider`, `settings.llm.model_name`,
+`settings.llm.max_tokens`, and the retry/timeout controls). Environment
+variables retain their existing flat `LLM_*` names. Sampling values such as
+`temperature` remain per-model settings in `models.yaml`; there is no global
+`settings.llm.temperature` override.
+
 | Variable                       | Default                       | Purpose                                            |
 |--------------------------------|-------------------------------|----------------------------------------------------|
-| `LLM_PROVIDER`                 | `gemini`                      | Any provider registered in `llm/client.py`'s `_PROVIDERS` (currently `gemini`, `openai`); validated at build time |
-| `LLM_MODEL`                    | `gemini-3-flash-preview`      | Model identifier (legacy default; orchestrator overrides per request) |
+| `LLM_PROVIDER`                 | `gemini`                      | Any provider registered in `llm/client.py`'s `_PROVIDERS` (currently `gemini`, `openai_compatible`; deprecated `openai` alias accepted); validated at build time |
+| `LLM_MODEL_NAME`                    | `gemini-3-flash-preview`      | Model identifier (legacy default; orchestrator overrides per request) |
 | `LLM_MAX_TOKENS`               | `4096`                        | Default max tokens per completion                  |
 | `ANTHROPIC_API_KEY`            | `""`                          | Anthropic key (if used by any model in `models.yaml`) |
 | `GEMINI_API_KEY`               | `""`                          | Gemini key (if used by any model in `models.yaml`)    |
 | `OPENAI_API_KEY`               | `""`                          | OpenAI key (if used by any model in `models.yaml`); also required by the SDK for OpenAI-compatible servers (e.g. Ollama) even when the server ignores it |
-| `OPENAI_BASE_URL`              | `""`                          | Base URL for the OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1` for local Ollama). Empty targets real OpenAI |
+| `OPENAI_COMPAT_BASE_URL`              | `""`                          | Base URL for the OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1` for local Ollama). Empty targets real OpenAI |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MODE` | `reasoning`               | OpenAI-compatible activity mode: `reasoning` emits sanitized model reasoning and tool progress through optional `delta.reasoning_content`; `hidden` omits that channel |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS` | `2000`              | Presentation threshold for displayed arguments or results in one `/v1` tool-activity payload; distinct from `TOOL_RESULT_MAX_CHARS` |
 | `MCP_CONFIG_PATH`              | `config/mcp_config.yaml`      | Path to MCP server config                          |
 | `MCP_CONNECT_TIMEOUT_SECONDS`  | `30`                          | Cap on one complete MCP startup or lazy-recovery connection (transport open, initialize, and tool discovery); `<= 0` disables |
-| `MAX_LOOP_ITERATIONS`          | `10`                          | Cap on agent loop iterations                       |
+| `LOOP_MAX_ITERATIONS`          | `10`                          | Cap on agent loop iterations                       |
 | `LLM_TIMEOUT_SECONDS`          | `120`                         | Per-attempt cap on a single `llm.complete()` call (`<= 0` disables) |
 | `TOOL_TIMEOUT_SECONDS`         | `60`                          | Cap on a single `mcp.call_tool()`; on timeout the model gets an `is_error` tool result (`<= 0` disables) |
 | `LLM_MAX_RETRIES`              | `3`                           | Retries on transient LLM failures (429/5xx/timeout/reset) and empty responses (`0` disables) |
 | `LLM_RETRY_BASE_DELAY`         | `0.5`                         | Base seconds for jittered exponential backoff between LLM retries |
 | `TOOL_RESULT_MAX_CHARS`        | `20000`                       | Clip threshold for a single flattened tool result before it enters session history (`<= 0` disables) |
-| `MAX_RUN_TOKENS`               | `0`                           | Hard ceiling on cumulative `total_tokens` for one run; ends the run `budget_exceeded` (`<= 0` disables). When a provider reports absent/all-zero usage, the local token estimator (`agent/context.py`) fills in, so the cap works against local OpenAI-compatible servers too |
-| `MAX_RUN_SECONDS`              | `0`                           | Hard wall-clock ceiling on one accepted turn, including routing, retries, LLM/tool calls, and backoff; ends the run `deadline_exceeded` (`<= 0` disables) |
+| `RUN_MAX_TOKENS`               | `0`                           | Hard ceiling on cumulative `total_tokens` for one run; ends the run `budget_exceeded` (`<= 0` disables). When a provider reports absent/all-zero usage, the local token estimator (`agent/context.py`) fills in, so the cap works against local OpenAI-compatible servers too |
+| `RUN_MAX_SECONDS`              | `0`                           | Hard wall-clock ceiling on one accepted turn, including routing, retries, LLM/tool calls, and backoff; ends the run `deadline_exceeded` (`<= 0` disables) |
 | `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` | `0`                   | Abort the run `no_progress` after this many tool-call failures in a row (a success resets the count); `<= 0` disables. Should exceed the fixed at-3 nudge so the model gets a chance to recover first |
 | `CONTEXT_STRATEGY`             | `naive`                       | How the agent loop shapes the outgoing message view per LLM call: `naive` (pass-through; over budget only logs a warning) or `compaction` (summarize the over-budget middle of the history, keep the task header + recent tail verbatim). Unknown values degrade to `naive` with a warning. The view is per-call only — session history is never rewritten |
 | `CONTEXT_DEFAULT_WINDOW_TOKENS` | `32768`                      | Assumed context window for models whose `models.yaml` entry has no `context_window`, and for legacy/no-orchestrator mode. Budget = window − max output tokens − safety margin |
@@ -44,11 +53,11 @@ local dev, containers, and CI. Tests that need hermetic defaults construct
 | `CONTEXT_RECENT_MESSAGES`      | `6`                           | Recent protocol-safe units (a user turn, a no-tool assistant turn, or an assistant tool call plus its results) kept verbatim under compaction; shrinks automatically if the tail alone overflows |
 | `CONTEXT_SUMMARY_MAX_TOKENS`   | `512`                         | Output cap for the one-call compaction summarizer |
 | `SESSION_TTL_SECONDS`          | `3600`                        | Idle TTL before an in-memory session is evicted (`<= 0` disables) |
-| `SESSION_MAX_COUNT`            | `1000`                        | Max sessions retained in memory; oldest-updated evicted first (`<= 0` disables) |
+| `SESSION_CAPACITY`            | `1000`                        | Max sessions retained in memory; oldest-updated evicted first (`<= 0` disables) |
 | `LOG_LEVEL`                    | `INFO`                        | Python logging level (DEBUG opens per-request orchestrator detail) |
 | `TRACE_ENABLED`                | `false`                       | Serialize the loop's event stream to a JSONL trace (one record per event, tagged with `run_id` + step + timestamp + latency). Off = `tracer=None`, zero hot-path cost |
-| `TRACE_PATH`                   | `traces/harness.jsonl`        | Append-only JSONL trace file; parent dirs are created. Captures full prompts/args/results — treat as sensitive and guard at the filesystem level (the trace file is not covered by `HARNESS_API_KEY`) |
-| `HARNESS_API_KEY`              | `""`                          | Optional API key gating `/chat`, `/chat/stream`, `/v1/*` (`/health` stays open). Empty = auth off (single-operator dev default); set = 401 without a valid key. Accepts `X-API-Key: <key>` or `Authorization: Bearer <key>`; compared constant-time |
+| `TRACE_JSONL_PATH`                   | `traces/harness.jsonl`        | Append-only JSONL trace file; parent dirs are created. Captures full prompts/args/results — treat as sensitive and guard at the filesystem level (the trace file is not covered by `HYPHAE_API_KEY`) |
+| `HYPHAE_API_KEY`              | `""`                          | Optional API key gating `/chat`, `/chat/stream`, `/v1/*` (`/health` stays open). Empty = auth off (single-operator dev default); set = 401 without a valid key. Accepts `X-API-Key: <key>` or `Authorization: Bearer <key>`; compared constant-time |
 | `ORCHESTRATION_ENABLED`        | `true`                        | Master toggle for the orchestration layer          |
 | `MODELS_CONFIG_PATH`           | `config/models.yaml`          | Path to the model registry YAML                    |
 | `ORCHESTRATOR_PROMPT_PATH`     | `config/orchestrator_prompt.md` | Path to orchestrator's system prompt             |
@@ -61,6 +70,25 @@ queue holds 4096 records, batches contain at most 100 records, partial batches
 flush after 250 ms, and overflow warnings repeat at most once per 60 seconds.
 There are deliberately no queue-size, batch-size, flush-interval, warning-rate,
 or overflow-policy settings.
+
+Renamed settings retain deprecated input aliases so existing deployments can
+migrate without an abrupt configuration break:
+
+| Canonical name | Deprecated input alias |
+|---|---|
+| `OPENAI_COMPAT_BASE_URL` | `OPENAI_PROVIDER_BASE_URL`, `OPENAI_BASE_URL` |
+| `LLM_MODEL_NAME` | `LLM_MODEL` |
+| `LOOP_MAX_ITERATIONS` | `MAX_LOOP_ITERATIONS` |
+| `RUN_MAX_TOKENS` | `MAX_RUN_TOKENS` |
+| `RUN_MAX_SECONDS` | `MAX_RUN_SECONDS` |
+| `SESSION_CAPACITY` | `SESSION_MAX_COUNT` |
+| `HYPHAE_API_KEY` | `HARNESS_API_KEY` |
+| `TRACE_JSONL_PATH` | `TRACE_PATH` |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MODE` | `OPENAI_COMPAT_TOOL_ACTIVITY` |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS` | `OPENAI_TOOL_BLOCK_MAX_CHARS` |
+
+When both forms are set, the canonical name wins. New deployments should use
+the canonical names in the main table.
 
 ## MCP Config YAML — `config/mcp_config.yaml`
 
@@ -142,7 +170,7 @@ models:
       highly ambiguous workflows demanding deliberate planning.
 
   qwen3-local:
-    provider: openai
+    provider: openai_compatible
     model: qwen3.6-35b-a3b
     description: >
       Local Qwen3.6 model served over an OpenAI-compatible endpoint.
@@ -166,16 +194,17 @@ Both models are **active** — the orchestrator routes between them (cheap
 - `provider` must be registered in `llm/client.py`'s `_PROVIDERS` —
   validated against `supported_providers()` at load time, so an unknown
   provider is rejected up front rather than at first request. Implemented
-  today: `gemini` (`llm/providers/gemini.py`) and `openai`
-  (`llm/providers/openai.py`). The `openai` provider is OpenAI-compatible:
-  set `OPENAI_BASE_URL` to point it at a local Ollama (or any compatible)
-  server, otherwise it targets real OpenAI. For Ollama, `model` must match
-  an `ollama list` tag and be a tools-capable model if you need tool calling.
+  today: `gemini` (`llm/providers/gemini.py`) and `openai_compatible`
+  (`llm/providers/openai_compatible/`). The deprecated `openai` provider ID
+  remains accepted for existing configuration. Set `OPENAI_COMPAT_BASE_URL`
+  to point the adapter at a local Ollama (or any compatible server); an empty
+  value targets real OpenAI. For Ollama, `model` must match an `ollama list`
+  tag and be tools-capable if you need tool calling.
 - `model` is the provider-specific model identifier.
 - `description` is what the **orchestrator LLM** sees when picking a
   model. Write for an LLM audience: terse, capability-focused, plain
   English.
-- `max_tokens` is optional; falls back to `Settings.llm_max_tokens`.
+- `max_tokens` is optional; falls back to `Settings.llm.max_tokens`.
 - `context_window` is optional; the model's total context window in tokens,
   used by the agent loop's context budget (`window − max output − safety
   margin`). Falls back to `CONTEXT_DEFAULT_WINDOW_TOKENS`. Provider-agnostic
@@ -193,8 +222,9 @@ Both models are **active** — the orchestrator routes between them (cheap
   `hint-param` means the provider can pass the orchestrator's
   `thinking_level` through as a request hint such as `reasoning_effort`,
   and `think-tags` means the model may self-emit a leading
-  `<think>...</think>` block that the provider extracts as trace-only
-  reasoning.
+  `<think>...</think>` block that the provider extracts as sanitized
+  reasoning. It is not replayed into model history; `/v1` streaming can display
+  it through `delta.reasoning_content`.
 - `sampling` is optional. Supported fields are `temperature` (`0.0`-`2.0`),
   `top_p` (`0.0`-`1.0`), and `top_k` (`>= 1`). Omit the block, or omit an
   individual field, to leave the provider/server default in force. Sampling is

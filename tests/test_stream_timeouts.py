@@ -13,7 +13,7 @@ from llm.schemas import (
     StreamEnd,
     TextBlock,
     TextDelta,
-    Usage,
+    CompletionUsage,
 )
 
 
@@ -73,7 +73,7 @@ def _answer(text: str) -> AssistantMessage:
     return AssistantMessage(
         content=[TextBlock(text)],
         stop_reason="end_turn",
-        usage=Usage(total_tokens=1),
+        usage=CompletionUsage(total_tokens=1),
     )
 
 

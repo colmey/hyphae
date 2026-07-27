@@ -17,7 +17,7 @@ from llm.schemas import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 
 
@@ -205,7 +205,7 @@ def test_usage_coercion_preserves_valid_counts_and_zeros_malformed() -> None:
         _response(parts=[_text_part()], usage=usage_metadata)
     )
 
-    assert usage == Usage(input_tokens=10, output_tokens=0, total_tokens=12)
+    assert usage == CompletionUsage(input_tokens=10, output_tokens=0, total_tokens=12)
 
 
 def test_thought_signatures_and_tool_results_round_trip_to_gemini_only() -> None:

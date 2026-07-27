@@ -1,7 +1,7 @@
 """Live pytest coverage for an OpenAI-compatible provider (real or local
 server reached through its OpenAI-compatible /v1 endpoint).
 
-Exercises OpenAILLMClient end-to-end in three scenarios, mirroring
+Exercises OpenAICompatibleLLMClient end-to-end in three scenarios, mirroring
 smoke_test_llm.py:
 
   1. Tool-less completion — verifies auth, base_url, model name, round-trip.
@@ -13,7 +13,7 @@ smoke_test_llm.py:
      final answer.
 
 Configure via the process environment or project ``.env`` before running:
-    export OPENAI_BASE_URL=http://localhost:11434/v1   # for local Ollama
+    export OPENAI_COMPAT_BASE_URL=http://localhost:11434/v1   # for local Ollama
     export OPENAI_API_KEY=<key>                         # any non-empty value
     export OPENAI_MODEL=qwen3.6-35b-a3b                 # an `ollama list` tag
 
@@ -35,7 +35,7 @@ from llm import (
     ToolUseBlock,
 )
 from llm.schemas import TextBlock
-from llm.providers.openai import OpenAILLMClient
+from llm.providers.openai_compatible import OpenAICompatibleLLMClient
 from mcp_layer import MCPManager
 
 
@@ -130,9 +130,9 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
         return
 
     results: list[ToolResultBlock] = []
-    for tu in tool_uses:
-        print(f"  executing tool: {tu.name} args={tu.input}")
-        result = await mcp.call_tool(tu.name, tu.input)
+    for tool_use in tool_uses:
+        print(f"  executing tool: {tool_use.name} args={tool_use.input}")
+        result = await mcp.call_tool(tool_use.name, tool_use.input)
         preview = (
             result.content
             if len(result.content) < 400
@@ -141,8 +141,8 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
         print(f"    result (is_error={result.is_error}): {preview}")
         results.append(
             ToolResultBlock(
-                tool_use_id=tu.id,
-                name=tu.name,
+                tool_use_id=tool_use.id,
+                name=tool_use.name,
                 content=result.content,
                 is_error=result.is_error,
             )
@@ -161,16 +161,18 @@ async def test_configured_openai_provider_scenarios() -> None:
     environment = settings.interpolation_environment()
 
     # Construct the OpenAI-compatible client directly from env so this test
-    # works regardless of settings.llm_provider. OPENAI_MODEL picks the model
+    # works regardless of settings.llm.provider. OPENAI_MODEL picks the model
     # (default is a placeholder; set it to a real `ollama list` tag).
-    base_url = settings.openai_base_url or environment.get("OPENAI_BASE_URL", "")
+    base_url = settings.openai_compat_base_url or environment.get(
+        "OPENAI_COMPAT_BASE_URL", ""
+    )
     api_key = settings.openai_api_key or environment.get("OPENAI_API_KEY", "")
     model = environment.get("OPENAI_MODEL", "qwen3.6-35b-a3b")
 
     if not api_key:
         raise SystemExit(
             "OPENAI_API_KEY is not set. Set it (any non-empty value for Ollama) "
-            "and OPENAI_BASE_URL before running this test."
+            "and OPENAI_COMPAT_BASE_URL before running this test."
         )
 
     print(
@@ -178,10 +180,10 @@ async def test_configured_openai_provider_scenarios() -> None:
     )
     print()
 
-    llm = OpenAILLMClient(
+    llm = OpenAICompatibleLLMClient(
         api_key=api_key,
         model=model,
-        default_max_tokens=settings.llm_max_tokens,
+        default_max_tokens=settings.llm.max_tokens,
         base_url=base_url or None,
     )
     mcp_config = load_mcp_config_from_settings(settings)

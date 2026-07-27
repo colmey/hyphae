@@ -17,11 +17,11 @@ from llm.schemas import (
     StreamEnd,
     TextBlock,
     TextDelta,
-    Usage,
+    CompletionUsage,
 )
 from config import load_models_config
 from orchestrator import LLMRegistry
-from orchestrator.schemas import OrchestrationDecision, OrchestrationResult
+from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
 from tests._app_support import wired_app
 
 
@@ -41,7 +41,7 @@ class FakeLLM(LLMClient):
             content=[TextBlock(text="Hello"), TextBlock(text=", world")],
             stop_reason="end_turn",
             model="fake",
-            usage=Usage(input_tokens=11, output_tokens=3, total_tokens=14),
+            usage=CompletionUsage(input_tokens=11, output_tokens=3, total_tokens=14),
         )
 
     async def stream(
@@ -57,7 +57,7 @@ class FakeLLM(LLMClient):
                 content=[TextBlock(text="Hello, world")],
                 stop_reason="end_turn",
                 model="fake",
-                usage=Usage(input_tokens=11, output_tokens=3, total_tokens=14),
+                usage=CompletionUsage(input_tokens=11, output_tokens=3, total_tokens=14),
             )
         )
 
@@ -78,7 +78,7 @@ class OutcomeLLM(LLMClient):
             raw_stop_reason="raw-provider-reason",
             reasoning="private-chain-of-thought",
             model="provider-model",
-            usage=Usage(input_tokens=2, output_tokens=1, total_tokens=3),
+            usage=CompletionUsage(input_tokens=2, output_tokens=1, total_tokens=3),
         )
 
 
@@ -129,7 +129,7 @@ class SelectingOrchestrator:
     ) -> OrchestrationDecision:
         self.calls += 1
         return OrchestrationDecision(
-            result=OrchestrationResult(
+            result=OrchestrationProposal(
                 selected_model_id=self.selected_model_id,
                 selected_tools=[],
                 generated_system_prompt="routed system",
@@ -188,7 +188,7 @@ async def test_non_stream_completion_shape_and_usage(asgi_client) -> None:
         response = await asgi_client(app).post(
             "/v1/chat/completions",
             json={
-                "model": settings.llm_model,
+                "model": settings.llm.model_name,
                 "messages": [
                     {"role": "system", "content": "You are terse."},
                     {"role": "user", "content": "Hi there"},
@@ -199,7 +199,7 @@ async def test_non_stream_completion_shape_and_usage(asgi_client) -> None:
     response.raise_for_status()
     body = response.json()
     assert body["object"] == "chat.completion"
-    assert body["model"] == settings.llm_model
+    assert body["model"] == settings.llm.model_name
     choice = body["choices"][0]
     assert choice["message"] == {"role": "assistant", "content": "Hello, world"}
     assert choice["finish_reason"] == "stop"
@@ -237,7 +237,12 @@ async def test_policy_outcomes_map_to_openai_content_filter(
         body = response.json()
         assert body["choices"][0]["finish_reason"] == "content_filter"
         rendered = response.text
-    assert "private-chain-of-thought" not in rendered
+    if stream:
+        assert "private-chain-of-thought" in rendered
+        assert "<think>" not in rendered
+        assert "</think>" not in rendered
+    else:
+        assert "private-chain-of-thought" not in rendered
     assert "opaque-signature" not in rendered
 
 
@@ -292,7 +297,7 @@ async def test_stream_completion_emits_deltas_finish_and_done(
     assert payloads[-1] == "[DONE]"
     frames = [payload for payload in payloads if payload != "[DONE]"]
     assert all(frame["object"] == "chat.completion.chunk" for frame in frames)
-    assert all(frame["model"] == _settings.llm_model for frame in frames)
+    assert all(frame["model"] == _settings.llm.model_name for frame in frames)
     assert frames[0]["choices"][0]["delta"]["role"] == "assistant"
     deltas = [frame["choices"][0]["delta"].get("content", "") for frame in frames]
     assert deltas.count("Hello") == 1
@@ -445,7 +450,7 @@ async def test_unknown_model_is_rejected_before_session_inventory_or_execution(
             },
         )
 
-    available = "selected, requested" if orchestrated else settings.llm_model
+    available = "selected, requested" if orchestrated else settings.llm.model_name
     assert response.status_code == 400
     assert response.json() == {
         "error": {

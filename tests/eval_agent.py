@@ -37,9 +37,9 @@ from agent import (
 from api.turn import OrchestratedRouting, PersistencePolicy, TurnRequest, TurnRunner
 from config import get_settings
 from llm.client import GenerationRequest, LLMClient, build_llm_client
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
+from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from mcp_layer.client import ToolCallResult
-from orchestrator.schemas import OrchestrationDecision, OrchestrationResult
+from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET = ROOT / "tests" / "eval_data" / "agent_eval_v1.yaml"
@@ -140,14 +140,14 @@ class ScriptedOrchestrator:
     async def decide(
         self, prompt, tools, history=None, timeout=None, log=None
     ) -> OrchestrationDecision:
-        result = OrchestrationResult(
+        proposal = OrchestrationProposal(
             selected_model_id=self._config.get("selected_model_id", "default"),
             selected_tools=list(self._config.get("selected_tools", [])),
             generated_system_prompt=self._config.get("generated_system_prompt", ""),
             thinking_level=self._config.get("thinking_level", "medium"),
         )
         return OrchestrationDecision(
-            result=result,
+            result=proposal,
             fallback_used=bool(self._config.get("fallback_used", False)),
             fallback_reason=self._config.get("fallback_reason"),
         )
@@ -198,9 +198,9 @@ class RunArtifacts:
         return [e for e in self.events if isinstance(e, ErrorEvent)]
 
 
-def _usage(raw: dict[str, Any] | None) -> Usage:
+def _usage(raw: dict[str, Any] | None) -> CompletionUsage:
     raw = raw or {}
-    return Usage(
+    return CompletionUsage(
         input_tokens=int(raw.get("input_tokens", 0)),
         output_tokens=int(raw.get("output_tokens", 0)),
         total_tokens=int(raw.get("total_tokens", 0)),
@@ -351,9 +351,9 @@ async def _run_live(case: dict[str, Any]) -> RunArtifacts:
         tools=[],
         limits=RunLimits(
             max_iterations=(case.get("expect") or {}).get("max_iterations", 2),
-            max_retries=settings.llm_max_retries,
-            retry_base_delay=settings.llm_retry_base_delay,
-            llm_timeout_seconds=settings.llm_timeout_seconds,
+            max_retries=settings.llm.max_retries,
+            retry_base_delay=settings.llm.retry_base_delay,
+            llm_timeout_seconds=settings.llm.timeout_seconds,
         ),
     ):
         events.append(event)
@@ -412,7 +412,7 @@ def _evaluate(case: dict[str, Any], art: RunArtifacts) -> list[str]:
             f"mcp_call_count expected {expect['mcp_call_count']}, got {art.mcp.call_count}"
         )
 
-    result_text = "\n".join(e.content for e in art.tool_results)
+    result_text = "\n".join(event.content for event in art.tool_results)
     _check_contains(
         result_text,
         list(expect.get("tool_result_contains", [])),
@@ -432,7 +432,7 @@ def _evaluate(case: dict[str, Any], art: RunArtifacts) -> list[str]:
                 f"tool_result_error_count expected {expect['tool_result_error_count']}, got {errors}"
             )
     if "max_tool_result_chars" in expect:
-        longest = max((len(e.content) for e in art.tool_results), default=0)
+        longest = max((len(event.content) for event in art.tool_results), default=0)
         if longest > expect["max_tool_result_chars"]:
             failures.append(
                 f"max_tool_result_chars expected <= {expect['max_tool_result_chars']}, got {longest}"

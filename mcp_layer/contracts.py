@@ -66,7 +66,7 @@ class ToolSnapshot:
     def names(self) -> frozenset[str]:
         return frozenset(tool.name for tool in self.tools)
 
-    def selected(self, names: Iterable[str]) -> "ToolSnapshot":
+    def select(self, names: Iterable[str]) -> "ToolSnapshot":
         selected = set(names)
         return ToolSnapshot(tuple(tool for tool in self.tools if tool.name in selected))
 

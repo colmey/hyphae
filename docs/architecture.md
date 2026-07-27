@@ -105,7 +105,8 @@ finish. `TurnMetadata` carries the resolved model and optional sanitized
   subdirs like `tests/` can still import `config`, `main`,
   etc.), and runs Python.
 - **LLM providers implemented: Gemini and OpenAI-compatible**, each isolated in
-  `llm/providers/`. The OpenAI client (`llm/providers/openai.py`) speaks the
+  `llm/providers/`. The OpenAI-compatible client
+  (`llm/providers/openai_compatible/`) speaks the
   OpenAI wire protocol, so it also drives any OpenAI-compatible server (local
   Ollama/vLLM) via `base_url`. The **default runtime** is a local
   OpenAI-compatible Qwen (see `config/models.yaml`). Anthropic key fields exist
@@ -151,10 +152,11 @@ hyphae/
 │   ├── __init__.py
 │   ├── schemas.py            # Provider-agnostic Message / *Block / AssistantMessage
 │   ├── client.py             # LLMClient ABC + _PROVIDERS registry + factories (SDK-free)
+│   ├── tool_prompt_protocol.py  # JSON tool protocol for prose-only models
 │   └── providers/            # One file per provider; imported lazily by the registry
 │       ├── __init__.py
 │       ├── gemini.py         # GeminiLLMClient (owns the google-genai SDK)
-│       └── openai.py         # OpenAILLMClient (OpenAI + OpenAI-compatible, e.g. Ollama)
+│       └── openai_compatible/  # OpenAICompatibleLLMClient (OpenAI wire protocol)
 │
 ├── agent/
 │   ├── __init__.py
@@ -169,7 +171,7 @@ hyphae/
 │
 ├── orchestrator/             # Routes requests to model + tool subset + system
 │   ├── __init__.py
-│   ├── schemas.py            # OrchestrationResult / decision/preferences values
+│   ├── schemas.py            # OrchestrationProposal / decision/preferences values
 │   ├── registry.py           # LLMRegistry (lazy LLMClient cache per model_id)
 │   └── orchestrator.py       # Orchestrator.decide() -> OrchestrationDecision
 │
@@ -260,8 +262,9 @@ speaks:
 - **`AssistantMessage(content, stop_reason, model, reasoning, raw_stop_reason)`**
   with helpers `text_blocks()`, `tool_uses()`, `to_message()`. `stop_reason`
   uses the canonical vocabulary below; `raw_stop_reason` retains the optional
-  provider-native value for diagnostics. `reasoning` is trace-only data: it is
-  neither replayed through `to_message()` nor rendered by an HTTP route.
+  provider-native value for diagnostics. `reasoning` is never replayed through
+  `to_message()`; the `/v1` streaming adapter may render its sanitized text
+  through `delta.reasoning_content`.
 - **`ModelProfile`**: the immutable, provider-agnostic capability profile
   resolved from one `models.yaml` row. It carries
   `supports_native_tools`, `thinking`, and optional sampling
@@ -286,8 +289,8 @@ speaks:
    call.
 4. **`reasoning`** on `AssistantMessage`. Provider-extracted thinking lives as
    a sibling of content, not inside `provider_metadata`. The loop may emit it
-   as a `ReasoningEvent` for tracing, but session replay and all HTTP responses
-   stay clean.
+   as a `ReasoningEvent`; session replay stays clean, while `/v1` streaming can
+   expose the sanitized text through its configured reasoning channel.
 
 **Canonical provider outcomes:**
 
@@ -327,17 +330,20 @@ SDK-specific** (importing it never pulls in a provider SDK):
   `complete()` is the canonical completed-turn API and remains the path for
   structured-output calls such as orchestration. `stream()` is an optional
   token-streaming call mode for ordinary agent turns; the ABC fallback calls
-  `complete()`, emits each final text block as a coarse `TextDelta`, then
-  emits `StreamEnd(AssistantMessage)`. Native streaming providers override it.
+  `complete()`, emits optional reasoning as a coarse `ReasoningDelta`, then
+  emits each final text block as a coarse `TextDelta` and finishes with
+  `StreamEnd(AssistantMessage)`. Native streaming providers override it.
   Streaming rejects a non-`None` `response_schema` explicitly before making a
   provider call.
   `aclose()` is an idempotent no-op for resource-free clients. Provider
   implementations override it to release their long-lived async SDK client.
 - **`StreamChunk`** is provider-agnostic and SDK-free:
-  `TextDelta(text=...)` carries visible assistant text during generation, and
-  `StreamEnd(message=...)` carries the fully assembled `AssistantMessage`.
-  The agent loop streams deltas to callers immediately, then reuses the normal
-  assistant/session/usage/reasoning/tool tail once `StreamEnd` arrives.
+  `TextDelta(text=...)` carries visible assistant text,
+  `ReasoningDelta(text=...)` carries sanitized optional reasoning without
+  provider wrapper syntax, and `StreamEnd(message=...)` carries the fully
+  assembled `AssistantMessage`. Provider adapters own all vendor fields and
+  tag parsing. The agent loop streams deltas to callers immediately, then
+  reuses the normal assistant/session/usage/tool tail once `StreamEnd` arrives.
 - **`_PROVIDERS`** — the single source of truth mapping a provider name onto a
   builder. Each builder imports its provider module *lazily* (inside the
   function), so the ABC can be imported without dragging in any SDK, and each
@@ -346,17 +352,17 @@ SDK-specific** (importing it never pulls in a provider SDK):
 - **`supported_providers()`** exposes the registry's keys; config validators
   (`ModelEntry.provider`) key off it so no other place enumerates providers.
 - **`build_llm_client(settings)`** factory dispatches on
-  `settings.llm_provider`. Used by `main.py` to build the legacy/default
+  `settings.llm.provider`. Used by `main.py` to build the legacy/default
   client at startup.
 - **`build_llm_client_from_entry(entry, settings)`** is the multi-model
   variant. Takes a `ModelEntry` (from `models.yaml`), resolves its
   `ModelProfile`, and pulls the API key by `entry.provider` (not by
-  `settings.llm_provider`), so one process can hold clients for multiple
+  `settings.llm.provider`), so one process can hold clients for multiple
   providers simultaneously. Used by `LLMRegistry`. If the profile declares
   `supports_native_tools: false`, this factory wraps the provider client in
   `PromptedToolLLMClient`; omitted or `true` profiles are not wrapped.
 
-`llm/prompted_tools.py` — the prompted-tool dialect adapter for weak/prose
+`llm/tool_prompt_protocol.py` — the prompted-tool dialect adapter for weak/prose
 models:
 
 - Renders the already-filtered tool list into compact system-prompt text:
@@ -412,7 +418,7 @@ and `none` profiles log once that the knob is inert.
   subset of OpenAPI 3 — it does **not** accept `additionalProperties`.
   Pydantic emits that field when a model has `ConfigDict(extra="forbid")`.
   Schemas you pass as `response_schema` must therefore avoid `extra="forbid"`
-  (see `OrchestrationResult` for the reference pattern: lenient at the
+  (see `OrchestrationProposal` for the reference pattern: lenient at the
   parse boundary, then sanitized in code).
 - **Reasoning extraction is conservative**: Gemini returns `reasoning=None`
   unless the SDK exposes thought content in a form the provider can identify
@@ -432,15 +438,16 @@ terminal map:
 | `FINISH_REASON_UNSPECIFIED`, `LANGUAGE`, `OTHER`, `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, `NO_IMAGE`, `IMAGE_OTHER`, missing, or unknown | `provider_error` |
 | No candidates | `empty` |
 
-**OpenAI-compatible specifics** (isolated in `llm/providers/openai.py`):
+**OpenAI-compatible specifics** (isolated in `llm/providers/openai_compatible/`):
 
 - Per-model sampling from `ModelProfile` is copied into the chat-completions
   request when present.
 - For `thinking: hint-param`, `thinking_level` is passed as
-  `reasoning_effort`. For `thinking: think-tags`, a leading
-  `<think>...</think>` block is split into `AssistantMessage.reasoning` and
-  removed from visible content. For `thinking: none`, the knob is logged as
-  inert once and omitted from the request.
+  `reasoning_effort`. Structured compatible fields (`reasoning_content`,
+  `reasoning`, or `thinking`) and leading `<think>...</think>` content are
+  normalized inside the provider into wrapper-free reasoning values and
+  removed from visible content. For `thinking: none`, the request knob is
+  logged as inert once and omitted.
 - Malformed tool-call argument JSON is surfaced as `ToolUseBlock.parse_error`
   instead of disappearing into an empty argument object.
 - Missing OpenAI tool IDs are minted once as `call_<uuid>` when the complete
@@ -488,7 +495,7 @@ applies this terminal map:
   lands. The harness keeps no durable copy (LibreChat re-feeds context),
   so the ABC is retained purely as that future seam.
 - `InMemorySessionStore` is **bounded**: it evicts on idle TTL
-  (`SESSION_TTL_SECONDS`) and on a max-size cap (`SESSION_MAX_COUNT`,
+  (`SESSION_TTL_SECONDS`) and on a max-size cap (`SESSION_CAPACITY`,
   oldest-updated first) so it can't grow without limit under concurrent
   load. Eviction is lazy (swept on `create()`), not a background task.
   Active/in-flight sessions stay "young" because `save()` bumps
@@ -517,7 +524,7 @@ discriminators for JSON serialization at the API boundary:
 
 | Event                          | Fields                                       | Emitted when                              |
 |--------------------------------|----------------------------------------------|-------------------------------------------|
-| `ReasoningEvent`               | `text`                                       | Provider extracted trace-only reasoning from a model response |
+| `ReasoningEvent`               | `text`                                       | Provider extracted sanitized reasoning from a model response |
 | `TextEvent`                    | `text`                                       | Model produced a text block               |
 | `ToolCallEvent`                | `id, name, input`                            | Model decided to call a tool (pre-call)   |
 | `ToolResultEvent`              | `id, name, content, is_error, latency_ms`    | Tool call completed (`latency_ms` = `call_tool` duration; `None` if stall-skipped) |
@@ -603,8 +610,9 @@ Per-iteration algorithm:
    (`estimate_usage_tokens`, chars/4 heuristic over the outgoing view +
    system + response) so the token cap works against local servers that
    report zero usage. Never double-counted.
-5. If the response carries `reasoning`, yield a `ReasoningEvent` for tracing.
-   Reasoning is not appended to session content or rendered over HTTP.
+5. Stream sanitized reasoning as `ReasoningEvent` values when the provider
+   supplies it. Reasoning is not appended to session content; `/v1` may render
+   it through `delta.reasoning_content`.
 6. Yield a `TextEvent` for each non-empty text block.
 7. Collect tool calls first; if none were requested, finish with the explicit
    canonical provider outcome or the applicable run-limit reason.
@@ -634,7 +642,7 @@ never a silent truncation:
 
 | Guard | Settings field | Checked | `done_reason` |
 |---|---|---|---|
-| Token budget | `max_run_tokens` | Before each iteration and immediately after each reported `Usage.total_tokens` update | `budget_exceeded` |
+| Token budget | `max_run_tokens` | Before each iteration and immediately after each reported `CompletionUsage.total_tokens` update | `budget_exceeded` |
 | Wall clock | `max_run_seconds` | Starts after the session claim; covers routing, retries, generation, tool calls, and backoff | `deadline_exceeded` |
 | No-progress abort | `abort_after_consecutive_tool_failures` | After each tool result, against the consecutive-failure counter | `no_progress` |
 
@@ -643,7 +651,7 @@ established pattern for new safety knobs (e.g. `trace_enabled`) — installing
 the harness doesn't change behavior until an operator opts in.
 
 **Token cap and zero-usage providers:** when a provider reports absent or
-all-zero `Usage` (common on local OpenAI-compatible servers), the loop fills
+all-zero `CompletionUsage` (common on local OpenAI-compatible servers), the loop fills
 in a local estimate from the outgoing messages + system prompt + response
 (`agent/context.py: estimate_usage_tokens`, chars/4 heuristic), so
 `max_run_tokens` still trips. Non-zero provider usage is authoritative and
@@ -745,7 +753,7 @@ class ModelEntry(BaseModel):
 class ModelsConfig(BaseModel):
     models: dict[str, ModelEntry]
 
-class OrchestrationResult(BaseModel):
+class OrchestrationProposal(BaseModel):
     selected_model_id: str
     selected_tools: list[str]              # namespaced tool names
     generated_system_prompt: str
@@ -753,12 +761,12 @@ class OrchestrationResult(BaseModel):
 
 @dataclass
 class OrchestrationDecision:
-    result: OrchestrationResult
+    result: OrchestrationProposal
     fallback_used: bool = False
     fallback_reason: str | None = None
 ```
 
-`OrchestrationResult` is the LLM's structured output. `OrchestrationDecision`
+`OrchestrationProposal` is the LLM's structured output. `OrchestrationDecision`
 adds fallback metadata for in-process callers.
 
 **`orchestrator/config.py`** — `load_models_config(path)` and
@@ -789,9 +797,9 @@ adds fallback metadata for in-process callers.
    TOOLS block + optional PREFERRED TOOLS and CONVERSATION SO FAR
    block (see *Context-aware routing* below) + USER MESSAGE.
 2. Calls the orchestrator's own LLM client with a `GenerationRequest` carrying
-   `response_schema=OrchestrationResult`. Tools are **not** exposed —
+   `response_schema=OrchestrationProposal`. Tools are **not** exposed —
    the orchestrator must decide, not act.
-3. Parses the JSON response into `OrchestrationResult`. Strips any
+3. Parses the JSON response into `OrchestrationProposal`. Strips any
    stray markdown fences defensively. `thinking_level` is coerced
    leniently (a stray/unknown value clamps to `"medium"`) so one odd
    field can't sink an otherwise-valid decision.
@@ -817,7 +825,7 @@ validation error) is caught and replaced with a safe fallback:
 
 ```python
 OrchestrationDecision(
-    result=OrchestrationResult(
+    result=OrchestrationProposal(
         selected_model_id=registry.default_id(),
         selected_tools=[all available tool names],
         generated_system_prompt="You are a helpful assistant. Use the available tools when relevant.",
@@ -1044,7 +1052,7 @@ resolve a problem we hit; don't change them without understanding why.
     system messages provide the per-call override. `ToolPreferences` remains
     only on the intentional direct `Orchestrator.decide()` seam; route and
     runner contracts do not carry it.
-22. **`OrchestrationResult` is lenient (no `extra="forbid"`).** Gemini's
+22. **`OrchestrationProposal` is lenient (no `extra="forbid"`).** Gemini's
     `response_schema` dialect doesn't accept `additionalProperties: false`,
     which Pydantic emits when a model is strict. We sanitize the result
     in code instead. This is the reference pattern for any Pydantic

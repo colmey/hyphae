@@ -33,7 +33,7 @@ If the provider is already registered in `llm/client.py`'s `_PROVIDERS`
    models:
      # ... existing entries ...
      qwen3-local:
-       provider: openai
+       provider: openai_compatible
        model: qwen3.6-35b-a3b
        description: >
          Local Qwen3.6 model; strong for agentic coding and deliberate
@@ -85,27 +85,30 @@ in `Settings`, set `LLM_PROVIDER=...` as the legacy default, and/or add
 
 ### Connecting a local Ollama (OpenAI-compatible) model
 
-The `openai` provider (`llm/providers/openai.py`) speaks the OpenAI wire
-protocol, so it also drives any OpenAI-compatible server — including a local
-Ollama instance — by pointing it at an alternate endpoint:
+The `openai_compatible` provider (`llm/providers/openai_compatible/`) speaks
+the OpenAI wire protocol, so it drives real OpenAI and compatible servers —
+including a local Ollama instance — by pointing it at the desired endpoint.
+The old `openai` provider ID remains a deprecated configuration alias.
 
-1. Export `OPENAI_BASE_URL=http://localhost:11434/v1` and `OPENAI_API_KEY=<key>`
+1. Export `OPENAI_COMPAT_BASE_URL=http://localhost:11434/v1` and `OPENAI_API_KEY=<key>`
    (Ollama may ignore the key, but the SDK requires a non-empty value).
-2. Add a `models.yaml` entry with `provider: openai` and a `model` matching an
+2. Add a `models.yaml` entry with `provider: openai_compatible` and a `model` matching an
    `ollama list` tag, e.g. `qwen3.6-35b-a3b`.
 3. Restart the harness.
 
 Caveats: tool calling only works with tools-capable models. Reasoning models
 (e.g. Qwen3) may inline a leading `<think>...</think>` block; declare
 `thinking: think-tags` so the OpenAI-compatible client removes it from visible
-answer text and records it as trace-only reasoning. Endpoints that accept a
-request hint such as `reasoning_effort` should use `thinking: hint-param`.
+answer text. The inner reasoning is not replayed into model history; `/v1`
+streaming can display it through `delta.reasoning_content`. Endpoints that
+accept a request hint such as `reasoning_effort` should use
+`thinking: hint-param`.
 See [configuration.md](configuration.md) for the env vars and profile fields.
 
 `/v1/chat/completions` with `stream:true` uses the provider's native token
 stream when the selected OpenAI-compatible model client supports it. The
 existing `LLM_TIMEOUT_SECONDS` caps each incremental provider read for this
-path, so the idle timeout resets after every chunk while `MAX_RUN_SECONDS`
+path, so the idle timeout resets after every chunk while `RUN_MAX_SECONDS`
 continues shrinking absolutely. After the first text delta is emitted, the
 harness does not retry or resume a broken stream. A later provider failure is
 surfaced as partial text followed by an error event and
@@ -135,7 +138,7 @@ with `supports_native_tools: false`:
 ```yaml
 models:
   weak-local-prompted:
-    provider: openai
+    provider: openai_compatible
     model: small-local-model
     description: >
       Local prose-only model with no reliable native tool calling. Use for
@@ -194,8 +197,9 @@ It is the same kind of thin renderer as the `/v1` SSE branch — it opens the
 shared turn and serializes each event with the bytes-safe
 `event_record` mapping (the same one the tracer uses; never `dataclasses.asdict`,
 since `provider_metadata` can hold bytes — events don't carry it, but reusing the
-explicit mapping keeps one source of truth). Provider reasoning is intentionally
-filtered from all HTTP surfaces. No orchestration or loop logic is duplicated;
+explicit mapping keeps one source of truth). Provider reasoning is filtered
+from the native routes; `/v1` can expose sanitized reasoning through its
+optional `reasoning_content` channel. No orchestration or loop logic is duplicated;
 the sanitized orchestration decision is emitted first when routing is active.
 
 This is the design seam for *any* live-update consumer: a custom dashboard, a
@@ -246,13 +250,13 @@ Drop a new file in `agent/` (e.g. `planner_loop.py`) with its own
 `run_*` function. The route layer picks which loop to use (via a
 request field, a config setting, etc.). No changes to existing code.
 The orchestrator's decision can include a hint about which loop to use
-if you add that field to `OrchestrationResult`.
+if you add that field to `OrchestrationProposal`.
 
 ### Observability (run tracing)
 
 The loop already keeps an append-only event log as its run state; tracing
 **serializes that log to disk** rather than running a parallel logging
-subsystem. Set `TRACE_ENABLED=true` (and optionally `TRACE_PATH`, default
+subsystem. Set `TRACE_ENABLED=true` (and optionally `TRACE_JSONL_PATH`, default
 `traces/harness.jsonl`) and every run appends one JSON record per event:
 
 ```jsonl
@@ -303,7 +307,7 @@ writer base64-encodes any stray `bytes` (e.g. a provider's `thought_signature`)
 so the serializer can't crash. **Sensitivity:** the trace captures full prompt
 text, tool args, and tool results by default — appropriate for the single-
 operator dev harness, but treat the file as sensitive. The harness endpoints can
-now be gated with `HARNESS_API_KEY`, but the trace **file** is not covered by
+now be gated with `HYPHAE_API_KEY`, but the trace **file** is not covered by
 that — guard it at the filesystem level. A metadata-only mode (names + usage +
 latency, bodies omitted) is the natural next toggle once the harness is
 multi-tenant.
@@ -471,14 +475,14 @@ deployment requirements need active probes.
 | Every response has `orchestration.fallback_used: true` | Orchestrator's LLM call is failing. Check the `orchestration fallback in effect:` warning logs for the underlying provider error. |
 | 400 from `/chat`                              | Empty request body. `/chat` is plain text — send the prompt as the body. |
 | 400 from Gemini after first tool result       | `provider_metadata` round-trip broken somewhere              |
-| `done_reason: "max_iterations"`               | Run hit the iteration cap. The loop forces a best-effort answer on the last step (tools withheld + wrap-up prompt), so `response` is populated — but recurring `max_iterations` means the model is churning; review the prompt or raise `MAX_LOOP_ITERATIONS`. Repeated-identical tool calls are already short-circuited (stall detection); look for genuinely distinct-but-unproductive calls. |
+| `done_reason: "max_iterations"`               | Run hit the iteration cap. The loop forces a best-effort answer on the last step (tools withheld + wrap-up prompt), so `response` is populated — but recurring `max_iterations` means the model is churning; review the prompt or raise `LOOP_MAX_ITERATIONS`. Repeated-identical tool calls are already short-circuited (stall detection); look for genuinely distinct-but-unproductive calls. |
 | `done_reason: "llm_error"`                    | API call failed (after retries); see logs for the underlying exception |
 | `done_reason: "truncated"`                    | Model hit `LLM_MAX_TOKENS` mid-answer; `response` is clipped. Raise `LLM_MAX_TOKENS` or the model's per-entry `max_tokens`. |
 | `tool_result` with `is_error` "timed out"     | A tool exceeded `TOOL_TIMEOUT_SECONDS`. The MCP server is slow/hung; the loop continues and the model sees the error. |
 | `tool_result` with `is_error` "invalid arguments for field ..." | The model's tool call failed `jsonschema` validation against the tool's `input_schema`; `mcp.call_tool` was never reached. The model sees the offending field + expected shape and can retry. |
-| `done_reason: "budget_exceeded"`              | Run hit `MAX_RUN_TOKENS`. Disabled (`0`) by default; raise or disable the cap. Works even when the provider reports all-zero usage — the local estimator fills in. |
+| `done_reason: "budget_exceeded"`              | Run hit `RUN_MAX_TOKENS`. Disabled (`0`) by default; raise or disable the cap. Works even when the provider reports all-zero usage — the local estimator fills in. |
 | `context over budget under 'naive'` warnings  | The estimated request exceeds `context_window − max output − margin`. Set the model's `context_window` accurately in `models.yaml`, and consider `CONTEXT_STRATEGY=compaction` for long tool-heavy runs. |
-| `done_reason: "deadline_exceeded"`            | Run hit `MAX_RUN_SECONDS`, including while an LLM/tool call or retry sleep was in flight. Disabled (`0`) by default; raise or disable the cap, or investigate why the run is slow (retries, a slow provider). |
+| `done_reason: "deadline_exceeded"`            | Run hit `RUN_MAX_SECONDS`, including while an LLM/tool call or retry sleep was in flight. Disabled (`0`) by default; raise or disable the cap, or investigate why the run is slow (retries, a slow provider). |
 | `done_reason: "no_progress"`                  | `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` consecutive tool-call failures (including validation failures). Disabled (`0`) by default. Review the failing tool/args in the logs — the consecutive-failure nudge already tried to steer the model before the abort fired. |
 | 404 on `/chat`                                | The `X-Session-Id` header names a session that doesn't exist (e.g. evicted by TTL/max-size, or after a restart wiped state)|
 | 409 on `/chat`                                | The `X-Session-Id` session already has a request in flight; `SessionGuard` rejects the concurrent turn. Retry after the first completes. |
@@ -572,13 +576,13 @@ extension path described above.
 - **Sessions are in-memory by design.** Conversation history dies with the
   process — intentional, since LibreChat holds the durable context and
   re-feeds it. The store is bounded (`SESSION_TTL_SECONDS`,
-  `SESSION_MAX_COUNT`) so it can't grow without limit. Durable persistence
+  `SESSION_CAPACITY`) so it can't grow without limit. Durable persistence
   is the `SessionStore` ABC's job if the use case ever changes.
 - **Streaming is available on `/v1`.** `POST /v1/chat/completions` with
   `stream: true` returns an SSE stream of `chat.completion.chunk` frames. The
   native `/chat` endpoint is still non-streaming; use `/chat/stream` for the
   native live activity feed with tool and reasoning events.
-- **Optional API-key auth.** Set `HARNESS_API_KEY` to require a key on `/chat`,
+- **Optional API-key auth.** Set `HYPHAE_API_KEY` to require a key on `/chat`,
   `/chat/stream`, and `/v1/*` (via `X-API-Key` or `Authorization: Bearer`);
   `/health` stays open. Unset = auth off (dev default), the pre-existing wide-open
   behavior. Enforced at the route layer only — see
@@ -594,10 +598,11 @@ extension path described above.
   supported thinking hints are consumed by providers; setting
   `supports_native_tools` to `false` selects the prompted-tool wrapper for
   downstream agent turns.
-- **Reasoning is trace/debug data, not answer text.** OpenAI-compatible
+- **Reasoning is separate from answer text.** OpenAI-compatible
   leading `<think>...</think>` content is separated from visible text and
-  emitted as a `reasoning` trace/event record. No HTTP route renders it, and
-  session replay excludes it.
+  emitted as sanitized reasoning deltas/events. Session replay excludes it;
+  `/v1` streaming can render it through `reasoning_content`, while native
+  routes continue to omit it.
   Gemini reasoning remains `None` unless the SDK exposes thought content in a
   detectable form; Gemini `thought_signature` still round-trips through
   `provider_metadata`.
@@ -606,7 +611,7 @@ extension path described above.
   `mcp.call_tool()` by `TOOL_TIMEOUT_SECONDS`, so a single hung call can't
   stall a request indefinitely. A timeout cancels the in-flight call and
   abandons it; for the LLM that feeds the retry path, for a tool it becomes an
-  `is_error` result. `MAX_RUN_TOKENS` and `MAX_RUN_SECONDS` (both `0`/disabled
+  `is_error` result. `RUN_MAX_TOKENS` and `RUN_MAX_SECONDS` (both `0`/disabled
   by default) additionally bound *total* run cost/duration. The wall-clock
   budget begins after the session claim and covers routing, retries, generation,
   tool calls, and backoff. See [configuration.md](configuration.md) and the *Bounded &

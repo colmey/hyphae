@@ -12,7 +12,7 @@ absolute deadline, run ID, immutable tool snapshot, and resolved model identity.
 
 ## Authentication
 
-Optional and off by default. When `HARNESS_API_KEY` is **unset**, every route is
+Optional and off by default. When `HYPHAE_API_KEY` is **unset**, every route is
 open (single-operator dev default). When it is **set**, the chat routes —
 `POST /chat`, `POST /chat/stream`, `POST /v1/chat/completions`, `GET /v1/models` —
 require the key and return **401** without it. `GET /health` is **always open**.
@@ -28,7 +28,7 @@ The comparison is constant-time and stays at the route layer.
 ```bash
 # with a key configured:
 curl -sS -X POST http://localhost:8000/chat \
-  -H "Authorization: Bearer $HARNESS_API_KEY" --data 'what is 2+2?'
+  -H "Authorization: Bearer $HYPHAE_API_KEY" --data 'what is 2+2?'
 ```
 
 ## `GET /health`
@@ -36,7 +36,7 @@ curl -sS -X POST http://localhost:8000/chat \
 ```json
 {
   "status": "degraded",
-  "provider": "openai",
+  "provider": "openai_compatible",
   "model": "qwen",
   "connected_servers": ["my-toolbox"],
   "tool_count": 8,
@@ -180,8 +180,9 @@ data: {"type":"done","reason":"end_turn","iterations":2,"total_tokens":1875}
 Event `type`s: `orchestration`, `text`, `tool_call`, `tool_result`, `usage`,
 `done`, `error`. When orchestration is active its sanitized decision is the
 first event and carries the same resolved model ID recorded in turn metadata.
-Provider reasoning/chain-of-thought is trace-only and is not rendered by this
-route, `/chat`, or `/v1`. A failure mid-turn is delivered as a terminal error
+Provider reasoning is not rendered by this native route or `/chat`; the
+OpenAI-compatible streaming route may expose sanitized reasoning through its
+optional reasoning channel. A failure mid-turn is delivered as a terminal error
 frame because the SSE response is already open. Provider policy and failure
 outcomes remain explicit in `done.reason`: `content_filter`, `refusal`,
 `provider_error`, and `incomplete_stream` are never collapsed to `end_turn`.
@@ -272,20 +273,33 @@ data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":
 data: [DONE]
 ```
 
-Reasoning events are skipped by the OpenAI-compatible stream mapper; opaque
-provider metadata such as Gemini thought signatures is also absent. Only visible
-assistant text becomes `delta.content`. Every chunk's `model` is the
-registry ID that actually executed. The turn is resolved before the initial
-assistant-role chunk is emitted. If the model fails after the stream opens, any
-prior content remains visible, followed by one OpenAI error envelope and
-`[DONE]`; no successful `finish_reason` frame is emitted. Policy stops and
-refusals instead end normally with `finish_reason: "content_filter"`.
+Provider `ReasoningEvent` values are emitted as the optional
+`delta.reasoning_content` extension when reasoning mode is enabled. Raw
+`<think>` wrappers and opaque provider metadata such as Gemini thought
+signatures remain absent. Only visible assistant text becomes `delta.content`. Every chunk's
+`model` is the registry ID that actually executed. The turn is resolved before
+the initial assistant-role chunk is emitted. If the model fails after the
+stream opens, any prior content remains visible, followed by one OpenAI error
+envelope and `[DONE]`; no successful `finish_reason` frame is emitted. Policy
+stops and refusals instead end normally with `finish_reason: "content_filter"`.
 
-**Tool-call visibility (stream only).** OpenAI clients render only
-`delta.content`, so completed server-side tool calls are folded into collapsible
-`<details>` blocks. The adapter strips those blocks from replayed assistant
-history so they never re-enter agent context. Non-stream JSON carries plain text
-only.
+**Reasoning and tool activity (stream only).** By default, sanitized model
+reasoning plus server-side `ToolCallEvent` and `ToolResultEvent` progress is
+rendered in the optional `delta.reasoning_content` extension. Calls appear when
+they start and results when they complete. Arguments and results are emitted
+in fenced code blocks so URLs and markup remain literal, and are bounded by
+`OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS`. Hyphae remains the sole tool executor
+and never emits standard `delta.tool_calls`.
+
+Clients that ignore unknown delta fields still reconstruct the complete answer
+from `delta.content`. Set `OPENAI_COMPAT_TOOL_ACTIVITY_MODE=hidden` for strict
+clients that reject or mishandle `reasoning_content`. This is a deployment
+policy, not a per-request option. Non-stream JSON carries plain answer text only.
+
+The adapter still removes old Hyphae-marked `<details>` tool blocks from
+replayed assistant history for conversations saved by earlier versions. It
+does not remove arbitrary model- or client-authored `<details>` or `<think>`
+markup.
 
 ```json
 {"error": {"message": "'messages' must be a non-empty array", "type": "invalid_request_error", "param": null, "code": null}}
@@ -332,7 +346,7 @@ the single default model when orchestration is off.
 In OpenWebUI, add an **OpenAI API** connection:
 
 - **API Base URL:** `http://<host>:8000/v1`
-- **API Key:** if `HARNESS_API_KEY` is set, use that value (OpenWebUI sends it as
+- **API Key:** if `HYPHAE_API_KEY` is set, use that value (OpenWebUI sends it as
   `Authorization: Bearer`); if auth is off, any non-empty placeholder works.
 
 OpenWebUI calls `GET /v1/models` to populate its model dropdown and

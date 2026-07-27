@@ -53,7 +53,7 @@ from llm.schemas import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,11 +141,11 @@ def estimate_tools_tokens(tools: list[dict] | None) -> int:
 
 
 def estimate_usage_tokens(
-    usage: Usage | None,
+    usage: CompletionUsage | None,
     messages: list[Message] | None = None,
     system: str | None = None,
     response: AssistantMessage | None = None,
-) -> Usage:
+) -> CompletionUsage:
     """Return provider usage when it reported anything, else a local estimate.
 
     Local/OpenAI-compatible servers often report all-zero usage, which left
@@ -160,7 +160,7 @@ def estimate_usage_tokens(
     ):
         if usage.total_tokens:
             return usage
-        return Usage(
+        return CompletionUsage(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             total_tokens=usage.input_tokens + usage.output_tokens,
@@ -175,7 +175,7 @@ def estimate_usage_tokens(
         if response is not None and response.content
         else 0
     )
-    return Usage(
+    return CompletionUsage(
         input_tokens=input_est,
         output_tokens=output_est,
         total_tokens=input_est + output_est,
@@ -437,7 +437,9 @@ def _flatten_for_summary(messages: list[Message]) -> str:
                 lines.append(f"assistant called tool {block.name} with {args}")
             elif isinstance(block, ToolResultBlock):
                 marker = " (error)" if block.is_error else ""
-                lines.append(f"tool result{marker} from {block.name}: {block.content}")
+                lines.append(
+                    f"tool result{marker} from {block.name}: {block.content}"
+                )
     return "\n".join(lines)
 
 

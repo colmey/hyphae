@@ -26,7 +26,7 @@ from llm.schemas import (
     StreamEnd,
     TextBlock,
     TextDelta,
-    Usage,
+    CompletionUsage,
 )
 
 pytestmark = pytest.mark.anyio
@@ -38,12 +38,12 @@ class TransientFailure(RuntimeError):
 
 def _answer(text: str = "ok") -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text)], stop_reason="end_turn", usage=Usage(total_tokens=1)
+        content=[TextBlock(text)], stop_reason="end_turn", usage=CompletionUsage(total_tokens=1)
     )
 
 
 def _empty() -> AssistantMessage:
-    return AssistantMessage(content=[], stop_reason="empty", usage=Usage())
+    return AssistantMessage(content=[], stop_reason="empty", usage=CompletionUsage())
 
 
 def _done(events: list[Any]) -> str:
@@ -325,18 +325,18 @@ class FakeClockContext:
         self.now = 0.0
         self.deadline = remaining
 
-    def remaining(self) -> float:
+    def remaining_seconds(self) -> float:
         return self.deadline - self.now
 
     def deadline_exceeded(self) -> bool:
-        return self.remaining() <= 0
+        return self.remaining_seconds() <= 0
 
 
 async def test_backoff_cap_clamp_and_deadline_during_sleep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(loop_module.random, "uniform", lambda low, high: 0.25)
-    assert loop_module._backoff_delay(2.0, 10) == 30.25
+    assert loop_module._backoff_delay_seconds(2.0, 10) == 30.25
 
     clock = FakeClockContext(0.2)
     slept: list[float] = []

@@ -34,7 +34,7 @@ from agent import (
 )
 from agent.loop import _FAILURE_NUDGE, _FINAL_ITERATION_WRAPUP, _STALL_MESSAGE
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
+from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from mcp_layer.client import ToolCallResult
 
 logging.basicConfig(
@@ -85,7 +85,7 @@ class FakeMCP:
 
 def text_response(text: str) -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text=text)], stop_reason="end_turn", usage=Usage()
+        content=[TextBlock(text=text)], stop_reason="end_turn", usage=CompletionUsage()
     )
 
 
@@ -96,9 +96,15 @@ def tool_call_response(
     call_id: str = "call_1",
 ) -> AssistantMessage:
     return AssistantMessage(
-        content=[ToolUseBlock(id=call_id, name=name, input=args or {})],
+        content=[
+            ToolUseBlock(
+                id=call_id,
+                name=name,
+                input=args or {},
+            )
+        ],
         stop_reason="tool_use",
-        usage=Usage(),
+        usage=CompletionUsage(),
     )
 
 
@@ -205,7 +211,10 @@ async def test_distinct_arguments_are_not_blocked() -> None:
     events = await collect("distinct args not blocked", llm, mcp, max_iterations=10)
     trs = tool_results(events)
     check(mcp.call_count == 2, f"both distinct calls executed (got {mcp.call_count})")
-    check(not any(_STALL_MESSAGE in t.content for t in trs), "no stall message emitted")
+    check(
+        not any(_STALL_MESSAGE in event.content for event in trs),
+        "no stall message emitted",
+    )
 
 
 async def test_consecutive_failure_nudge() -> None:

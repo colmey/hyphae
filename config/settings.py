@@ -7,9 +7,9 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Anchor defaults to real locations so the server boots from any CWD:
@@ -18,12 +18,52 @@ _CONFIG_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _CONFIG_DIR.parent
 
 
+class LLMSettings(BaseModel):
+    """Provider-neutral defaults and execution controls for LLM calls."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider: str = Field(default="gemini", description="LLM provider name")
+    model_name: str = Field(
+        default="gemini-3-flash-preview",
+        description="Provider-native model name to use",
+        validation_alias=AliasChoices("model_name", "model"),
+    )
+    max_tokens: int = Field(default=4096)
+    timeout_seconds: float = Field(
+        default=120,
+        description="Per-attempt cap on a single llm.complete() call. <=0 disables.",
+    )
+    max_retries: int = Field(
+        default=3,
+        description=(
+            "Retries (not attempts) on transient LLM failures / empty candidates. "
+            "0 disables retrying."
+        ),
+    )
+    retry_base_delay: float = Field(
+        default=0.5,
+        description="Base seconds for jittered exponential backoff between LLM retries.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _prefer_canonical_model_name(cls, values: Any) -> Any:
+        """Discard the deprecated `model` alias when both env names are set."""
+        if isinstance(values, Mapping) and "model_name" in values and "model" in values:
+            values = dict(values)
+            values.pop("model")
+        return values
+
+
 class Settings(BaseSettings):
     """Environment-driven settings; use `get_settings()` in application code."""
 
     model_config = SettingsConfigDict(
         env_file=_REPO_ROOT / ".env",
         env_file_encoding="utf-8",
+        env_nested_delimiter="_",
+        env_nested_max_split=1,
         extra="ignore",
     )
 
@@ -37,37 +77,51 @@ class Settings(BaseSettings):
     def _capture_interpolation_values(cls, values: Any, handler: Any) -> Self:
         settings = handler(values)
         if isinstance(values, Mapping):
-            settings._interpolation_values = {
-                str(name).upper(): str(value)
-                for name, value in values.items()
-                if value is not None
-            }
+            interpolation_values: dict[str, str] = {}
+            for name, value in values.items():
+                if name == "llm":
+                    nested_values = (
+                        value
+                        if isinstance(value, Mapping)
+                        else value.model_dump()
+                        if isinstance(value, LLMSettings)
+                        else {}
+                    )
+                    interpolation_values.update(
+                        {
+                            f"LLM_{nested_name}".upper(): str(nested_value)
+                            for nested_name, nested_value in nested_values.items()
+                            if nested_value is not None
+                        }
+                    )
+                elif value is not None:
+                    interpolation_values[str(name).upper()] = str(value)
+            settings._interpolation_values = interpolation_values
         return settings
 
     # Only the selected provider's key must be set.
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
     gemini_api_key: str = Field(default="", description="Gemini API key")
     openai_api_key: str = Field(default="", description="OpenAI API key")
-    openai_base_url: str = Field(
+    openai_compat_base_url: str = Field(
         default="",
         description=(
             "Base URL for the OpenAI-compatible endpoint (e.g. a local Ollama "
             "server's /v1). Empty targets real OpenAI."
         ),
+        validation_alias=AliasChoices(
+            "openai_compat_base_url",
+            "openai_provider_base_url",
+            "openai_base_url",
+        ),
     )
 
     # Provider validation lives in llm.client to keep this layer import-light.
-    llm_provider: str = Field(default="gemini", description="LLM provider name")
-    llm_model: str = Field(
-        default="gemini-3-flash-preview", description="Model name to use"
-    )
-    llm_max_tokens: int = Field(default=4096)
+    # The one-split environment mapping preserves LLM_PROVIDER,
+    # LLM_MODEL_NAME, LLM_MAX_TOKENS, and the LLM execution-control names.
+    llm: LLMSettings = Field(default_factory=LLMSettings)
 
-    # Agent-loop timeouts/retries; <= 0 disables the respective bound.
-    llm_timeout_seconds: float = Field(
-        default=120,
-        description="Per-attempt cap on a single llm.complete() call. <=0 disables.",
-    )
+    # Non-LLM execution timeouts; <= 0 disables the respective bound.
     tool_timeout_seconds: float = Field(
         default=60,
         description="Cap on a single mcp.call_tool() call. <=0 disables.",
@@ -79,17 +133,6 @@ class Settings(BaseSettings):
             "transport, initialization, and tool discovery. <=0 disables."
         ),
     )
-    llm_max_retries: int = Field(
-        default=3,
-        description=(
-            "Retries (not attempts) on transient LLM failures / empty candidates. "
-            "0 disables retrying."
-        ),
-    )
-    llm_retry_base_delay: float = Field(
-        default=0.5,
-        description="Base seconds for jittered exponential backoff between LLM retries.",
-    )
     tool_result_max_chars: int = Field(
         default=20000,
         description=(
@@ -97,17 +140,33 @@ class Settings(BaseSettings):
             "session history. <=0 disables clipping."
         ),
     )
-    openai_tool_block_max_chars: int = Field(
+    openai_compat_tool_activity_max_chars: int = Field(
         default=2000,
         description=(
-            "Truncation for one rendered tool-result <details> block on the "
-            "/v1 streaming surface. Presentation-only; distinct from "
+            "Presentation threshold for displayed arguments or results in one "
+            "/v1 tool-activity payload. Distinct from "
             "tool_result_max_chars, which clips session history."
+        ),
+        validation_alias=AliasChoices(
+            "openai_compat_tool_activity_max_chars",
+            "openai_tool_block_max_chars",
+        ),
+    )
+    openai_compat_tool_activity_mode: Literal["reasoning", "hidden"] = Field(
+        default="reasoning",
+        description=(
+            "OpenAI-compatible streaming activity: 'reasoning' emits sanitized "
+            "model reasoning and tool progress through delta.reasoning_content; "
+            "'hidden' omits that optional channel."
+        ),
+        validation_alias=AliasChoices(
+            "openai_compat_tool_activity_mode",
+            "openai_compat_tool_activity",
         ),
     )
 
     # Optional run-level stop conditions. Each exits with an explicit done_reason.
-    max_run_tokens: int = Field(
+    run_max_tokens: int = Field(
         default=0,
         description=(
             "Hard ceiling on cumulative total_tokens for one run; ends the run "
@@ -116,8 +175,9 @@ class Settings(BaseSettings):
             "(agent/context.py) fills in, so the cap works against local "
             "OpenAI-compatible servers too."
         ),
+        validation_alias=AliasChoices("run_max_tokens", "max_run_tokens"),
     )
-    max_run_seconds: float = Field(
+    run_max_seconds: float = Field(
         default=0,
         description=(
             "Hard wall-clock ceiling on one accepted turn, measured immediately "
@@ -125,6 +185,7 @@ class Settings(BaseSettings):
             "calls, and backoff; ends the run deadline_exceeded with the partial "
             "answer. <=0 disables."
         ),
+        validation_alias=AliasChoices("run_max_seconds", "max_run_seconds"),
     )
     abort_after_consecutive_tool_failures: int = Field(
         default=0,
@@ -172,18 +233,25 @@ class Settings(BaseSettings):
         description="Output cap for the one-call compaction summarizer.",
     )
 
-    # Harness paths. All runtime config lives under config/ by convention.
+    # Application paths. All runtime config lives under config/ by convention.
     mcp_config_path: Path = Field(default=_CONFIG_DIR / "mcp_config.yaml")
-    max_loop_iterations: int = Field(default=10)
+    loop_max_iterations: int = Field(
+        default=10,
+        validation_alias=AliasChoices(
+            "loop_max_iterations",
+            "max_loop_iterations",
+        ),
+    )
     log_level: str = Field(default="INFO")
 
     # Optional API-key gate for /chat, /chat/stream, and /v1/*; /health stays open.
-    harness_api_key: str = Field(
+    hyphae_api_key: str = Field(
         default="",
         description=(
             "Optional API key protecting /chat, /chat/stream, /v1/*. Empty "
             "disables auth; set enforces it. Accepts X-API-Key or Bearer."
         ),
+        validation_alias=AliasChoices("hyphae_api_key", "harness_api_key"),
     )
 
     # JSONL traces include full prompts/tool data; protect the file accordingly.
@@ -191,9 +259,10 @@ class Settings(BaseSettings):
         default=False,
         description="Persist the loop's event stream as a JSONL trace.",
     )
-    trace_path: Path = Field(
+    trace_jsonl_path: Path = Field(
         default=Path("traces/harness.jsonl"),
         description="Append-only JSONL trace file. Parent dirs are created.",
+        validation_alias=AliasChoices("trace_jsonl_path", "trace_path"),
     )
 
     # In-memory session bounds; <= 0 disables the respective dimension.
@@ -201,9 +270,10 @@ class Settings(BaseSettings):
         default=3600,
         description="Idle TTL (seconds) before an in-memory session is evicted.",
     )
-    session_max_count: int = Field(
+    session_capacity: int = Field(
         default=1000,
         description="Max sessions retained in memory; oldest-updated evicted first.",
+        validation_alias=AliasChoices("session_capacity", "session_max_count"),
     )
 
     # When off, routes use the default LLM and full tool inventory directly.
@@ -247,17 +317,22 @@ class Settings(BaseSettings):
         typed = {
             "anthropic": self.anthropic_api_key,
             "gemini": self.gemini_api_key,
+            "openai_compatible": self.openai_api_key,
             "openai": self.openai_api_key,
         }
+        expected_env = {
+            "anthropic": "ANTHROPIC_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+            "openai_compatible": "OPENAI_API_KEY",
+            "openai": "OPENAI_API_KEY",
+        }.get(provider, f"{provider.upper()}_API_KEY")
         key = typed.get(provider)
         if key is None:
-            key = self.interpolation_environment().get(
-                f"{provider.upper()}_API_KEY", ""
-            )
+            key = self.interpolation_environment().get(expected_env, "")
         if not key:
             raise RuntimeError(
                 f"no API key found in env for provider {provider!r} "
-                f"(expected {provider.upper()}_API_KEY). Set it in the process "
+                f"(expected {expected_env}). Set it in the process "
                 "environment or project .env file."
             )
         return key

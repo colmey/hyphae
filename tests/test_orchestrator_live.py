@@ -9,7 +9,7 @@ Verifies:
      valid thinking_level.
 
 Plus two offline checks (no LLM call):
-  - OrchestrationResult.thinking_level parsing: default, passthrough,
+  - OrchestrationProposal.thinking_level parsing: default, passthrough,
     casing, and lenient coercion of an unknown value.
   - _build_prompt folds a passed history into a CONVERSATION SO FAR block
     and omits it on a first turn.
@@ -36,7 +36,7 @@ from llm.schemas import Message, TextBlock
 from mcp_layer import MCPManager, ToolSnapshot
 from config import load_models_config, load_orchestrator_prompt
 from orchestrator import LLMRegistry, Orchestrator, ToolPreferences
-from orchestrator.schemas import OrchestrationResult
+from orchestrator.schemas import OrchestrationProposal
 
 
 logging.basicConfig(
@@ -49,38 +49,38 @@ pytestmark = [pytest.mark.live, pytest.mark.model, pytest.mark.mcp, pytest.mark.
 def _check_thinking_level_parsing() -> None:
     """Offline: thinking_level parses, defaults, and coerces leniently.
 
-    No LLM call -- just exercises the OrchestrationResult schema so a bad
+    No LLM call -- just exercises the OrchestrationProposal schema so a bad
     thinking_level value can never sink an otherwise-valid decision.
     """
     print("=" * 72)
-    print("Offline: OrchestrationResult.thinking_level parsing")
+    print("Offline: OrchestrationProposal.thinking_level parsing")
     print("=" * 72)
     base = {"selected_model_id": "x", "generated_system_prompt": "y"}
 
-    assert OrchestrationResult.model_validate(base).thinking_level == "medium", (
+    assert OrchestrationProposal.model_validate(base).thinking_level == "medium", (
         "omitted thinking_level should default to 'medium'"
     )
     assert (
-        OrchestrationResult.model_validate(
+        OrchestrationProposal.model_validate(
             {**base, "thinking_level": "high"}
         ).thinking_level
         == "high"
     ), "valid thinking_level should pass through"
     assert (
-        OrchestrationResult.model_validate(
+        OrchestrationProposal.model_validate(
             {**base, "thinking_level": "HIGH"}
         ).thinking_level
         == "high"
     ), "casing should be normalized"
     assert (
-        OrchestrationResult.model_validate(
+        OrchestrationProposal.model_validate(
             {**base, "thinking_level": "extreme"}
         ).thinking_level
         == "medium"
     ), "unknown thinking_level should coerce to 'medium'"
     # Extra hallucinated fields are ignored (lenient schema), not rejected.
     assert (
-        OrchestrationResult.model_validate(
+        OrchestrationProposal.model_validate(
             {**base, "thinking_level": "low", "made_up": 1}
         ).thinking_level
         == "low"

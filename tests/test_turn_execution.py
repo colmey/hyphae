@@ -41,12 +41,12 @@ from llm.schemas import (
     StreamChunk,
     TextBlock,
     TextDelta,
-    Usage,
+    CompletionUsage,
 )
 from mcp_layer import ToolCallResult
 from orchestrator import Orchestrator
 from orchestrator.contracts import ModelRegistry, RoutingService
-from orchestrator.schemas import OrchestrationDecision, OrchestrationResult
+from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
 from tests._app_support import wired_app
 
 pytestmark = pytest.mark.anyio
@@ -95,7 +95,7 @@ class AnswerLLM(LLMClient):
             content=[TextBlock(self.answer)],
             stop_reason="end_turn",
             model="executing-provider-model",
-            usage=Usage(total_tokens=2),
+            usage=CompletionUsage(total_tokens=2),
         )
 
 
@@ -120,7 +120,7 @@ class RoutingLLM(LLMClient):
         return AssistantMessage(
             content=[TextBlock(json.dumps(self.payload))],
             stop_reason="end_turn",
-            usage=Usage(total_tokens=1),
+            usage=CompletionUsage(total_tokens=1),
         )
 
 
@@ -157,7 +157,7 @@ class FakeOrchestrator:
     ):
         self.calls += 1
         return OrchestrationDecision(
-            result=OrchestrationResult(
+            result=OrchestrationProposal(
                 selected_model_id="agent",
                 selected_tools=[tool.name for tool in tools.tools],
                 generated_system_prompt="routed system",
@@ -198,9 +198,13 @@ class RecordingTracer(Tracer):
 def _settings(**overrides: Any) -> Settings:
     values = {
         "orchestration_enabled": True,
-        "llm_model": "unorchestrated-executing-model",
-        "llm_max_retries": 0,
+        "llm": {
+            "model_name": "unorchestrated-executing-model",
+            "max_retries": 0,
+        },
     }
+    llm_overrides = overrides.pop("llm", {})
+    values["llm"].update(llm_overrides)
     values.update(overrides)
     return Settings(_env_file=None, **values)
 
@@ -226,7 +230,7 @@ def _runner(
     else:
         routing = UnorchestratedRouting(
             llm=agent,
-            model_id=resolved_settings.llm_model,
+            model_id=resolved_settings.llm.model_name,
         )
     return TurnRunner(
         routing=routing,
@@ -272,7 +276,7 @@ async def test_distinct_sessions_execute_concurrently() -> None:
             return AssistantMessage(
                 content=[TextBlock("done")],
                 stop_reason="end_turn",
-                usage=Usage(total_tokens=1),
+                usage=CompletionUsage(total_tokens=1),
             )
 
     agent = BarrierLLM()
@@ -307,7 +311,7 @@ async def test_routing_timeout_falls_back_while_turn_budget_remains() -> None:
     runner = _runner(
         agent=agent,
         mcp=mcp,
-        settings=_settings(llm_timeout_seconds=0.02, max_run_seconds=0.3),
+        settings=_settings(llm={"timeout_seconds": 0.02}, run_max_seconds=0.3),
         orchestrator=orchestrator,
         registry=registry,
     )
@@ -340,7 +344,7 @@ async def test_routing_consumes_absolute_deadline_and_skips_agent_model() -> Non
     runner = _runner(
         agent=agent,
         mcp=CountingMCP(),
-        settings=_settings(llm_timeout_seconds=1, max_run_seconds=0.025),
+        settings=_settings(llm={"timeout_seconds": 1}, run_max_seconds=0.025),
         orchestrator=orchestrator,
         registry=registry,
     )
@@ -465,7 +469,7 @@ async def test_active_task_cancellation_releases_guard() -> None:
     runner = _runner(
         agent=agent,
         mcp=CountingMCP(),
-        settings=_settings(llm_timeout_seconds=0, max_run_seconds=0),
+        settings=_settings(llm={"timeout_seconds": 0}, run_max_seconds=0),
         orchestrator=orchestrator,
         registry=RegistryStub(agent),
     )

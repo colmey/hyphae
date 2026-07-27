@@ -77,7 +77,7 @@ class _ManagedClient(Protocol):
 
     async def connect(self) -> None: ...
 
-    async def close(self) -> None: ...
+    async def aclose(self) -> None: ...
 
     async def call_tool(
         self, tool_name: str, arguments: dict[str, Any]
@@ -185,7 +185,7 @@ class MCPManager:
     ) -> None:
         await self._run_record_tasks(
             records,
-            operation=lambda record: record.client.close(),
+            operation=lambda record: record.client.aclose(),
             context=context,
         )
 
@@ -194,9 +194,9 @@ class MCPManager:
             if record.shutdown_cleanup_complete:
                 return
             try:
-                await record.client.close()
+                await record.client.aclose()
             finally:
-                # Reaching close() counts as this shutdown's one best-effort
+                # Reaching aclose() counts as this shutdown's one best-effort
                 # attempt; MCPClient clears its owned session in its own finally.
                 # Cancellation before lock acquisition never reaches this block,
                 # so a later shutdown can still make the first real attempt.

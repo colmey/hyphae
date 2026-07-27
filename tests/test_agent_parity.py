@@ -34,7 +34,7 @@ from agent import (
 from agent.loop import _FAILURE_NUDGE, _STALL_MESSAGE
 from llm.client import GenerationRequest, LLMClient
 from llm.providers.gemini import GeminiLLMClient
-from llm.providers.openai import OpenAILLMClient
+from llm.providers.openai_compatible import OpenAICompatibleLLMClient
 from llm.schemas import (
     AssistantMessage,
     Message,
@@ -44,7 +44,7 @@ from llm.schemas import (
     TextDelta,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 from mcp_layer.client import ToolCallResult
 
@@ -56,7 +56,7 @@ _UNKNOWN_OUTCOME = (
     "was in flight"
 )
 _NOT_STARTED = "tool call was not executed because execution was cancelled"
-_DEFAULT_USAGE = Usage(
+_DEFAULT_USAGE = CompletionUsage(
     input_tokens=2,
     output_tokens=3,
     total_tokens=5,
@@ -315,7 +315,7 @@ def _answer(
     text: str = "answer",
     *,
     stop_reason: str | None = "end_turn",
-    usage: Usage | None = None,
+    usage: CompletionUsage | None = None,
     raw_stop_reason: str | None = None,
 ) -> AssistantMessage:
     return AssistantMessage(
@@ -335,7 +335,7 @@ def _tool_call(
     arguments: dict[str, Any],
     *,
     parse_error: str | None = None,
-    usage: Usage | None = None,
+    usage: CompletionUsage | None = None,
 ) -> AssistantMessage:
     return AssistantMessage(
         content=[
@@ -426,7 +426,10 @@ def _assert_terminal(events: list[Event], reason: str) -> DoneEvent:
 
 def test_public_imports_and_run_agent_calling_contract() -> None:
     assert run_agent.__module__ == "agent.loop"
-    assert OpenAILLMClient.__name__ == "OpenAILLMClient"
+    assert (
+        OpenAICompatibleLLMClient.__name__
+        == "OpenAICompatibleLLMClient"
+    )
     assert GeminiLLMClient.__name__ == "GeminiLLMClient"
 
     parameters = inspect.signature(run_agent).parameters
@@ -718,7 +721,7 @@ async def test_max_iterations_and_token_budget_terminals() -> None:
 
     budget_response = _answer(
         "partial",
-        usage=Usage(input_tokens=20, output_tokens=20, total_tokens=40),
+        usage=CompletionUsage(input_tokens=20, output_tokens=20, total_tokens=40),
     )
     budget_case = ParityCase(
         name="budget",
@@ -883,7 +886,11 @@ async def test_tool_dispatch_guards_never_reach_mcp(guard: str) -> None:
     assert mcp.calls == []
     assert normalize_messages(session.messages)[2] == _message(
         "tool",
-        _tool_result_block(response.tool_uses()[0].id, result.content, is_error=True),
+        _tool_result_block(
+            response.tool_uses()[0].id,
+            result.content,
+            is_error=True,
+        ),
     )
     if guard == "invalid-json":
         assert "not valid JSON" in result.content
@@ -909,7 +916,15 @@ async def test_exact_repeat_is_not_dispatched_twice() -> None:
 
     _assert_terminal(events, "end_turn")
     results = [event for event in events if isinstance(event, ToolResultEvent)]
-    assert [(result.id, result.content, result.is_error, result.latency_ms) for result in results] == [
+    assert [
+        (
+            result.id,
+            result.content,
+            result.is_error,
+            result.latency_ms,
+        )
+        for result in results
+    ] == [
         ("call-first", "first result", False, results[0].latency_ms),
         ("call-repeat", _STALL_MESSAGE, True, None),
     ]
@@ -1060,7 +1075,11 @@ async def test_third_error_nudge_and_threshold_abort_are_exact() -> None:
     abort_results = [
         event for event in abort_events if isinstance(event, ToolResultEvent)
     ]
-    assert [result.id for result in abort_results] == ["abort-1", "abort-2", "abort-3"]
+    assert [result.id for result in abort_results] == [
+        "abort-1",
+        "abort-2",
+        "abort-3",
+    ]
     assert abort_results[-1].content == (
         "tool call skipped because the run aborted after consecutive tool failures"
     )

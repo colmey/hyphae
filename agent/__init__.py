@@ -20,7 +20,7 @@ from .events import (
 )
 from .loop import run_agent
 from .runtime import RunContext, RunLimits
-from .tool_policy import PolicyDecision, ToolPolicy, Verdict, build_tool_policy
+from .tool_policy import PolicyDecision, ToolPolicy, PolicyVerdict, build_tool_policy
 from .session import (
     InMemorySessionStore,
     Session,
@@ -54,7 +54,7 @@ __all__ = [
     "ToolResultEvent",
     "Tracer",
     "UsageEvent",
-    "Verdict",
+    "PolicyVerdict",
     "build_tool_policy",
     "build_tracer",
     "run_agent",

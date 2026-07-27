@@ -12,6 +12,7 @@ from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     Message,
+    ReasoningDelta,
     StreamChunk,
     StreamEnd,
     TextBlock,
@@ -69,6 +70,7 @@ async def test_default_stream_forwards_same_request_and_message() -> None:
     message = AssistantMessage(
         content=[TextBlock("first"), TextBlock("second")],
         stop_reason="end_turn",
+        reasoning="considering",
     )
     client = _CompleteOnlyClient(message)
     request = GenerationRequest(messages=[Message.user("hello")])
@@ -77,7 +79,11 @@ async def test_default_stream_forwards_same_request_and_message() -> None:
 
     assert client.requests == [request]
     assert client.requests[0] is request
-    assert chunks[:2] == [TextDelta("first"), TextDelta("second")]
+    assert chunks[:3] == [
+        ReasoningDelta("considering"),
+        TextDelta("first"),
+        TextDelta("second"),
+    ]
     assert isinstance(chunks[-1], StreamEnd)
     assert chunks[-1].message is message
 

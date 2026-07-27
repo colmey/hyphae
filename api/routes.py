@@ -24,7 +24,7 @@ from orchestrator import LLMRegistry
 from .dependencies import (
     get_mcp,
     get_registry,
-    get_settings_obj,
+    get_app_settings,
     get_store,
     get_turn_runner,
     require_api_key,
@@ -60,7 +60,7 @@ async def _session_from_header(request: Request, store: SessionStore):
 @router.get("/health", response_model=HealthResponse)
 async def health(
     mcp: MCPManager = Depends(get_mcp),
-    settings=Depends(get_settings_obj),
+    settings=Depends(get_app_settings),
     registry: Optional[LLMRegistry] = Depends(get_registry),
 ) -> HealthResponse:
     server_statuses = mcp.status_snapshot()
@@ -70,8 +70,8 @@ async def health(
             if all(status.state is MCPServerState.HEALTHY for status in server_statuses)
             else "degraded"
         ),
-        provider=settings.llm_provider,
-        model=settings.llm_model,
+        provider=settings.llm.provider,
+        model=settings.llm.model_name,
         connected_servers=mcp.connected_servers,
         tool_count=len(mcp.list_tools()),
         mcp_servers=[

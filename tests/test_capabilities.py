@@ -5,7 +5,7 @@ It exercises the intended Phase 5 interfaces:
   1. ModelEntry defaults resolve to a default ModelProfile.
   2. Bad capability profile config fails loudly with model id + field.
   3. OpenAI sampling and reasoning_effort reach the request payload.
-  4. OpenAI <think> routing produces trace-only reasoning.
+  4. OpenAI <think> routing produces sanitized, non-replayed reasoning.
   5. Malformed tool-call JSON becomes a model-facing is_error result via run_agent.
 """
 
@@ -25,7 +25,8 @@ from agent.events import ReasoningEvent, ToolResultEvent
 from agent.loop import run_agent
 from agent.session import InMemorySessionStore
 from agent.tracing import event_record
-from llm.providers.openai import OpenAILLMClient
+from llm.providers.openai_compatible import OpenAICompatibleLLMClient
+from llm.providers.openai_compatible.codec import response_to_message
 from llm.schemas import AssistantMessage, Message, ModelProfile, TextBlock, ToolUseBlock
 from config import ModelsConfig
 from llm.client import GenerationRequest, profile_from_entry
@@ -98,7 +99,9 @@ class CaptureCreate:
         return self.response
 
 
-def install_capture(client: OpenAILLMClient, response: Any) -> CaptureCreate:
+def install_capture(
+    client: OpenAICompatibleLLMClient, response: Any
+) -> CaptureCreate:
     capture = CaptureCreate(response)
     client._client = SimpleNamespace(  # type: ignore[attr-defined]
         chat=SimpleNamespace(completions=SimpleNamespace(create=capture))
@@ -128,7 +131,7 @@ def test_bad_profile_errors() -> None:
     unknown = {
         "models": {
             "bad-openai": {
-                "provider": "openai",
+                "provider": "openai_compatible",
                 "model": "phase5",
                 "description": "bad unknown field",
                 "surprise": True,
@@ -149,7 +152,7 @@ def test_bad_profile_errors() -> None:
     too_hot = {
         "models": {
             "bad-openai": {
-                "provider": "openai",
+                "provider": "openai_compatible",
                 "model": "phase5",
                 "description": "bad sampling",
                 "sampling": {"temperature": 9},
@@ -176,7 +179,7 @@ async def test_openai_request_capture() -> None:
         top_p=0.91,
         top_k=42,
     )
-    client = OpenAILLMClient(
+    client = OpenAICompatibleLLMClient(
         api_key="test-key",
         model="phase5-model",
         default_max_tokens=123,
@@ -209,7 +212,7 @@ async def test_openai_request_capture() -> None:
     )
 
     none_profile = ModelProfile(thinking="none")
-    inert = OpenAILLMClient(
+    inert = OpenAICompatibleLLMClient(
         api_key="test-key",
         model="no-thinking-model",
         default_max_tokens=123,
@@ -230,18 +233,12 @@ async def test_openai_request_capture() -> None:
 
 async def test_reasoning_routing() -> None:
     print("--- think-tag reasoning routing and trace record ---")
-    client = OpenAILLMClient(
-        api_key="test-key",
-        model="think-tags-model",
-        default_max_tokens=123,
-        base_url="http://127.0.0.1:9/v1",
-        profile=ModelProfile(thinking="think-tags"),
-    )
-    response = client._from_openai_response(
+    response = response_to_message(
         fake_openai_response(
             content="<think>private chain</think>\nvisible answer",
             model="think-tags-model",
-        )
+        ),
+        default_model="think-tags-model",
     )
 
     check(
@@ -284,24 +281,21 @@ async def test_reasoning_routing() -> None:
 
 async def test_malformed_args_error_signal() -> None:
     print("--- malformed JSON parse_error becomes model-facing is_error ---")
-    client = OpenAILLMClient(
-        api_key="test-key",
-        model="bad-json-model",
-        default_max_tokens=123,
-        base_url="http://127.0.0.1:9/v1",
-        profile=ModelProfile.default(),
-    )
-    bad_tool_response = client._from_openai_response(
+    bad_tool_response = response_to_message(
         fake_openai_response(
             content=None,
             finish_reason="tool_calls",
             tool_calls=[fake_tool_call("call_bad", "srv__lookup", '{"query": ')],
             model="bad-json-model",
-        )
+        ),
+        default_model="bad-json-model",
     )
     tool_uses = [b for b in bad_tool_response.content if isinstance(b, ToolUseBlock)]
     check(len(tool_uses) == 1, "malformed OpenAI tool call still becomes ToolUseBlock")
-    check(tool_uses[0].input == {}, "malformed arguments are kept as empty input")
+    check(
+        tool_uses[0].input == {},
+        "malformed arguments are kept as an empty mapping",
+    )
     check(
         bool(tool_uses[0].parse_error), "ToolUseBlock.parse_error records JSON failure"
     )

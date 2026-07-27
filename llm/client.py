@@ -39,6 +39,7 @@ from .schemas import (
     AssistantMessage,
     Message,
     ModelProfile,
+    ReasoningDelta,
     StreamChunk,
     StreamEnd,
     TextBlock,
@@ -52,26 +53,33 @@ class _ProviderConstructionSettings(Protocol):
     """Credentials and endpoint configuration used by provider builders."""
 
     @property
-    def openai_base_url(self) -> str: ...
+    def openai_compat_base_url(self) -> str: ...
 
     def api_key_for_provider(self, provider: str) -> str: ...
+
+
+class _LLMDefaults(Protocol):
+    """Nested LLM defaults used by client factories."""
+
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def model_name(self) -> str: ...
+
+    @property
+    def max_tokens(self) -> int: ...
 
 
 class _DefaultClientSettings(_ProviderConstructionSettings, Protocol):
     """Global defaults used when a model entry omits a value."""
 
     @property
-    def llm_max_tokens(self) -> int: ...
+    def llm(self) -> _LLMDefaults: ...
 
 
 class _UnorchestratedClientSettings(_DefaultClientSettings, Protocol):
     """Selection defaults required by the unorchestrated client factory."""
-
-    @property
-    def llm_provider(self) -> str: ...
-
-    @property
-    def llm_model(self) -> str: ...
 
 
 class _SamplingConfig(Protocol):
@@ -179,13 +187,16 @@ class LLMClient(ABC):
         """Stream one completion turn.
 
         Default implementation for complete-only providers: run `complete()`,
-        emit any text blocks coarsely, then return the assembled message.
+        emit optional reasoning and text blocks coarsely, then return the
+        assembled message.
         Structured-output calls intentionally stay on `complete()` and are
         rejected explicitly here rather than silently losing their schema.
         """
         if request.response_schema is not None:
             raise ValueError("response_schema is not supported for streaming")
         msg = await self.complete(request)
+        if msg.reasoning:
+            yield ReasoningDelta(text=msg.reasoning)
         for block in msg.content:
             if isinstance(block, TextBlock) and block.text:
                 yield TextDelta(text=block.text)
@@ -227,21 +238,21 @@ def _build_gemini(
     )
 
 
-def _build_openai(
+def _build_openai_compatible(
     *,
     spec: _ProviderBuildSpec,
     settings: _ProviderConstructionSettings,
 ) -> LLMClient:
-    from llm.providers.openai import OpenAILLMClient
+    from llm.providers.openai_compatible import OpenAICompatibleLLMClient
 
     # OpenAI-compatible: base_url empty -> real OpenAI; set it (e.g. Ollama's
     # /v1) to target a local/compatible server. The key is required by the SDK
     # even when the server ignores it.
-    return OpenAILLMClient(
-        api_key=settings.api_key_for_provider("openai"),
+    return OpenAICompatibleLLMClient(
+        api_key=settings.api_key_for_provider("openai_compatible"),
         model=spec.model,
         default_max_tokens=spec.max_tokens,
-        base_url=settings.openai_base_url or None,
+        base_url=settings.openai_compat_base_url or None,
         profile=spec.profile,
     )
 
@@ -251,9 +262,9 @@ def _build_openai(
 # providers (config validators key off supported_providers()).
 _PROVIDERS: dict[str, _ProviderBuilder] = {
     "gemini": _build_gemini,
-    # `openai` is OpenAI-compatible: point Settings.openai_base_url at an
-    # alternate /v1 endpoint (e.g. local Ollama) to reuse the same client.
-    "openai": _build_openai,
+    # `openai` remains a deprecated compatibility alias for existing configs.
+    "openai_compatible": _build_openai_compatible,
+    "openai": _build_openai_compatible,
     # "anthropic": _build_anthropic,
 }
 
@@ -287,7 +298,7 @@ def _build_client(
 
 
 def build_llm_client(settings: _UnorchestratedClientSettings) -> LLMClient:
-    """Construct the LLM client matching settings.llm_provider.
+    """Construct the LLM client matching settings.llm.provider.
 
     Takes Settings duck-typed to avoid a circular import with the config layer.
 
@@ -296,10 +307,10 @@ def build_llm_client(settings: _UnorchestratedClientSettings) -> LLMClient:
     ModelEntry rather than the global Settings.
     """
     return _build_client(
-        settings.llm_provider,
+        settings.llm.provider,
         spec=_ProviderBuildSpec(
-            model=settings.llm_model,
-            max_tokens=settings.llm_max_tokens,
+            model=settings.llm.model_name,
+            max_tokens=settings.llm.max_tokens,
         ),
         settings=settings,
     )
@@ -327,7 +338,7 @@ def build_llm_client_from_entry(
     """Construct an LLM client for one ModelEntry from models.yaml.
 
     This is the multi-model variant of build_llm_client. The builder pulls the
-    API key by provider name (not by settings.llm_provider) so that a single
+    API key by provider name (not by settings.llm.provider) so that a single
     process can hold clients for multiple providers simultaneously.
 
     `entry` is duck-typed (must expose `.provider`, `.model`, `.max_tokens`)
@@ -338,13 +349,13 @@ def build_llm_client_from_entry(
         entry.provider,
         spec=_ProviderBuildSpec(
             model=entry.model,
-            max_tokens=entry.max_tokens or settings.llm_max_tokens,
+            max_tokens=entry.max_tokens or settings.llm.max_tokens,
             profile=profile,
         ),
         settings=settings,
     )
     if profile.supports_native_tools is False:
-        from llm.prompted_tools import PromptedToolLLMClient
+        from llm.tool_prompt_protocol import PromptedToolLLMClient
 
         client = PromptedToolLLMClient(client, model=entry.model)
     return client

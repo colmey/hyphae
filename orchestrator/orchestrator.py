@@ -15,7 +15,7 @@ from llm.schemas import Message, Role, TextBlock
 from mcp_layer import ToolSnapshot
 
 from .contracts import ModelRegistry
-from .schemas import OrchestrationDecision, OrchestrationResult, ToolPreferences
+from .schemas import OrchestrationDecision, OrchestrationProposal, ToolPreferences
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class Orchestrator:
             return self._fallback_decision(reason, tools)
 
         try:
-            result = self._parse_result(raw)
+            proposal = self._parse_proposal(raw)
         except (json.JSONDecodeError, ValidationError) as e:
             reason = f"orchestrator output unparseable: {e}"
             decision_log.warning(
@@ -83,8 +83,13 @@ class Orchestrator:
             )
             return self._fallback_decision(reason, tools)
 
-        sanitized = self._sanitize(result, tools, preferences, log=decision_log)
-        return OrchestrationDecision(result=sanitized, fallback_used=False)
+        sanitized_proposal = self._sanitize_proposal(
+            proposal, tools, preferences, log=decision_log
+        )
+        return OrchestrationDecision(
+            result=sanitized_proposal,
+            fallback_used=False,
+        )
 
     def _build_prompt(
         self,
@@ -176,7 +181,7 @@ class Orchestrator:
         request = GenerationRequest(
             messages=[Message.user(prompt)],
             system=self._system_prompt,
-            response_schema=OrchestrationResult,
+            response_schema=OrchestrationProposal,
         )
         response = await llm.complete(request)
 
@@ -186,8 +191,8 @@ class Orchestrator:
                 parts.append(block.text)
         return "".join(parts).strip()
 
-    def _parse_result(self, raw: str) -> OrchestrationResult:
-        """Parse raw text into OrchestrationResult, accepting fenced JSON."""
+    def _parse_proposal(self, raw: str) -> OrchestrationProposal:
+        """Parse raw text into OrchestrationProposal, accepting fenced JSON."""
         if not raw:
             raise json.JSONDecodeError("empty response", raw, 0)
 
@@ -199,35 +204,35 @@ class Orchestrator:
             cleaned = cleaned.rstrip("`").strip()
 
         data = json.loads(cleaned)
-        return OrchestrationResult.model_validate(data)
+        return OrchestrationProposal.model_validate(data)
 
-    def _sanitize(
+    def _sanitize_proposal(
         self,
-        result: OrchestrationResult,
+        proposal: OrchestrationProposal,
         tools: ToolSnapshot,
         preferences: ToolPreferences | None = None,
         *,
         log: logging.Logger | logging.LoggerAdapter = logger,
-    ) -> OrchestrationResult:
+    ) -> OrchestrationProposal:
         """Coerce the orchestrator's decision to known-valid values.
 
         Unknown models fall back to default; unknown tools are dropped. Valid
         preferred tools are unioned in without marking the decision as fallback.
         """
         known_models = set(self._registry.model_ids)
-        if result.selected_model_id not in known_models:
+        if proposal.selected_model_id not in known_models:
             log.warning(
                 "orchestrator picked unknown model_id %r; correcting to %r",
-                result.selected_model_id,
+                proposal.selected_model_id,
                 self._registry.default_id(),
             )
             model_id = self._registry.default_id()
         else:
-            model_id = result.selected_model_id
+            model_id = proposal.selected_model_id
 
         known_tools = tools.names
         valid_tools: list[str] = []
-        for t in result.selected_tools:
+        for t in proposal.selected_tools:
             if t in known_tools:
                 valid_tools.append(t)
             else:
@@ -241,11 +246,11 @@ class Orchestrator:
                 elif t not in valid_tools:
                     valid_tools.append(t)
 
-        return OrchestrationResult(
+        return OrchestrationProposal(
             selected_model_id=model_id,
             selected_tools=valid_tools,
-            generated_system_prompt=result.generated_system_prompt,
-            thinking_level=result.thinking_level,
+            generated_system_prompt=proposal.generated_system_prompt,
+            thinking_level=proposal.thinking_level,
         )
 
     def _fallback_decision(
@@ -253,13 +258,13 @@ class Orchestrator:
     ) -> OrchestrationDecision:
         """Safe default-model/all-tools decision for orchestration failures."""
         all_tools = [tool.name for tool in tools.tools]
-        result = OrchestrationResult(
+        proposal = OrchestrationProposal(
             selected_model_id=self._registry.default_id(),
             selected_tools=all_tools,
             generated_system_prompt=self._fallback_system,
         )
         return OrchestrationDecision(
-            result=result,
+            result=proposal,
             fallback_used=True,
             fallback_reason=reason,
         )

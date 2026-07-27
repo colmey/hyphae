@@ -1,4 +1,4 @@
-"""Hermetic pytest coverage for prompted-tool adapter behavior.
+"""Hermetic pytest coverage for the prompted-tool protocol adapter.
 
 It exercises the prompted-tool renderer/parser,
 the LLMClient wrapper, factory selection, and the drop-in proof through the
@@ -22,7 +22,7 @@ from agent import (
     run_agent,
 )
 from llm.client import GenerationRequest, LLMClient, build_llm_client_from_entry
-from llm.prompted_tools import (
+from llm.tool_prompt_protocol import (
     PromptedToolLLMClient,
     parse_prompted_action,
     render_prompted_tools,
@@ -33,7 +33,7 @@ from llm.schemas import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 from mcp_layer.client import ToolCallResult
 from config import ModelEntry
@@ -55,7 +55,7 @@ def check(cond: bool, msg: str) -> None:
     assert cond, msg
 
 
-def text_response(text: str, *, usage: Usage | None = None) -> AssistantMessage:
+def text_response(text: str, *, usage: CompletionUsage | None = None) -> AssistantMessage:
     return AssistantMessage(
         content=[TextBlock(text=text)],
         stop_reason="end_turn",
@@ -206,7 +206,7 @@ async def test_wrapper_does_not_launder_non_normal_provider_outcomes(
         content=[TextBlock(text=action_text("must-not-run"))],
         stop_reason=stop_reason,
         raw_stop_reason="provider-raw",
-        usage=Usage(total_tokens=3),
+        usage=CompletionUsage(total_tokens=3),
     )
     inner = ScriptedLLM([source])
 
@@ -283,9 +283,9 @@ async def test_repair() -> None:
         [
             text_response(
                 '```json\n{"tool":"srv__lookup","arguments":}\n```',
-                usage=Usage(total_tokens=2),
+                usage=CompletionUsage(total_tokens=2),
             ),
-            text_response(action_text("repaired"), usage=Usage(total_tokens=3)),
+            text_response(action_text("repaired"), usage=CompletionUsage(total_tokens=3)),
         ]
     )
     wrapper = PromptedToolLLMClient(inner)
@@ -357,7 +357,10 @@ async def test_semantic_errors() -> None:
     )
     tool_uses = response.tool_uses()
     check(len(tool_uses) == 1, "bad arguments still return a ToolUseBlock")
-    check(tool_uses[0].input == {}, "bad arguments do not execute with model args")
+    check(
+        tool_uses[0].input == {},
+        "bad arguments do not execute with model arguments",
+    )
     check(tool_uses[0].parse_error is not None, "bad arguments carry parse_error")
 
 
@@ -416,8 +419,8 @@ async def test_factory_selection() -> None:
         return ScriptedLLM([])
 
     class FactorySettings:
-        llm_max_tokens = 111
-        openai_base_url = ""
+        llm = SimpleNamespace(max_tokens=111)
+        openai_compat_base_url = ""
 
         def api_key_for_provider(self, provider: str) -> str:
             raise AssertionError(f"unexpected provider construction: {provider}")
@@ -492,7 +495,7 @@ def test_orchestrator_guardrail(tmp_path: Path) -> None:
         """
 models:
   prompted-control:
-    provider: openai
+    provider: openai_compatible
     model: prompted-control
     description: Prompted-only control model.
     supports_native_tools: false
@@ -506,7 +509,7 @@ models:
         models_config_path=str(models_path),
         orchestrator_prompt_path=str(prompt_path),
         orchestrator_model_id="",
-        llm_max_tokens=128,
+        llm=SimpleNamespace(max_tokens=128),
     )
     registry, orchestrator = _try_build_orchestration(settings)
 

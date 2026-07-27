@@ -10,7 +10,7 @@ Scripted LLM and MCP fakes drive ``run_agent`` without network access.
                              max_run_seconds -> done "deadline_exceeded"
                              before a second LLM call.
   3. Zero usage now trips the token cap via the local estimator (Phase 3):
-                             with max_run_tokens set, an all-zero Usage is
+                             with max_run_tokens set, an all-zero CompletionUsage is
                              estimated from the outgoing messages + response
                              and can reach budget_exceeded; without a cap the
                              estimate changes nothing.
@@ -51,7 +51,7 @@ from llm.schemas import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 from mcp_layer.client import ToolCallResult
 
@@ -126,7 +126,7 @@ class ScriptedMCP:
 
 def text_response(text: str) -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text=text)], stop_reason="end_turn", usage=Usage()
+        content=[TextBlock(text=text)], stop_reason="end_turn", usage=CompletionUsage()
     )
 
 
@@ -135,15 +135,19 @@ def text_and_tool_response(
     args: dict[str, Any],
     *,
     call_id: str = "call_1",
-    usage: Usage | None = None,
+    usage: CompletionUsage | None = None,
 ) -> AssistantMessage:
     return AssistantMessage(
         content=[
             TextBlock(text=text),
-            ToolUseBlock(id=call_id, name="srv__tool", input=args),
+            ToolUseBlock(
+                id=call_id,
+                name="srv__tool",
+                input=args,
+            ),
         ],
         stop_reason="tool_use",
-        usage=usage or Usage(),
+        usage=usage or CompletionUsage(),
     )
 
 
@@ -151,20 +155,30 @@ def tool_call_response(
     args: dict[str, Any], *, call_id: str = "call_1"
 ) -> AssistantMessage:
     return AssistantMessage(
-        content=[ToolUseBlock(id=call_id, name="srv__tool", input=args)],
+        content=[
+            ToolUseBlock(
+                id=call_id,
+                name="srv__tool",
+                input=args,
+            )
+        ],
         stop_reason="tool_use",
-        usage=Usage(),
+        usage=CompletionUsage(),
     )
 
 
 def multi_tool_response(args: list[dict[str, Any]]) -> AssistantMessage:
     return AssistantMessage(
         content=[
-            ToolUseBlock(id=f"call_{i}", name="srv__tool", input=arg)
-            for i, arg in enumerate(args, start=1)
+            ToolUseBlock(
+                id=f"call_{index}",
+                name="srv__tool",
+                input=tool_arguments,
+            )
+            for index, tool_arguments in enumerate(args, start=1)
         ],
         stop_reason="tool_use",
-        usage=Usage(),
+        usage=CompletionUsage(),
     )
 
 
@@ -232,7 +246,7 @@ async def test_token_cap_preserves_partial_text() -> None:
     llm = ScriptedLLM(
         [
             text_and_tool_response(
-                "partial answer", {"q": "x"}, usage=Usage(total_tokens=40)
+                "partial answer", {"q": "x"}, usage=CompletionUsage(total_tokens=40)
             ),
         ]
     )
@@ -263,7 +277,7 @@ async def test_final_answer_crossing_token_cap_reports_budget_exceeded() -> None
             AssistantMessage(
                 content=[TextBlock(text="final partial")],
                 stop_reason="end_turn",
-                usage=Usage(total_tokens=40),
+                usage=CompletionUsage(total_tokens=40),
             ),
         ]
     )

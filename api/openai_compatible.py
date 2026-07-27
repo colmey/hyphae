@@ -10,7 +10,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Literal, Optional
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.exception_handlers import http_exception_handler
@@ -23,6 +23,7 @@ from starlette.responses import Response
 from agent import (
     DoneEvent,
     ErrorEvent,
+    ReasoningEvent,
     Session,
     TextEvent,
     ToolCallEvent,
@@ -30,7 +31,7 @@ from agent import (
 )
 
 from .dependencies import (
-    get_settings_obj,
+    get_app_settings,
     get_turn_runner,
     require_api_key,
 )
@@ -58,7 +59,7 @@ class _ChatCompletionRequest(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedChat:
+class _PreparedChat:
     """Validated OpenAI conversation inputs for one ephemeral turn."""
 
     system_override: str | None
@@ -117,49 +118,76 @@ def _text_of(content: Any) -> str:
     return str(content)
 
 
-# Tool-call presentation for UIs that only render `delta.content`. Rendered
-# blocks are stripped from replayed assistant history on the next request.
+# Legacy tool-call presentation cleanup for conversations saved before tool
+# activity moved out of `delta.content`.
 
-_TOOL_SUMMARY_MARK = "🔧 "
+_LEGACY_TOOL_SUMMARY_MARK = "🔧 "
 
 # Keyed on the marker so model-authored <details> blocks are left alone.
-_TOOL_BLOCK_RE = re.compile(
-    r"\n*<details>\s*<summary>" + _TOOL_SUMMARY_MARK + r".*?</details>\n*",
+_LEGACY_TOOL_BLOCK_RE = re.compile(
+    r"\n*<details>\s*<summary>"
+    + _LEGACY_TOOL_SUMMARY_MARK
+    + r".*?</details>\n*",
     re.DOTALL,
 )
 
 
-def _tool_details(event: ToolResultEvent, args: Any, max_chars: int) -> str:
-    """Render one completed tool call as a self-contained collapsible block.
+def _bounded_activity_body(text: str, max_chars: int) -> str:
+    """Apply the presentation threshold and retain the existing marker."""
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n…[truncated]"
+    return text
 
-    A single delta avoids exposing unbalanced markdown to progressive renderers.
-    """
-    icon = "❌" if event.is_error else "✅"
+
+def _fenced_activity_body(text: str, language: str) -> str:
+    """Fence arbitrary text without allowing its contents to close the block."""
+    longest_run = max(
+        (len(match.group(0)) for match in re.finditer(r"`+", text)),
+        default=0,
+    )
+    fence = "`" * max(3, longest_run + 1)
+    return f"{fence}{language}\n{text}\n{fence}"
+
+
+def _format_tool_call_activity(event: ToolCallEvent, max_chars: int) -> str:
+    """Render one server-owned tool call as deterministic Markdown."""
+    args = json.dumps(
+        event.input,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ": "),
+    )
+    args = _bounded_activity_body(args, max_chars)
+    return (
+        f"🔧 `{event.name}` started\n\n"
+        f"Arguments:\n\n{_fenced_activity_body(args, 'json')}\n\n"
+    )
+
+
+def _format_tool_result_activity(event: ToolResultEvent, max_chars: int) -> str:
+    """Render one server-owned tool result as deterministic Markdown."""
+    if event.is_error:
+        icon = "❌"
+        status = "failed"
+    else:
+        icon = "✅"
+        status = "completed"
     ms = f" · {event.latency_ms:.0f} ms" if event.latency_ms is not None else ""
-    out = [
-        f"\n\n<details>\n<summary>{_TOOL_SUMMARY_MARK}{event.name} {icon}{ms}</summary>\n"
-    ]
-    if args:
-        out.append(
-            f"\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```\n"
-        )
-    result = event.content
-    if len(result) > max_chars:
-        result = result[:max_chars] + "\n…[truncated]"
-    # Defang embedded HTML so tool output cannot close the presentation block.
-    result = result.replace("</details>", "<\u200b/details>")
-    out.append(f"\n```\n{result}\n```\n\n</details>\n\n")
-    return "".join(out)
+    result = _bounded_activity_body(event.content, max_chars)
+    return (
+        f"{icon} `{event.name}` {status}{ms}\n\n"
+        f"Result:\n\n{_fenced_activity_body(result, 'text')}\n\n"
+    )
 
 
-def _strip_tool_blocks(text: str) -> str:
-    """Remove rendered tool-call blocks from assistant text on the inbound path."""
-    return _TOOL_BLOCK_RE.sub("", text)
+def _strip_legacy_tool_blocks(text: str) -> str:
+    """Remove old Hyphae tool blocks from replayed assistant history."""
+    return _LEGACY_TOOL_BLOCK_RE.sub("", text)
 
 
-def _prepare(
+def _prepare_chat_request(
     messages: list[_ChatMessage],
-) -> PreparedChat:
+) -> _PreparedChat:
     """Map OpenAI ``messages[]`` to a validated ephemeral chat value.
 
     The final user message is the active prompt; earlier user/assistant turns
@@ -185,10 +213,15 @@ def _prepare(
     if not prompt:
         raise _InvalidChatRequest("no user message found in 'messages'")
     history = tuple(
-        (role, _strip_tool_blocks(text) if role == "assistant" else text)
+        (
+            role,
+            _strip_legacy_tool_blocks(text)
+            if role == "assistant"
+            else text,
+        )
         for role, text in convo[:-1]
     )
-    return PreparedChat(
+    return _PreparedChat(
         system_override=system_override,
         history=history,
         prompt=prompt,
@@ -257,7 +290,7 @@ def _completion_body(answer: str, model: str, usage, done_reason: str) -> dict:
     }
 
 
-def _chunk(
+def _chat_completion_chunk(
     cid: str, created: int, model: str, delta: dict, finish_reason: str | None
 ) -> dict:
     return {
@@ -269,10 +302,11 @@ def _chunk(
     }
 
 
-async def _stream(
+async def _stream_chat_completion(
     runner: TurnRunner,
     turn: TurnRequest,
-    tool_block_max_chars: int,
+    tool_activity_mode: Literal["reasoning", "hidden"],
+    tool_activity_max_chars: int,
 ) -> AsyncIterator[dict]:
     """Render core events as OpenAI SSE frames.
 
@@ -285,9 +319,8 @@ async def _stream(
     done_reason: str | None = None
     failed = False
     model: str | None = None
-    pending_args: dict[str, Any] = {}  # tool_use_id -> input
 
-    def server_error(message: str) -> dict[str, str]:
+    def server_error_frame(message: str) -> dict[str, str]:
         return {"data": json.dumps(_error_payload(message, err_type="server_error"))}
 
     try:
@@ -295,7 +328,7 @@ async def _stream(
             model = execution.metadata.model_id
             yield {
                 "data": json.dumps(
-                    _chunk(cid, created, model, {"role": "assistant"}, None)
+                    _chat_completion_chunk(cid, created, model, {"role": "assistant"}, None)
                 )
             }
             async for event in execution.events:
@@ -304,45 +337,85 @@ async def _stream(
                 if isinstance(event, TextEvent):
                     yield {
                         "data": json.dumps(
-                            _chunk(cid, created, model, {"content": event.text}, None)
+                            _chat_completion_chunk(cid, created, model, {"content": event.text}, None)
                         )
                     }
+                elif isinstance(event, ReasoningEvent):
+                    if tool_activity_mode == "reasoning" and event.text:
+                        yield {
+                            "data": json.dumps(
+                                _chat_completion_chunk(
+                                    cid,
+                                    created,
+                                    model,
+                                    {"reasoning_content": f"{event.text.rstrip()}\n\n"},
+                                    None,
+                                )
+                            )
+                        }
                 elif isinstance(event, ToolCallEvent):
-                    pending_args[event.id] = event.input
+                    if tool_activity_mode == "reasoning":
+                        yield {
+                            "data": json.dumps(
+                                _chat_completion_chunk(
+                                    cid,
+                                    created,
+                                    model,
+                                    {
+                                        "reasoning_content": (
+                                            _format_tool_call_activity(
+                                                event, tool_activity_max_chars
+                                            )
+                                        )
+                                    },
+                                    None,
+                                )
+                            )
+                        }
                 elif isinstance(event, ToolResultEvent):
-                    block = _tool_details(
-                        event, pending_args.pop(event.id, None), tool_block_max_chars
-                    )
-                    yield {
-                        "data": json.dumps(
-                            _chunk(cid, created, model, {"content": block}, None)
-                        )
-                    }
+                    if tool_activity_mode == "reasoning":
+                        yield {
+                            "data": json.dumps(
+                                _chat_completion_chunk(
+                                    cid,
+                                    created,
+                                    model,
+                                    {
+                                        "reasoning_content": (
+                                            _format_tool_result_activity(
+                                                event, tool_activity_max_chars
+                                            )
+                                        )
+                                    },
+                                    None,
+                                )
+                            )
+                        }
                 elif isinstance(event, ErrorEvent):
                     failed = True
-                    yield server_error(event.message)
+                    yield server_error_frame(event.message)
                 elif isinstance(event, DoneEvent):
                     done_reason = event.reason
                     try:
                         _finish_reason(done_reason)
                     except ValueError:
                         failed = True
-                        yield server_error(_terminal_error_message(done_reason))
+                        yield server_error_frame(_terminal_error_message(done_reason))
     except Exception as e:  # noqa: BLE001 -- the stream is already open; surface, don't crash.
         logger.exception("error during /v1 stream")
         if not failed:
             failed = True
-            yield server_error(str(e) or "error during completion stream")
+            yield server_error_frame(str(e) or "error during completion stream")
 
     if not failed:
         if done_reason is None:
             failed = True
-            yield server_error("completion stream ended without a terminal event")
+            yield server_error_frame("completion stream ended without a terminal event")
         else:
             assert model is not None
             yield {
                 "data": json.dumps(
-                    _chunk(cid, created, model, {}, _finish_reason(done_reason))
+                    _chat_completion_chunk(cid, created, model, {}, _finish_reason(done_reason))
                 )
             }
     yield {"data": "[DONE]"}
@@ -351,7 +424,7 @@ async def _stream(
 @router.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_completions(
     request: Request,
-    settings=Depends(get_settings_obj),
+    settings=Depends(get_app_settings),
     runner: TurnRunner = Depends(get_turn_runner),
 ):
     try:
@@ -373,7 +446,7 @@ async def chat_completions(
         return _http_error_response(exc)
 
     try:
-        prepared = _prepare(req.messages)
+        prepared = _prepare_chat_request(req.messages)
     except _InvalidChatRequest as exc:
         return _error_response(str(exc))
 
@@ -397,10 +470,11 @@ async def chat_completions(
 
     if req.stream:
         return EventSourceResponse(
-            _stream(
+            _stream_chat_completion(
                 runner,
                 turn,
-                settings.openai_tool_block_max_chars,
+                settings.openai_compat_tool_activity_mode,
+                settings.openai_compat_tool_activity_max_chars,
             )
         )
 

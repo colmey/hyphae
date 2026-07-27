@@ -95,7 +95,9 @@ async def run_scenario(
             print(f"  [text]         {preview}")
         elif isinstance(event, ToolCallEvent):
             tool_calls += 1
-            print(f"  [tool_call]    {event.name} id={event.id}")
+            print(
+                f"  [tool_call]    {event.name} id={event.id}"
+            )
             print(f"                 args={event.input}")
         elif isinstance(event, ToolResultEvent):
             tool_results += 1
@@ -103,7 +105,10 @@ async def run_scenario(
             if len(preview) > 100:
                 preview = preview[:97] + "..."
             marker = "ERR" if event.is_error else "ok "
-            print(f"  [tool_result]  [{marker}] id={event.id} -> {preview}")
+            print(
+                f"  [tool_result]  [{marker}] "
+                f"id={event.id} -> {preview}"
+            )
         elif isinstance(event, ErrorEvent):
             errors += 1
             print(f"  [error]        {event.message}")
@@ -127,7 +132,9 @@ async def run_scenario(
 async def test_configured_agent_scenarios() -> None:
     reset_settings()
     settings = get_settings()
-    print(f"using provider={settings.llm_provider} model={settings.llm_model}")
+    print(
+        f"using provider={settings.llm.provider} model={settings.llm.model_name}"
+    )
     print()
 
     llm = build_llm_client(settings)

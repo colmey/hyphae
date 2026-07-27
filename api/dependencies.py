@@ -44,7 +44,7 @@ async def get_guard(request: Request) -> SessionGuard:
     return request.app.state.guard
 
 
-async def get_settings_obj(request: Request):
+async def get_app_settings(request: Request):
     return request.app.state.settings
 
 
@@ -90,12 +90,12 @@ def _presented_api_key(request: Request) -> Optional[str]:
 async def require_api_key(request: Request) -> None:
     """Route dependency enforcing the optional API key.
 
-    No-op when `harness_api_key` is unset (single-operator dev default). When set,
+    No-op when `hyphae_api_key` is unset (single-operator dev default). When set,
     rejects any request without a matching key (constant-time compare) with 401.
     Applied only to the chat routes; /health stays open. Auth lives entirely at
     this route layer -- nothing auth-related crosses into agent/ or llm/.
     """
-    configured = request.app.state.settings.harness_api_key
+    configured = request.app.state.settings.hyphae_api_key
     if not configured:
         return
     presented = _presented_api_key(request)
@@ -130,7 +130,7 @@ async def get_turn_runner(request: Request) -> TurnRunner:
     else:
         routing = UnorchestratedRouting(
             llm=request.app.state.unorchestrated_llm,
-            model_id=settings.llm_model,
+            model_id=settings.llm.model_name,
             inventory=registry,
         )
     return TurnRunner(

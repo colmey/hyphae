@@ -19,7 +19,7 @@ from api.turn import (
 )
 from config import MCPConfig, Settings
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, Usage
+from llm.schemas import AssistantMessage, TextBlock, CompletionUsage
 from mcp_layer import MCPManager, MCPServerState, Tool, ToolCallResult, ToolSnapshot
 from mcp_layer.client import MCPClient, MCPTransportError
 from tests._app_support import wired_app
@@ -107,7 +107,7 @@ class _RecoveryClient:
         if step.error is not None:
             raise step.error
 
-    async def close(self) -> None:
+    async def aclose(self) -> None:
         self.close_calls += 1
         try:
             if self.close_errors:
@@ -302,7 +302,7 @@ async def test_in_flight_turn_keeps_snapshot_while_next_turn_sees_refresh() -> N
             return AssistantMessage(
                 content=[TextBlock("done")],
                 stop_reason="end_turn",
-                usage=Usage(total_tokens=1),
+                usage=CompletionUsage(total_tokens=1),
             )
 
     client = _RecoveryClient(
@@ -323,12 +323,12 @@ async def test_in_flight_turn_keeps_snapshot_while_next_turn_sees_refresh() -> N
     settings = Settings(
         _env_file=None,
         orchestration_enabled=False,
-        llm_max_retries=0,
+        llm={"max_retries": 0},
     )
     runner = TurnRunner(
         routing=UnorchestratedRouting(
             llm=llm,
-            model_id=settings.llm_model,
+            model_id=settings.llm.model_name,
         ),
         limits=RunLimits.from_settings(settings),
         mcp=manager,

@@ -44,4 +44,4 @@ async def test_failed_connection_cleans_up_without_spinning(name, config) -> Non
         busy_fraction = (_cpu_seconds() - cpu_before) / (time.monotonic() - wall_before)
         assert busy_fraction < 0.25
     finally:
-        await client.close()
+        await client.aclose()

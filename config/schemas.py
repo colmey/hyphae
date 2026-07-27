@@ -117,7 +117,9 @@ class ModelEntry(BaseModel):
     description: str = Field(..., description="What this model is best at.")
     max_tokens: int | None = Field(
         default=None,
-        description="Per-model output cap. Falls back to Settings.llm_max_tokens when None.",
+        description=(
+            "Per-model output cap. Falls back to Settings.llm.max_tokens when None."
+        ),
     )
     context_window: int | None = Field(
         default=None,

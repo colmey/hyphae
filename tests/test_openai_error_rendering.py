@@ -14,7 +14,7 @@ from agent import DoneEvent, ErrorEvent, Session, TextEvent
 from api.openai_compatible import (
     _FINISH_REASONS,
     _finish_reason,
-    _stream,
+    _stream_chat_completion,
     chat_completions,
 )
 from api.schemas import TokenUsage
@@ -84,7 +84,7 @@ def _collect_stream(runner: _EventsRunner) -> list[dict]:
             persistence=PersistencePolicy.EPHEMERAL,
             stream=True,
         )
-        return [item async for item in _stream(runner, turn, 2000)]
+        return [item async for item in _stream_chat_completion(runner, turn, "reasoning", 2000)]
 
     return asyncio.run(collect())
 
@@ -224,7 +224,9 @@ def test_nonstream_invalid_done_reason_returns_openai_500(reason: str) -> None:
     response = asyncio.run(
         chat_completions(
             _Request(),
-            settings=SimpleNamespace(llm_model="test-model"),
+            settings=SimpleNamespace(
+                llm=SimpleNamespace(model_name="test-model")
+            ),
             runner=_RunRunner(reason),
         )
     )
@@ -240,7 +242,9 @@ def test_nonstream_http_exception_preserves_status_and_openai_envelope() -> None
     response = asyncio.run(
         chat_completions(
             _Request(),
-            settings=SimpleNamespace(llm_model="test-model"),
+            settings=SimpleNamespace(
+                llm=SimpleNamespace(model_name="test-model")
+            ),
             runner=_HTTPErrorRunner("end_turn"),
         )
     )

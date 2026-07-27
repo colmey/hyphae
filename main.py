@@ -201,8 +201,8 @@ def _log_ready_summary(
     logger.info(
         "harness ready: provider=%s default_model=%s | %s | "
         "mcp=%d/%d servers healthy (%d tools)",
-        settings.llm_provider,
-        settings.llm_model,
+        settings.llm.provider,
+        settings.llm.model_name,
         orch_part,
         len(mcp.connected_servers),
         len(mcp.status_snapshot()),
@@ -222,8 +222,8 @@ async def lifespan(app: FastAPI):
     )
     logger.info(
         "starting harness: provider=%s model=%s",
-        settings.llm_provider,
-        settings.llm_model,
+        settings.llm.provider,
+        settings.llm.model_name,
     )
 
     unorchestrated_llm: LLMClient | None = None
@@ -244,7 +244,7 @@ async def lifespan(app: FastAPI):
         # The guard rejects concurrent requests for the same session_id.
         store = InMemorySessionStore(
             ttl_seconds=settings.session_ttl_seconds,
-            max_count=settings.session_max_count,
+            max_count=settings.session_capacity,
         )
         guard = SessionGuard()
 
@@ -253,7 +253,7 @@ async def lifespan(app: FastAPI):
             unorchestrated_llm = build_llm_client(settings)
 
         tracer = await _start_optional_tracer(
-            build_tracer(enabled=settings.trace_enabled, path=settings.trace_path)
+            build_tracer(enabled=settings.trace_enabled, path=settings.trace_jsonl_path)
         )
 
         app.state.settings = settings

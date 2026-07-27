@@ -17,7 +17,7 @@ import agent.tracing as tracing_module
 from agent import JSONLTracer, RunContext, RunLimits, Session, build_tracer, run_agent
 from agent.events import DoneEvent, ToolCallEvent, ToolResultEvent, UsageEvent
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
+from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from mcp_layer import ToolCallResult
 
 
@@ -74,12 +74,12 @@ class ScriptedLLM(LLMClient):
                     ),
                 ],
                 stop_reason="tool_use",
-                usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+                usage=CompletionUsage(input_tokens=10, output_tokens=5, total_tokens=15),
             )
         return AssistantMessage(
             content=[TextBlock(text="It is sunny.")],
             stop_reason="end_turn",
-            usage=Usage(input_tokens=20, output_tokens=4, total_tokens=24),
+            usage=CompletionUsage(input_tokens=20, output_tokens=4, total_tokens=24),
         )
 
 
@@ -186,12 +186,12 @@ async def _wait_for_writer_failure(tracer: JSONLTracer) -> None:
 
 
 async def test_jsonl_trace_is_exact_serialized_event_log(tmp_path: Path) -> None:
-    trace_path = tmp_path / "nested" / "trace.jsonl"
-    tracer = JSONLTracer(trace_path)
+    trace_jsonl_path = tmp_path / "nested" / "trace.jsonl"
+    tracer = JSONLTracer(trace_jsonl_path)
     await tracer.start()
     events = await _drive(tracer)
     await tracer.aclose()
-    records = _read_jsonl(trace_path)
+    records = _read_jsonl(trace_jsonl_path)
 
     assert len(records) == len(events)
     assert [record["type"] for record in records] == [event.type for event in events]

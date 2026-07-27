@@ -14,21 +14,22 @@ from agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
+    ReasoningEvent,
     RunLimits,
     TextEvent,
     ToolCallEvent,
     run_agent,
 )
 from llm.client import GenerationRequest, LLMClient
-from llm.providers.openai import _ReasoningStreamStripper
 from llm.schemas import (
     AssistantMessage,
+    ReasoningDelta,
     StreamChunk,
     StreamEnd,
     TextBlock,
     TextDelta,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 from mcp_layer.client import ToolCallResult
 
@@ -67,13 +68,14 @@ class NativeStreamingLLM(LLMClient):
         self, request: GenerationRequest
     ) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
+        yield ReasoningDelta("considering")
         yield TextDelta("Hel")
         yield TextDelta("lo")
         yield StreamEnd(
             AssistantMessage(
                 content=[TextBlock("Hello")],
                 stop_reason="end_turn",
-                usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+                usage=CompletionUsage(input_tokens=1, output_tokens=1, total_tokens=2),
             )
         )
 
@@ -89,7 +91,8 @@ class CompleteOnlyLLM(LLMClient):
         return AssistantMessage(
             content=[TextBlock("fallback text")],
             stop_reason="end_turn",
-            usage=Usage(total_tokens=3),
+            usage=CompletionUsage(total_tokens=3),
+            reasoning="fallback thought",
         )
 
 
@@ -113,7 +116,7 @@ class ToolStreamingLLM(LLMClient):
                         )
                     ],
                     stop_reason="tool_use",
-                    usage=Usage(total_tokens=2),
+                    usage=CompletionUsage(total_tokens=2),
                 )
             )
             return
@@ -122,7 +125,7 @@ class ToolStreamingLLM(LLMClient):
             AssistantMessage(
                 content=[TextBlock("done")],
                 stop_reason="end_turn",
-                usage=Usage(total_tokens=2),
+                usage=CompletionUsage(total_tokens=2),
             )
         )
 
@@ -164,15 +167,13 @@ def done_reason(events: list[Any]) -> str | None:
     return done[-1].reason if done else None
 
 
-def run_stripper(pieces: list[str]) -> tuple[str, str | None]:
-    stripper = _ReasoningStreamStripper()
-    visible = "".join(stripper.feed(piece) for piece in pieces)
-    visible += stripper.finish()
-    return visible, stripper.reasoning
-
-
 async def test_native_streaming_emits_incremental_text() -> None:
     events = await collect(NativeStreamingLLM())
+    reasoning = [event for event in events if isinstance(event, ReasoningEvent)]
+    assert [event.text for event in reasoning] == ["considering"]
+    assert events.index(reasoning[0]) < next(
+        index for index, event in enumerate(events) if isinstance(event, TextEvent)
+    )
     assert text_events(events) == ["Hel", "lo"]
     assert "".join(text_events(events)) == "Hello"
     assert done_reason(events) == "end_turn"
@@ -181,6 +182,11 @@ async def test_native_streaming_emits_incremental_text() -> None:
 async def test_complete_fallback_streams_coarse_text() -> None:
     fallback = CompleteOnlyLLM()
     events = await collect(fallback)
+    reasoning = [event for event in events if isinstance(event, ReasoningEvent)]
+    assert [event.text for event in reasoning] == ["fallback thought"]
+    assert events.index(reasoning[0]) < next(
+        index for index, event in enumerate(events) if isinstance(event, TextEvent)
+    )
     assert fallback.calls == 1
     assert text_events(events) == ["fallback text"]
     assert done_reason(events) == "end_turn"
@@ -217,33 +223,3 @@ async def test_error_after_first_delta_surfaces_partial_text() -> None:
     assert text_events(events) == ["partial"]
     assert any(isinstance(event, ErrorEvent) for event in events)
     assert done_reason(events) == "llm_error"
-
-
-@pytest.mark.parametrize(
-    ("pieces", "expected_visible", "expected_reasoning", "assert_no_tags"),
-    [
-        (["<think>secret</think>Hello"], "Hello", "secret", True),
-        (["<thi", "nk>secret</think>Hello"], "Hello", "secret", True),
-        (["<think>sec", "ret</thi", "nk>Hello"], "Hello", "secret", True),
-        (
-            ["Hello <think>not leading</think>"],
-            "Hello <think>not leading</think>",
-            None,
-            False,
-        ),
-        (["   <think>secret</think>  Hello"], "Hello", "secret", True),
-        (["plain"], "plain", None, True),
-        (["<think>unfinished"], "", "unfinished", True),
-    ],
-)
-def test_reasoning_stripper_boundaries(
-    pieces: list[str],
-    expected_visible: str,
-    expected_reasoning: str | None,
-    assert_no_tags: bool,
-) -> None:
-    visible, reasoning = run_stripper(pieces)
-    assert visible == expected_visible
-    assert reasoning == expected_reasoning
-    if assert_no_tags:
-        assert "<think>" not in visible and "</think>" not in visible

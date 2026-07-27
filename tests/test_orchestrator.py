@@ -12,7 +12,7 @@ from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, Message, TextBlock
 from mcp_layer import ToolSnapshot
 from orchestrator import Orchestrator, ToolPreferences
-from orchestrator.schemas import OrchestrationResult
+from orchestrator.schemas import OrchestrationProposal
 
 
 @pytest.mark.parametrize(
@@ -34,7 +34,7 @@ def test_thinking_level_is_normalized(value: str | None, expected: str) -> None:
     if value is not None:
         payload["thinking_level"] = value
 
-    assert OrchestrationResult.model_validate(payload).thinking_level == expected
+    assert OrchestrationProposal.model_validate(payload).thinking_level == expected
 
 
 class _RegistryStub:
@@ -84,7 +84,7 @@ async def test_orchestration_constructs_structured_generation_request() -> None:
     assert request.messages == [Message.user("choose a model")]
     assert request.tools is None
     assert request.system == "route requests"
-    assert request.response_schema is OrchestrationResult
+    assert request.response_schema is OrchestrationProposal
 
 
 def test_prompt_includes_history_only_when_present() -> None:

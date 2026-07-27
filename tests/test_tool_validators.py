@@ -10,25 +10,35 @@ import pytest
 
 import agent.loop as loop_module
 from agent import DoneEvent, InMemorySessionStore, RunLimits, ToolPolicy, run_agent
-from agent.tool_policy import PolicyDecision, Verdict
+from agent.tool_policy import PolicyDecision, PolicyVerdict
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, Usage
+from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from mcp_layer.client import ToolCallResult
 
 pytestmark = pytest.mark.anyio
 
 
-def _tool_call(args: dict[str, Any], call_id: str, name: str = "srv__tool") -> AssistantMessage:
+def _tool_call(
+    args: dict[str, Any],
+    call_id: str,
+    name: str = "srv__tool",
+) -> AssistantMessage:
     return AssistantMessage(
-        content=[ToolUseBlock(id=call_id, name=name, input=args)],
+        content=[
+            ToolUseBlock(
+                id=call_id,
+                name=name,
+                input=args,
+            )
+        ],
         stop_reason="tool_use",
-        usage=Usage(total_tokens=1),
+        usage=CompletionUsage(total_tokens=1),
     )
 
 
 def _answer() -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock("done")], stop_reason="end_turn", usage=Usage(total_tokens=1)
+        content=[TextBlock("done")], stop_reason="end_turn", usage=CompletionUsage(total_tokens=1)
     )
 
 
@@ -242,7 +252,7 @@ class RecordingPolicy(ToolPolicy):
 
     def check(self, tool_name: str, args: Any = None) -> PolicyDecision:
         self.calls.append((tool_name, args))
-        return PolicyDecision(Verdict.ALLOW)
+        return PolicyDecision(PolicyVerdict.ALLOW)
 
 
 async def test_authorization_runs_only_after_successful_validation() -> None:

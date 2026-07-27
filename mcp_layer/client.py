@@ -180,7 +180,7 @@ class MCPClient:
             is_error=bool(result.isError),
         )
 
-    async def close(self) -> None:
+    async def aclose(self) -> None:
         """Tear down the session and transport."""
         if self._exit_stack is None:
             return

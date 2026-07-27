@@ -12,7 +12,7 @@ manager drive assemble_context() and run_agent() directly.
                           schemas counted.
   2. Budget math        - input_budget = window - max_output - margin,
                           clamped at zero; over/under threshold.
-  3. Usage estimation   - provider usage passes through untouched; a
+  3. CompletionUsage estimation   - provider usage passes through untouched; a
                           zero total is filled from input+output; all-zero
                           usage is estimated non-zero from messages+response.
   4. naive              - under budget: pass-through (same list object);
@@ -62,7 +62,7 @@ from llm.schemas import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 from mcp_layer.client import ToolCallResult
 
@@ -105,7 +105,7 @@ class RecordingLLM(LLMClient):
             return AssistantMessage(
                 content=[TextBlock(text=self._summary_text)],
                 stop_reason="end_turn",
-                usage=Usage(),
+                usage=CompletionUsage(),
             )
         self.loop_requests.append(request)
         if not self._script:
@@ -135,9 +135,9 @@ class ScriptedMCP:
 # ----- message/history builders -----
 
 
-def text_response(text: str, *, usage: Usage | None = None) -> AssistantMessage:
+def text_response(text: str, *, usage: CompletionUsage | None = None) -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text=text)], stop_reason="end_turn", usage=usage or Usage()
+        content=[TextBlock(text=text)], stop_reason="end_turn", usage=usage or CompletionUsage()
     )
 
 
@@ -191,9 +191,15 @@ def protocol_ok(messages: list[Message]) -> bool:
             prev = messages[i - 1] if i else None
             if prev is None or prev.role != Role.ASSISTANT:
                 return False
-            use_ids = {b.id for b in prev.content if isinstance(b, ToolUseBlock)}
+            use_ids = {
+                b.id
+                for b in prev.content
+                if isinstance(b, ToolUseBlock)
+            }
             result_ids = {
-                b.tool_use_id for b in msg.content if isinstance(b, ToolResultBlock)
+                b.tool_use_id
+                for b in msg.content
+                if isinstance(b, ToolResultBlock)
             }
             if not result_ids <= use_ids:
                 return False
@@ -276,19 +282,19 @@ def test_usage_estimation() -> None:
     section("usage estimation")
     history = over_budget_history()
     text_msg = Message.user("What is the launch date of the probe?")
-    provider = Usage(input_tokens=10, output_tokens=5, total_tokens=15)
+    provider = CompletionUsage(input_tokens=10, output_tokens=5, total_tokens=15)
     check(
         estimate_usage_tokens(provider, messages=history) is provider,
         "non-zero provider usage passes through untouched",
     )
-    partial = Usage(input_tokens=10, output_tokens=5, total_tokens=0)
+    partial = CompletionUsage(input_tokens=10, output_tokens=5, total_tokens=0)
     filled = estimate_usage_tokens(partial, messages=history)
     check(
         filled.total_tokens == 15 and filled.input_tokens == 10,
         "zero total filled from provider input+output (not estimated)",
     )
     estimated = estimate_usage_tokens(
-        Usage(),
+        CompletionUsage(),
         messages=[text_msg],
         system="be brief",
         response=text_response("a fairly long answer with some words in it"),
@@ -552,7 +558,7 @@ async def test_nonzero_provider_usage_is_authoritative() -> None:
         [
             text_response(
                 "answer",
-                usage=Usage(input_tokens=30, output_tokens=10, total_tokens=40),
+                usage=CompletionUsage(input_tokens=30, output_tokens=10, total_tokens=40),
             )
         ]
     )

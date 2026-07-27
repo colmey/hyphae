@@ -19,11 +19,12 @@ from .schemas import (
     StreamableHTTPServer,
     ToolPolicyConfig,
 )
-from .settings import Settings, get_settings, reset_settings
+from .settings import LLMSettings, Settings, get_settings, reset_settings
 
 __all__ = [
     "MCPConfig",
     "MCPServerConfig",
+    "LLMSettings",
     "ModelEntry",
     "ModelsConfig",
     "SSEServer",

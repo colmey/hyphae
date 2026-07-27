@@ -1,6 +1,6 @@
-# llm/prompted_tools.py
+# llm/tool_prompt_protocol.py
 
-"""Prompted-tool encoder for models without native tool calling."""
+"""Prompt protocol adapter for models without native tool calling."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, Message, TextBlock, ToolUseBlock, Usage
+from llm.schemas import AssistantMessage, Message, TextBlock, ToolUseBlock, CompletionUsage
 
 
 _ACTION_INSTRUCTIONS = """\
@@ -256,7 +256,7 @@ def _action_message(
     action: PromptedAction,
     *,
     model: str | None,
-    usage: Usage | None = None,
+    usage: CompletionUsage | None = None,
 ) -> AssistantMessage:
     return AssistantMessage(
         content=[
@@ -279,7 +279,7 @@ def _parse_failure_message(
     error: str,
     model: str | None,
     *,
-    usage: Usage | None = None,
+    usage: CompletionUsage | None = None,
 ) -> AssistantMessage:
     return AssistantMessage(
         content=[TextBlock(text=f"I could not parse a valid tool action: {error}")],
@@ -296,7 +296,7 @@ def _parse_error_tool_message(
     parsed: PromptParseResult,
     *,
     model: str | None,
-    usage: Usage | None = None,
+    usage: CompletionUsage | None = None,
 ) -> AssistantMessage:
     return AssistantMessage(
         content=[
@@ -315,7 +315,7 @@ def _parse_error_tool_message(
     )
 
 
-def _combine_usage(left: Usage | None, right: Usage | None) -> Usage | None:
+def _combine_usage(left: CompletionUsage | None, right: CompletionUsage | None) -> CompletionUsage | None:
     if left is None:
         return right
     if right is None:

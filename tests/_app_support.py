@@ -45,7 +45,7 @@ def wired_app(
     app.state.mcp = mcp if mcp is not None else EmptyMCP()
     app.state.store = InMemorySessionStore(
         ttl_seconds=settings.session_ttl_seconds,
-        max_count=settings.session_max_count,
+        max_count=settings.session_capacity,
     )
     app.state.guard = SessionGuard()
     app.state.registry = registry

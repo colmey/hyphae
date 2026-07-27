@@ -128,9 +128,9 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
 
     # Execute each tool via the MCP manager and build tool_result blocks.
     results: list[ToolResultBlock] = []
-    for tu in tool_uses:
-        print(f"  executing tool: {tu.name} args={tu.input}")
-        result = await mcp.call_tool(tu.name, tu.input)
+    for tool_use in tool_uses:
+        print(f"  executing tool: {tool_use.name} args={tool_use.input}")
+        result = await mcp.call_tool(tool_use.name, tool_use.input)
         # Truncate noisy output for the smoke test.
         preview = (
             result.content
@@ -140,8 +140,8 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
         print(f"    result (is_error={result.is_error}): {preview}")
         results.append(
             ToolResultBlock(
-                tool_use_id=tu.id,
-                name=tu.name,
+                tool_use_id=tool_use.id,
+                name=tool_use.name,
                 content=result.content,
                 is_error=result.is_error,
             )
@@ -158,7 +158,9 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
 async def test_configured_llm_scenarios() -> None:
     reset_settings()
     settings = get_settings()
-    print(f"using provider={settings.llm_provider} model={settings.llm_model}")
+    print(
+        f"using provider={settings.llm.provider} model={settings.llm.model_name}"
+    )
     print()
 
     llm = build_llm_client(settings)

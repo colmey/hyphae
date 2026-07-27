@@ -36,7 +36,7 @@ from llm.schemas import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
 )
 from mcp_layer.client import ToolCallResult
 
@@ -89,13 +89,13 @@ def tool_call(
     return AssistantMessage(
         content=[ToolUseBlock(id=call_id, name=name, input=args)],
         stop_reason="tool_use",
-        usage=Usage(),
+        usage=CompletionUsage(),
     )
 
 
 def text(text_: str) -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text=text_)], stop_reason="end_turn", usage=Usage()
+        content=[TextBlock(text=text_)], stop_reason="end_turn", usage=CompletionUsage()
     )
 
 

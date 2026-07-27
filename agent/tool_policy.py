@@ -10,7 +10,7 @@ from fnmatch import fnmatchcase
 from typing import Any, Sequence
 
 
-class Verdict(Enum):
+class PolicyVerdict(Enum):
     ALLOW = "allow"
     DENY = "deny"
     # ASK reserved for a future human-approval flow; not implemented.
@@ -20,7 +20,7 @@ class Verdict(Enum):
 class PolicyDecision:
     """Policy outcome; DENY carries a model-facing reason."""
 
-    verdict: Verdict
+    verdict: PolicyVerdict
     reason: str | None = None
 
 
@@ -37,12 +37,12 @@ class ToolPolicy:
 
     def check(self, tool_name: str, args: Any = None) -> PolicyDecision:
         if self._mode != "allow_list":
-            return PolicyDecision(Verdict.ALLOW)
+            return PolicyDecision(PolicyVerdict.ALLOW)
         if any(fnmatchcase(tool_name, pattern) for pattern in self._allow):
-            return PolicyDecision(Verdict.ALLOW)
+            return PolicyDecision(PolicyVerdict.ALLOW)
         allowed = ", ".join(self._allow) if self._allow else "(none)"
         return PolicyDecision(
-            Verdict.DENY,
+            PolicyVerdict.DENY,
             reason=(
                 f"tool call to {tool_name!r} was blocked by policy: this tool is "
                 f"policy-restricted and cannot be run. Allowed tools match: {allowed}. "

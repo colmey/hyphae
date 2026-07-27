@@ -22,7 +22,7 @@ from llm.schemas import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
-    Usage,
+    CompletionUsage,
     coerce_usage_count,
 )
 
@@ -101,13 +101,13 @@ class GeminiLLMClient(LLMClient):
             ),
             "system_instruction": request.system,
         }
-        p = self._profile
-        if p.temperature is not None:
-            config_kwargs["temperature"] = p.temperature
-        if p.top_p is not None:
-            config_kwargs["top_p"] = p.top_p
-        if p.top_k is not None:
-            config_kwargs["top_k"] = p.top_k
+        profile = self._profile
+        if profile.temperature is not None:
+            config_kwargs["temperature"] = profile.temperature
+        if profile.top_p is not None:
+            config_kwargs["top_p"] = profile.top_p
+        if profile.top_k is not None:
+            config_kwargs["top_k"] = profile.top_k
 
         # Invalid thinking_level is skipped rather than failing the request.
         if request.thinking_level is not None:
@@ -309,13 +309,13 @@ class GeminiLLMClient(LLMClient):
             usage=self._usage_from_response(response),
         )
 
-    def _usage_from_response(self, response: Any) -> Usage:
-        """Map google-genai usage_metadata onto our provider-agnostic Usage."""
+    def _usage_from_response(self, response: Any) -> CompletionUsage:
+        """Map google-genai usage_metadata onto our provider-agnostic CompletionUsage."""
         um = getattr(response, "usage_metadata", None)
         if um is None:
-            return Usage()
+            return CompletionUsage()
 
-        return Usage(
+        return CompletionUsage(
             input_tokens=coerce_usage_count(getattr(um, "prompt_token_count", 0)),
             output_tokens=coerce_usage_count(getattr(um, "candidates_token_count", 0)),
             total_tokens=coerce_usage_count(getattr(um, "total_token_count", 0)),

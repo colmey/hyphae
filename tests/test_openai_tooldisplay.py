@@ -81,8 +81,8 @@ def test_call_activity_is_deterministic_unicode_markdown() -> None:
     )
 
     assert activity == (
-        "\n\nTool `web.search` started\n\n"
-        "Arguments:\n\n"
+        "> **Tool** `web.search` — running\n\n"
+        "**Arguments**\n\n"
         "```json\n"
         '{"a": 1,"z": "café\\nsecond"}\n'
         "```\n\n"
@@ -99,8 +99,8 @@ def test_result_activity_formats_success_unicode_and_multiline_content() -> None
     )
 
     assert activity == (
-        "\n\nTool `web.search` completed · 13 ms\n\n"
-        "Result:\n\n"
+        "> **Tool** `web.search` — completed in 13 ms\n\n"
+        "**Result**\n\n"
         "```text\n"
         "first line\n"
         "naïve second\n"
@@ -116,8 +116,8 @@ def test_error_result_uses_failure_status_without_missing_latency() -> None:
         2000,
         include_details=True,
     ) == (
-        "\n\nTool `web.search` failed\n\n"
-        "Result:\n\n"
+        "> **Tool** `web.search` — failed\n\n"
+        "**Result**\n\n"
         "```text\n"
         "boom\n"
         "```\n\n"
@@ -136,8 +136,8 @@ def test_summary_activity_is_plain_and_omits_bodies() -> None:
         include_details=False,
     )
 
-    assert call == "\n\nTool `web.search` started\n\n"
-    assert result == "\n\nTool `web.search` completed · 13 ms\n\n"
+    assert call == "> **Tool** `web.search` — running\n\n"
+    assert result == "> **Tool** `web.search` — completed in 13 ms\n\n"
     assert "secret" not in call
     assert "not displayed" not in call
     assert "not displayed" not in result
@@ -357,10 +357,10 @@ def test_reasoning_mode_streams_ordered_activity_and_clean_answer() -> None:
         True,
         True,
     ]
-    assert "started" in activity[0]
+    assert "running" in activity[0]
     assert "completed" in activity[1]
     assert activity[2] == "model narration"
-    assert "started" in activity[3]
+    assert "running" in activity[3]
     assert "failed" in activity[4]
     assert "".join(delta.get("content", "") for delta in deltas) == "clean answer"
     assert all("tool_calls" not in delta for delta in deltas)
@@ -403,6 +403,36 @@ def test_reasoning_fragments_are_streamed_without_whitespace_changes() -> None:
     assert "".join(delta.get("content", "") for delta in deltas) == "Hello!"
 
 
+def test_tool_activity_adds_boundaries_only_between_semantic_phases() -> None:
+    frames = _collect_stream(
+        [
+            ReasoningEvent("Need"),
+            ReasoningEvent(" a search."),
+            _call({"query": "weather"}),
+            _result("sunny"),
+            ReasoningEvent("I"),
+            ReasoningEvent(" found it."),
+            TextEvent("It is sunny."),
+            DoneEvent("end_turn", 1),
+        ]
+    )
+
+    chunks = [frame for frame in frames[:-1] if isinstance(frame, dict)]
+    deltas = [_delta(frame) for frame in chunks]
+    reasoning = "".join(
+        delta.get("reasoning_content", "")
+        for delta in deltas
+    )
+
+    assert reasoning == (
+        "Need a search.\n\n"
+        "> **Tool** `web.search` — running\n\n"
+        "> **Tool** `web.search` — completed in 12 ms\n\n"
+        "I found it."
+    )
+    assert "".join(delta.get("content", "") for delta in deltas) == "It is sunny."
+
+
 def test_reasoning_full_mode_includes_bounded_tool_details() -> None:
     frames = _collect_stream(
         [
@@ -423,9 +453,9 @@ def test_reasoning_full_mode_includes_bounded_tool_details() -> None:
     ]
 
     assert '"query": "café"' in activity[0]
-    assert "Arguments:" in activity[0]
+    assert "**Arguments**" in activity[0]
     assert "first\nsecond" in activity[1]
-    assert "Result:" in activity[1]
+    assert "**Result**" in activity[1]
     assert "".join(delta.get("content", "") for delta in deltas) == "answer"
 
 

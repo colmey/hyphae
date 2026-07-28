@@ -161,7 +161,7 @@ def _format_tool_call_activity(
     include_details: bool,
 ) -> str:
     """Render one server-owned tool call as deterministic Markdown."""
-    heading = f"\n\nTool `{_tool_display_name(event.name)}` started"
+    heading = f"> **Tool** `{_tool_display_name(event.name)}` — running"
     if not include_details:
         return f"{heading}\n\n"
 
@@ -174,7 +174,7 @@ def _format_tool_call_activity(
     args = _bounded_activity_body(args, max_chars)
     return (
         f"{heading}\n\n"
-        f"Arguments:\n\n{_fenced_activity_body(args, 'json')}\n\n"
+        f"**Arguments**\n\n{_fenced_activity_body(args, 'json')}\n\n"
     )
 
 
@@ -187,17 +187,26 @@ def _format_tool_result_activity(
     """Render one server-owned tool result as deterministic Markdown."""
     if event.is_error:
         status = "failed"
+        latency = (
+            f" after {event.latency_ms:.0f} ms"
+            if event.latency_ms is not None
+            else ""
+        )
     else:
         status = "completed"
-    ms = f" · {event.latency_ms:.0f} ms" if event.latency_ms is not None else ""
-    heading = f"\n\nTool `{_tool_display_name(event.name)}` {status}{ms}"
+        latency = (
+            f" in {event.latency_ms:.0f} ms"
+            if event.latency_ms is not None
+            else ""
+        )
+    heading = f"> **Tool** `{_tool_display_name(event.name)}` — {status}{latency}"
     if not include_details:
         return f"{heading}\n\n"
 
     result = _bounded_activity_body(event.content, max_chars)
     return (
         f"{heading}\n\n"
-        f"Result:\n\n{_fenced_activity_body(result, 'text')}\n\n"
+        f"**Result**\n\n{_fenced_activity_body(result, 'text')}\n\n"
     )
 
 
@@ -340,9 +349,28 @@ async def _stream_chat_completion(
     done_reason: str | None = None
     failed = False
     model: str | None = None
+    reasoning_tail = ""
 
     def server_error_frame(message: str) -> dict[str, str]:
         return {"data": json.dumps(_error_payload(message, err_type="server_error"))}
+
+    def track_reasoning_text(text: str) -> None:
+        nonlocal reasoning_tail
+        reasoning_tail = (reasoning_tail + text)[-2:]
+
+    def separate_tool_activity(text: str) -> str:
+        """Add only the newlines needed to begin a distinct Markdown block."""
+        if not reasoning_tail:
+            prefix = ""
+        elif reasoning_tail.endswith("\n\n"):
+            prefix = ""
+        elif reasoning_tail.endswith("\n"):
+            prefix = "\n"
+        else:
+            prefix = "\n\n"
+        separated = prefix + text
+        track_reasoning_text(separated)
+        return separated
 
     try:
         async with runner.open(turn) as execution:
@@ -363,6 +391,7 @@ async def _stream_chat_completion(
                     }
                 elif isinstance(event, ReasoningEvent):
                     if tool_activity_mode != "hidden" and event.text:
+                        track_reasoning_text(event.text)
                         yield {
                             "data": json.dumps(
                                 _chat_completion_chunk(
@@ -376,6 +405,15 @@ async def _stream_chat_completion(
                         }
                 elif isinstance(event, ToolCallEvent):
                     if tool_activity_mode != "hidden":
+                        activity = separate_tool_activity(
+                            _format_tool_call_activity(
+                                event,
+                                tool_activity_max_chars,
+                                include_details=(
+                                    tool_activity_mode == "reasoning_full"
+                                ),
+                            )
+                        )
                         yield {
                             "data": json.dumps(
                                 _chat_completion_chunk(
@@ -383,15 +421,7 @@ async def _stream_chat_completion(
                                     created,
                                     model,
                                     {
-                                        "reasoning_content": (
-                                            _format_tool_call_activity(
-                                                event,
-                                                tool_activity_max_chars,
-                                                include_details=(
-                                                    tool_activity_mode == "reasoning_full"
-                                                ),
-                                            )
-                                        )
+                                        "reasoning_content": activity
                                     },
                                     None,
                                 )
@@ -399,6 +429,15 @@ async def _stream_chat_completion(
                         }
                 elif isinstance(event, ToolResultEvent):
                     if tool_activity_mode != "hidden":
+                        activity = separate_tool_activity(
+                            _format_tool_result_activity(
+                                event,
+                                tool_activity_max_chars,
+                                include_details=(
+                                    tool_activity_mode == "reasoning_full"
+                                ),
+                            )
+                        )
                         yield {
                             "data": json.dumps(
                                 _chat_completion_chunk(
@@ -406,15 +445,7 @@ async def _stream_chat_completion(
                                     created,
                                     model,
                                     {
-                                        "reasoning_content": (
-                                            _format_tool_result_activity(
-                                                event,
-                                                tool_activity_max_chars,
-                                                include_details=(
-                                                    tool_activity_mode == "reasoning_full"
-                                                ),
-                                            )
-                                        )
+                                        "reasoning_content": activity
                                     },
                                     None,
                                 )

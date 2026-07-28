@@ -288,11 +288,14 @@ reasoning plus server-side `ToolCallEvent` and `ToolResultEvent` progress is
 rendered in the optional `delta.reasoning_content` extension. Calls appear when
 they start and results when they complete. The default
 `OPENAI_COMPAT_TOOL_ACTIVITY_MODE=reasoning` renders portable, emoji-free status
-lines such as `Tool web.search started` and `Tool web.search completed`. Set the
-mode to `reasoning_full` to add arguments and results in fenced code blocks;
-these bodies are bounded by `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS`. Displayed MCP
-separators are normalized from `server__tool` to `server.tool`; internal tool
-names are unchanged. Hyphae remains the sole tool executor and never emits standard
+lines such as `Tool web.search — running` and
+`Tool web.search — completed in 842 ms`. Tool status is rendered as a restrained
+Markdown blockquote, with blank-line boundaries between reasoning and tool
+phases; individual model reasoning fragments remain unchanged. Set the mode to
+`reasoning_full` to add arguments and results in fenced code blocks; these bodies
+are bounded by `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS`. Displayed MCP separators
+are normalized from `server__tool` to `server.tool`; internal tool names are
+unchanged. Hyphae remains the sole tool executor and never emits standard
 `delta.tool_calls`.
 
 Clients that ignore unknown delta fields still reconstruct the complete answer

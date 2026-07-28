@@ -18,7 +18,7 @@ Provider registry:
   module -- e.g. just to get the `LLMClient` ABC -- never pulls in a provider
   SDK. This is the single source of truth for which providers exist; config
   validators key off `supported_providers()`. Adding a provider is two steps:
-  drop a file in `llm/providers/`, then add one entry here.
+  add a module or package in `llm/providers/`, then add one entry here.
 
 Generation inputs versus execution controls:
   `GenerationRequest` contains only values that shape provider generation.

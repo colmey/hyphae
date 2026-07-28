@@ -153,9 +153,9 @@ hyphae/
 │   ├── schemas.py            # Provider-agnostic Message / *Block / AssistantMessage
 │   ├── client.py             # LLMClient ABC + _PROVIDERS registry + factories (SDK-free)
 │   ├── tool_prompt_protocol.py  # JSON tool protocol for prose-only models
-│   └── providers/            # One file per provider; imported lazily by the registry
+│   └── providers/            # Provider modules/packages; imported lazily by the registry
 │       ├── __init__.py
-│       ├── gemini.py         # GeminiLLMClient (owns the google-genai SDK)
+│       ├── gemini/           # Gemini client lifecycle + provider-specific codec
 │       └── openai_compatible/  # OpenAICompatibleLLMClient (OpenAI wire protocol)
 │
 ├── agent/
@@ -398,7 +398,7 @@ model's `ModelProfile`: `hint-param` profiles may map it to a request field
 such as `reasoning_effort`, `think-tags` profiles do not add a request knob,
 and `none` profiles log once that the knob is inert.
 
-**Gemini specifics** (isolated in `llm/providers/gemini.py`):
+**Gemini specifics** (isolated in `llm/providers/gemini/`):
 
 - Async via `client.aio.models.generate_content`.
 - **Automatic function calling is disabled** — the agent loop is the

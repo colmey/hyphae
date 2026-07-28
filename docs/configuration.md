@@ -194,7 +194,7 @@ Both models are **active** — the orchestrator routes between them (cheap
 - `provider` must be registered in `llm/client.py`'s `_PROVIDERS` —
   validated against `supported_providers()` at load time, so an unknown
   provider is rejected up front rather than at first request. Implemented
-  today: `gemini` (`llm/providers/gemini.py`) and `openai_compatible`
+  today: `gemini` (`llm/providers/gemini/`) and `openai_compatible`
   (`llm/providers/openai_compatible/`). The deprecated `openai` provider ID
   remains accepted for existing configuration. Set `OPENAI_COMPAT_BASE_URL`
   to point the adapter at a local Ollama (or any compatible server); an empty

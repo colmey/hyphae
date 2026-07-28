@@ -177,12 +177,12 @@ def test_llm_settings_are_nested_without_flat_runtime_aliases(
 def test_openai_compat_tool_activity_settings_load_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("OPENAI_COMPAT_TOOL_ACTIVITY_MODE", "hidden")
+    monkeypatch.setenv("OPENAI_COMPAT_TOOL_ACTIVITY_MODE", "reasoning_full")
     monkeypatch.setenv("OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS", "1234")
 
     settings = Settings(_env_file=None)
 
-    assert settings.openai_compat_tool_activity_mode == "hidden"
+    assert settings.openai_compat_tool_activity_mode == "reasoning_full"
     assert settings.openai_compat_tool_activity_max_chars == 1234
 
 

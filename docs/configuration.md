@@ -34,8 +34,8 @@ variables retain their existing flat `LLM_*` names. Sampling values such as
 | `GEMINI_API_KEY`               | `""`                          | Gemini key (if used by any model in `models.yaml`)    |
 | `OPENAI_API_KEY`               | `""`                          | OpenAI key (if used by any model in `models.yaml`); also required by the SDK for OpenAI-compatible servers (e.g. Ollama) even when the server ignores it |
 | `OPENAI_COMPAT_BASE_URL`              | `""`                          | Base URL for the OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1` for local Ollama). Empty targets real OpenAI |
-| `OPENAI_COMPAT_TOOL_ACTIVITY_MODE` | `reasoning`               | OpenAI-compatible activity mode: `reasoning` emits sanitized model reasoning and tool progress through optional `delta.reasoning_content`; `hidden` omits that channel |
-| `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS` | `2000`              | Presentation threshold for displayed arguments or results in one `/v1` tool-activity payload; distinct from `TOOL_RESULT_MAX_CHARS` |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MODE` | `reasoning`               | OpenAI-compatible activity mode: `reasoning` emits model reasoning and compact tool status through optional `delta.reasoning_content`; `reasoning_full` also includes bounded arguments and results; `hidden` omits that channel |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS` | `2000`              | Presentation threshold for arguments or results in one `/v1` tool-activity payload in `reasoning_full` mode; distinct from `TOOL_RESULT_MAX_CHARS` |
 | `MCP_CONFIG_PATH`              | `config/mcp_config.yaml`      | Path to MCP server config                          |
 | `MCP_CONNECT_TIMEOUT_SECONDS`  | `30`                          | Cap on one complete MCP startup or lazy-recovery connection (transport open, initialize, and tool discovery); `<= 0` disables |
 | `LOOP_MAX_ITERATIONS`          | `10`                          | Cap on agent loop iterations                       |

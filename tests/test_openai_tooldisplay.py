@@ -77,10 +77,11 @@ def test_call_activity_is_deterministic_unicode_markdown() -> None:
     activity = _format_tool_call_activity(
         _call({"z": "café\nsecond", "a": 1}),
         2000,
+        include_details=True,
     )
 
     assert activity == (
-        "🔧 `web__search` started\n\n"
+        "\n\nTool `web.search` started\n\n"
         "Arguments:\n\n"
         "```json\n"
         '{"a": 1,"z": "café\\nsecond"}\n'
@@ -94,10 +95,11 @@ def test_result_activity_formats_success_unicode_and_multiline_content() -> None
     activity = _format_tool_result_activity(
         _result("first line\nnaïve second", latency_ms=12.6),
         2000,
+        include_details=True,
     )
 
     assert activity == (
-        "✅ `web__search` completed · 13 ms\n\n"
+        "\n\nTool `web.search` completed · 13 ms\n\n"
         "Result:\n\n"
         "```text\n"
         "first line\n"
@@ -112,8 +114,9 @@ def test_error_result_uses_failure_status_without_missing_latency() -> None:
     assert _format_tool_result_activity(
         _result("boom", is_error=True, latency_ms=None),
         2000,
+        include_details=True,
     ) == (
-        "❌ `web__search` failed\n\n"
+        "\n\nTool `web.search` failed\n\n"
         "Result:\n\n"
         "```text\n"
         "boom\n"
@@ -121,9 +124,37 @@ def test_error_result_uses_failure_status_without_missing_latency() -> None:
     )
 
 
+def test_summary_activity_is_plain_and_omits_bodies() -> None:
+    call = _format_tool_call_activity(
+        _call({"secret": "not displayed"}),
+        2000,
+        include_details=False,
+    )
+    result = _format_tool_result_activity(
+        _result("not displayed", latency_ms=12.6),
+        2000,
+        include_details=False,
+    )
+
+    assert call == "\n\nTool `web.search` started\n\n"
+    assert result == "\n\nTool `web.search` completed · 13 ms\n\n"
+    assert "secret" not in call
+    assert "not displayed" not in call
+    assert "not displayed" not in result
+    assert all(marker not in call + result for marker in ("🔧", "✅", "❌"))
+
+
 def test_call_and_result_bodies_are_independently_truncated() -> None:
-    call = _format_tool_call_activity(_call({"query": "abcdefghij"}), 10)
-    result = _format_tool_result_activity(_result("0123456789abcdef"), 10)
+    call = _format_tool_call_activity(
+        _call({"query": "abcdefghij"}),
+        10,
+        include_details=True,
+    )
+    result = _format_tool_result_activity(
+        _result("0123456789abcdef"),
+        10,
+        include_details=True,
+    )
 
     assert '{"query": \n…[truncated]' in call
     assert "abcdefghij" not in call
@@ -135,10 +166,12 @@ def test_activity_fences_prevent_url_linkification_and_embedded_fence_escape() -
     call = _format_tool_call_activity(
         _call({"url": "https://example.test/article?q=one&sort=two"}),
         2000,
+        include_details=True,
     )
     result = _format_tool_result_activity(
         _result("literal ``` fence\nhttps://example.test/result"),
         2000,
+        include_details=True,
     )
 
     assert "```json\n" in call
@@ -242,7 +275,7 @@ class _EventsRunner:
 def _collect_stream(
     events,
     *,
-    activity: Literal["reasoning", "hidden"] = "reasoning",
+    activity: Literal["reasoning", "reasoning_full", "hidden"] = "reasoning",
 ) -> list[dict | str]:
     async def collect() -> list[dict | str]:
         turn = TurnRequest(
@@ -326,7 +359,7 @@ def test_reasoning_mode_streams_ordered_activity_and_clean_answer() -> None:
     ]
     assert "started" in activity[0]
     assert "completed" in activity[1]
-    assert activity[2] == "model narration\n\n"
+    assert activity[2] == "model narration"
     assert "started" in activity[3]
     assert "failed" in activity[4]
     assert "".join(delta.get("content", "") for delta in deltas) == "clean answer"
@@ -334,6 +367,66 @@ def test_reasoning_mode_streams_ordered_activity_and_clean_answer() -> None:
     assert "<think>" not in json.dumps(frames)
     assert "</think>" not in json.dumps(frames)
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_reasoning_fragments_are_streamed_without_whitespace_changes() -> None:
+    fragments = [
+        "The",
+        " user",
+        " simply",
+        ' said "',
+        "hello",
+        '".',
+        "\nSecond",
+        " line.",
+    ]
+    frames = _collect_stream(
+        [
+            *(ReasoningEvent(fragment) for fragment in fragments),
+            TextEvent("Hello!"),
+            DoneEvent("end_turn", 1),
+        ]
+    )
+
+    chunks = [frame for frame in frames[:-1] if isinstance(frame, dict)]
+    deltas = [_delta(frame) for frame in chunks]
+    streamed_reasoning = [
+        delta["reasoning_content"]
+        for delta in deltas
+        if "reasoning_content" in delta
+    ]
+
+    assert streamed_reasoning == fragments
+    assert "".join(streamed_reasoning) == (
+        'The user simply said "hello".\nSecond line.'
+    )
+    assert "".join(delta.get("content", "") for delta in deltas) == "Hello!"
+
+
+def test_reasoning_full_mode_includes_bounded_tool_details() -> None:
+    frames = _collect_stream(
+        [
+            _call({"query": "café"}),
+            _result("first\nsecond"),
+            TextEvent("answer"),
+            DoneEvent("end_turn", 1),
+        ],
+        activity="reasoning_full",
+    )
+
+    chunks = [frame for frame in frames[:-1] if isinstance(frame, dict)]
+    deltas = [_delta(frame) for frame in chunks]
+    activity = [
+        delta["reasoning_content"]
+        for delta in deltas
+        if "reasoning_content" in delta
+    ]
+
+    assert '"query": "café"' in activity[0]
+    assert "Arguments:" in activity[0]
+    assert "first\nsecond" in activity[1]
+    assert "Result:" in activity[1]
+    assert "".join(delta.get("content", "") for delta in deltas) == "answer"
 
 
 def test_hidden_mode_omits_tool_activity_without_changing_answer() -> None:

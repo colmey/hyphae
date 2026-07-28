@@ -84,7 +84,15 @@ def _collect_stream(runner: _EventsRunner) -> list[dict]:
             persistence=PersistencePolicy.EPHEMERAL,
             stream=True,
         )
-        return [item async for item in _stream_chat_completion(runner, turn, "reasoning", 2000)]
+        return [
+            item
+            async for item in _stream_chat_completion(
+                runner,
+                turn,
+                "reasoning",
+                2000,
+            )
+        ]
 
     return asyncio.run(collect())
 

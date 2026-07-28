@@ -152,12 +152,15 @@ class Settings(BaseSettings):
             "openai_tool_block_max_chars",
         ),
     )
-    openai_compat_tool_activity_mode: Literal["reasoning", "hidden"] = Field(
+    openai_compat_tool_activity_mode: Literal[
+        "reasoning", "reasoning_full", "hidden"
+    ] = Field(
         default="reasoning",
         description=(
-            "OpenAI-compatible streaming activity: 'reasoning' emits sanitized "
-            "model reasoning and tool progress through delta.reasoning_content; "
-            "'hidden' omits that optional channel."
+            "OpenAI-compatible streaming activity: 'reasoning' emits model "
+            "reasoning and compact tool progress through delta.reasoning_content; "
+            "'reasoning_full' adds bounded tool arguments and results; 'hidden' "
+            "omits that optional channel."
         ),
         validation_alias=AliasChoices(
             "openai_compat_tool_activity_mode",

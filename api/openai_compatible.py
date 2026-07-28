@@ -149,8 +149,22 @@ def _fenced_activity_body(text: str, language: str) -> str:
     return f"{fence}{language}\n{text}\n{fence}"
 
 
-def _format_tool_call_activity(event: ToolCallEvent, max_chars: int) -> str:
+def _tool_display_name(name: str) -> str:
+    """Make an MCP-qualified tool name easier to scan without changing its identity."""
+    return name.replace("__", ".")
+
+
+def _format_tool_call_activity(
+    event: ToolCallEvent,
+    max_chars: int,
+    *,
+    include_details: bool,
+) -> str:
     """Render one server-owned tool call as deterministic Markdown."""
+    heading = f"\n\nTool `{_tool_display_name(event.name)}` started"
+    if not include_details:
+        return f"{heading}\n\n"
+
     args = json.dumps(
         event.input,
         ensure_ascii=False,
@@ -159,23 +173,30 @@ def _format_tool_call_activity(event: ToolCallEvent, max_chars: int) -> str:
     )
     args = _bounded_activity_body(args, max_chars)
     return (
-        f"🔧 `{event.name}` started\n\n"
+        f"{heading}\n\n"
         f"Arguments:\n\n{_fenced_activity_body(args, 'json')}\n\n"
     )
 
 
-def _format_tool_result_activity(event: ToolResultEvent, max_chars: int) -> str:
+def _format_tool_result_activity(
+    event: ToolResultEvent,
+    max_chars: int,
+    *,
+    include_details: bool,
+) -> str:
     """Render one server-owned tool result as deterministic Markdown."""
     if event.is_error:
-        icon = "❌"
         status = "failed"
     else:
-        icon = "✅"
         status = "completed"
     ms = f" · {event.latency_ms:.0f} ms" if event.latency_ms is not None else ""
+    heading = f"\n\nTool `{_tool_display_name(event.name)}` {status}{ms}"
+    if not include_details:
+        return f"{heading}\n\n"
+
     result = _bounded_activity_body(event.content, max_chars)
     return (
-        f"{icon} `{event.name}` {status}{ms}\n\n"
+        f"{heading}\n\n"
         f"Result:\n\n{_fenced_activity_body(result, 'text')}\n\n"
     )
 
@@ -305,7 +326,7 @@ def _chat_completion_chunk(
 async def _stream_chat_completion(
     runner: TurnRunner,
     turn: TurnRequest,
-    tool_activity_mode: Literal["reasoning", "hidden"],
+    tool_activity_mode: Literal["reasoning", "reasoning_full", "hidden"],
     tool_activity_max_chars: int,
 ) -> AsyncIterator[dict]:
     """Render core events as OpenAI SSE frames.
@@ -341,20 +362,20 @@ async def _stream_chat_completion(
                         )
                     }
                 elif isinstance(event, ReasoningEvent):
-                    if tool_activity_mode == "reasoning" and event.text:
+                    if tool_activity_mode != "hidden" and event.text:
                         yield {
                             "data": json.dumps(
                                 _chat_completion_chunk(
                                     cid,
                                     created,
                                     model,
-                                    {"reasoning_content": f"{event.text.rstrip()}\n\n"},
+                                    {"reasoning_content": event.text},
                                     None,
                                 )
                             )
                         }
                 elif isinstance(event, ToolCallEvent):
-                    if tool_activity_mode == "reasoning":
+                    if tool_activity_mode != "hidden":
                         yield {
                             "data": json.dumps(
                                 _chat_completion_chunk(
@@ -364,7 +385,11 @@ async def _stream_chat_completion(
                                     {
                                         "reasoning_content": (
                                             _format_tool_call_activity(
-                                                event, tool_activity_max_chars
+                                                event,
+                                                tool_activity_max_chars,
+                                                include_details=(
+                                                    tool_activity_mode == "reasoning_full"
+                                                ),
                                             )
                                         )
                                     },
@@ -373,7 +398,7 @@ async def _stream_chat_completion(
                             )
                         }
                 elif isinstance(event, ToolResultEvent):
-                    if tool_activity_mode == "reasoning":
+                    if tool_activity_mode != "hidden":
                         yield {
                             "data": json.dumps(
                                 _chat_completion_chunk(
@@ -383,7 +408,11 @@ async def _stream_chat_completion(
                                     {
                                         "reasoning_content": (
                                             _format_tool_result_activity(
-                                                event, tool_activity_max_chars
+                                                event,
+                                                tool_activity_max_chars,
+                                                include_details=(
+                                                    tool_activity_mode == "reasoning_full"
+                                                ),
                                             )
                                         )
                                     },

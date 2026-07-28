@@ -286,10 +286,14 @@ stops and refusals instead end normally with `finish_reason: "content_filter"`.
 **Reasoning and tool activity (stream only).** By default, sanitized model
 reasoning plus server-side `ToolCallEvent` and `ToolResultEvent` progress is
 rendered in the optional `delta.reasoning_content` extension. Calls appear when
-they start and results when they complete. Arguments and results are emitted
-in fenced code blocks so URLs and markup remain literal, and are bounded by
-`OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS`. Hyphae remains the sole tool executor
-and never emits standard `delta.tool_calls`.
+they start and results when they complete. The default
+`OPENAI_COMPAT_TOOL_ACTIVITY_MODE=reasoning` renders portable, emoji-free status
+lines such as `Tool web.search started` and `Tool web.search completed`. Set the
+mode to `reasoning_full` to add arguments and results in fenced code blocks;
+these bodies are bounded by `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS`. Displayed MCP
+separators are normalized from `server__tool` to `server.tool`; internal tool
+names are unchanged. Hyphae remains the sole tool executor and never emits standard
+`delta.tool_calls`.
 
 Clients that ignore unknown delta fields still reconstruct the complete answer
 from `delta.content`. Set `OPENAI_COMPAT_TOOL_ACTIVITY_MODE=hidden` for strict

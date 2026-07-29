@@ -12,6 +12,10 @@ from .events import Event
 from .tracing import Tracer, event_record, run_logger
 
 
+class RunDeadlineExceeded(TimeoutError):
+    """Internal signal that the run-level wall clock expired."""
+
+
 class LLMRunSettings(Protocol):
     """Nested LLM execution values used to construct immutable run limits."""
 

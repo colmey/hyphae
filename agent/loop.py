@@ -7,11 +7,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 import time
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, Protocol
 
 import jsonschema
 from jsonschema.validators import validator_for
@@ -21,7 +21,6 @@ from llm.schemas import (
     AssistantMessage,
     Message,
     ReasoningDelta,
-    StreamChunk,
     StreamEnd,
     TextBlock,
     TextDelta,
@@ -46,14 +45,12 @@ from .events import (
     ToolResultEvent,
     UsageEvent,
 )
+from .generation import generate_with_retry
 from .session import Session, SessionStore
 from .tool_policy import ToolPolicy, PolicyVerdict
-from .runtime import RunContext, RunLimits
+from .runtime import RunContext, RunDeadlineExceeded, RunLimits
 
 logger = logging.getLogger(__name__)
-
-# Cap exponential retry sleeps.
-_RETRY_BACKOFF_CAP_SECONDS = 30.0
 
 # Always-on steering for common failure modes.
 _FINAL_ITERATION_WRAPUP = (
@@ -87,88 +84,6 @@ _CANCELLED_TOOL_UNKNOWN_MESSAGE = "tool call outcome is unknown because executio
 _CANCELLED_TOOL_NOT_STARTED_MESSAGE = (
     "tool call was not executed because execution was cancelled"
 )
-
-
-class _RunDeadlineExceeded(TimeoutError):
-    """Internal signal that the run-level wall clock expired."""
-
-
-@dataclass(frozen=True)
-class _TimeoutBound:
-    """One timeout computed against the current absolute run deadline."""
-
-    seconds: float | None
-    deadline_limited: bool
-
-
-@dataclass(frozen=True)
-class _AttemptController:
-    """Shared attempt, deadline, and backoff policy for one LLM generation."""
-
-    limits: RunLimits
-    context: RunContext
-    log: logging.Logger | logging.LoggerAdapter
-
-    @property
-    def total_attempts(self) -> int:
-        return max(0, self.limits.max_retries) + 1
-
-    def indexes(self) -> range:
-        return range(self.total_attempts)
-
-    def ensure_before_attempt(self) -> None:
-        if self.context.deadline_exceeded():
-            raise _RunDeadlineExceeded()
-
-    def timeout_bound(self) -> _TimeoutBound:
-        """Return the smaller enabled LLM timeout and remaining run budget."""
-        remaining = self.context.remaining_seconds()
-        if remaining is not None and remaining <= 0:
-            raise _RunDeadlineExceeded()
-
-        per_attempt = self.limits.llm_timeout_seconds
-        if per_attempt is not None and per_attempt <= 0:
-            per_attempt = None
-        if remaining is None:
-            return _TimeoutBound(per_attempt, False)
-        if per_attempt is None or remaining <= per_attempt:
-            return _TimeoutBound(remaining, True)
-        return _TimeoutBound(per_attempt, False)
-
-    async def retry(
-        self,
-        attempt_index: int,
-        *,
-        eligible: bool,
-        mode: str,
-        reason: str,
-        cause: BaseException | None = None,
-    ) -> bool:
-        """Sleep for the next retry, or report that this attempt is final."""
-        if not eligible or attempt_index >= self.total_attempts - 1:
-            return False
-
-        delay = _backoff_delay_seconds(self.limits.retry_base_delay, attempt_index)
-        remaining = self.context.remaining_seconds()
-        if remaining is not None:
-            if remaining <= 0:
-                raise _RunDeadlineExceeded() from cause
-            delay = min(delay, remaining)
-
-        suffix = f": {cause}" if cause is not None else ""
-        self.log.warning(
-            "retrying %s LLM after %s (attempt %d/%d) in %.2fs%s",
-            mode,
-            reason,
-            attempt_index + 1,
-            self.total_attempts,
-            delay,
-            suffix,
-        )
-        await asyncio.sleep(delay)
-        if self.context.deadline_exceeded():
-            raise _RunDeadlineExceeded() from cause
-        return True
 
 
 @dataclass
@@ -342,112 +257,6 @@ def _with_wrapup(system: str | None) -> str:
     if system:
         return f"{system}\n\n{_FINAL_ITERATION_WRAPUP}"
     return _FINAL_ITERATION_WRAPUP
-
-
-async def _complete_with_retry(
-    llm: LLMClient,
-    *,
-    request: GenerationRequest,
-    attempts: _AttemptController,
-) -> AssistantMessage:
-    """Call llm.complete() with a per-attempt timeout and bounded retries.
-
-    Retries transient errors, timeouts, and empty responses. Exhausted transient
-    errors re-raise; exhausted empty responses return the last empty response.
-    """
-    for attempt_index in attempts.indexes():
-        attempts.ensure_before_attempt()
-        timeout = attempts.timeout_bound()
-        try:
-            if timeout.seconds is not None and timeout.seconds > 0:
-                async with asyncio.timeout(timeout.seconds):
-                    response = await llm.complete(request)
-            else:
-                response = await llm.complete(request)
-        except TimeoutError as exc:
-            if timeout.deadline_limited or attempts.context.deadline_exceeded():
-                raise _RunDeadlineExceeded() from exc
-            if await attempts.retry(
-                attempt_index,
-                eligible=True,
-                mode="buffered",
-                reason="timeout",
-                cause=exc,
-            ):
-                continue
-            raise
-        except Exception as exc:
-            if attempts.context.deadline_exceeded():
-                raise _RunDeadlineExceeded() from exc
-            if await attempts.retry(
-                attempt_index,
-                eligible=llm.is_transient_error(exc),
-                mode="buffered",
-                reason="transient provider error",
-                cause=exc,
-            ):
-                continue
-            raise
-
-        # Success. An empty-candidates response is retryable up to the budget.
-        if await attempts.retry(
-            attempt_index,
-            eligible=response.stop_reason == "empty",
-            mode="buffered",
-            reason="empty response",
-        ):
-            continue
-        return response
-
-    raise AssertionError("attempt controller produced no buffered attempts")
-
-
-async def _read_stream_chunk(
-    chunks: AsyncIterator[StreamChunk],
-    attempts: _AttemptController,
-) -> StreamChunk:
-    """Read one stream chunk within the idle timeout and absolute deadline."""
-    timeout = attempts.timeout_bound()
-    if timeout.seconds is None or timeout.seconds <= 0:
-        return await anext(chunks)
-    try:
-        async with asyncio.timeout(timeout.seconds):
-            return await anext(chunks)
-    except TimeoutError as exc:
-        if timeout.deadline_limited or attempts.context.deadline_exceeded():
-            raise _RunDeadlineExceeded() from exc
-        raise
-
-
-async def _close_stream(
-    stream: Any,
-    *,
-    log: logging.Logger | logging.LoggerAdapter = logger,
-) -> None:
-    """Close a provider stream when its iterator exposes ``aclose``.
-
-    Stream cleanup is best-effort: a provider cleanup failure must not replace
-    the timeout, deadline, or provider exception that ended the attempt.
-    """
-    close = getattr(stream, "aclose", None)
-    if close is None:
-        return
-    try:
-        await close()
-    except asyncio.CancelledError:
-        task = asyncio.current_task()
-        if task is not None and task.cancelling():
-            raise
-        log.warning("LLM stream cleanup was cancelled", exc_info=True)
-    except Exception:  # noqa: BLE001 -- cleanup must preserve the primary outcome.
-        log.warning("failed to close LLM stream", exc_info=True)
-
-
-def _backoff_delay_seconds(base_delay: float, attempt: int) -> float:
-    """Jittered exponential backoff, capped."""
-    return min(_RETRY_BACKOFF_CAP_SECONDS, base_delay * (2**attempt)) + random.uniform(
-        0, base_delay
-    )
 
 
 async def run_agent(
@@ -661,7 +470,7 @@ async def run_agent(
                     "context assembly failed; sending full history", exc_info=True
                 )
 
-        # LLM call with per-attempt timeout and bounded retry.
+        # Consume provider-neutral generation signals; retry mechanics stay below.
         generation_request = GenerationRequest(
             messages=tuple(messages_for_llm),
             tools=effective_tools or None,
@@ -670,109 +479,28 @@ async def run_agent(
             thinking_level=thinking_level,
         )
         llm_started = time.perf_counter()
-        attempts = _AttemptController(limits=limits, context=context, log=run_log)
         streamed_reasoning = False
+        response: AssistantMessage | None = None
         try:
-            if stream:
-                response: AssistantMessage | None = None
-
-                for attempt_index in attempts.indexes():
-                    streamed_reasoning = False
-                    attempts.ensure_before_attempt()
-                    visible_deltas: list[str] = []
-                    chunks: AsyncIterator[StreamChunk] | None = None
-                    attempt_response: AssistantMessage | None = None
-                    attempt_error: Exception | None = None
-                    retryable_error = False
-                    try:
-                        chunks = llm.stream(generation_request)
-                        while True:
-                            try:
-                                chunk = await _read_stream_chunk(chunks, attempts)
-                            except StopAsyncIteration:
-                                break
-
-                            if isinstance(chunk, TextDelta):
-                                if chunk.text:
-                                    visible_deltas.append(chunk.text)
-                                    yield await _emit(TextEvent(text=chunk.text))
-                            elif isinstance(chunk, ReasoningDelta):
-                                if chunk.text:
-                                    streamed_reasoning = True
-                                    yield await _emit(
-                                        ReasoningEvent(text=chunk.text)
-                                    )
-                            elif isinstance(chunk, StreamEnd):
-                                attempt_response = chunk.message
-                                break
-
-                        if attempt_response is None:
-                            if visible_deltas:
-                                attempt_response = AssistantMessage(
-                                    content=[TextBlock(text="".join(visible_deltas))],
-                                    stop_reason="incomplete_stream",
-                                    model=None,
-                                    usage=CompletionUsage(),
-                                )
-                            else:
-                                attempt_response = AssistantMessage(
-                                    content=[],
-                                    stop_reason="empty",
-                                    model=None,
-                                    usage=CompletionUsage(),
-                                )
-                    except _RunDeadlineExceeded:
-                        raise
-                    except Exception as exc:
-                        if _deadline_exceeded():
-                            raise _RunDeadlineExceeded() from exc
-                        attempt_error = exc
-                        retryable_error = not visible_deltas and (
-                            isinstance(exc, TimeoutError)
-                            or llm.is_transient_error(exc)
-                        )
-                    finally:
-                        if chunks is not None:
-                            await _close_stream(chunks, log=run_log)
-
-                    if attempt_error is not None:
-                        retry_reason = (
-                            "timeout"
-                            if isinstance(attempt_error, TimeoutError)
-                            else "transient provider error"
-                        )
-                        if await attempts.retry(
-                            attempt_index,
-                            eligible=retryable_error,
-                            mode="streaming",
-                            reason=retry_reason,
-                            cause=attempt_error,
-                        ):
-                            continue
-                        raise attempt_error
-
-                    assert attempt_response is not None
-                    if await attempts.retry(
-                        attempt_index,
-                        eligible=(
-                            attempt_response.stop_reason == "empty"
-                            and not visible_deltas
-                        ),
-                        mode="streaming",
-                        reason="empty response",
-                    ):
-                        continue
-                    response = attempt_response
-                    break
-
-                assert response is not None
-            else:
-                response = await _complete_with_retry(
-                    llm,
-                    request=generation_request,
-                    attempts=attempts,
-                )
-        except _RunDeadlineExceeded:
+            generation = generate_with_retry(
+                llm,
+                generation_request,
+                limits=limits,
+                context=context,
+                stream=stream,
+                log=run_log,
+            )
+            async with aclosing(generation):
+                async for chunk in generation:
+                    if isinstance(chunk, TextDelta):
+                        yield await _emit(TextEvent(text=chunk.text))
+                    elif isinstance(chunk, ReasoningDelta):
+                        streamed_reasoning = True
+                        yield await _emit(ReasoningEvent(text=chunk.text))
+                    elif isinstance(chunk, StreamEnd):
+                        response = chunk.message
+            assert response is not None
+        except RunDeadlineExceeded:
             elapsed = context.elapsed_seconds()
             run_log.warning(
                 "run exceeded max_run_seconds=%.1f during LLM call (elapsed=%.1fs)",

@@ -9,19 +9,22 @@ from typing import Any
 
 import pytest
 
-import agent.loop as loop_module
+import agent.generation as generation_module
 from agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
+    ReasoningEvent,
     RunContext,
     RunLimits,
     TextEvent,
     run_agent,
 )
+from agent.runtime import RunDeadlineExceeded
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
+    ReasoningDelta,
     StreamChunk,
     StreamEnd,
     TextBlock,
@@ -56,7 +59,7 @@ def _capture_retry_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     async def record(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(loop_module.asyncio, "sleep", record)
+    monkeypatch.setattr(generation_module.asyncio, "sleep", record)
     return sleeps
 
 
@@ -98,6 +101,74 @@ class ParityLLM(LLMClient):
         return isinstance(exc, TransientFailure)
 
 
+def _generation_context() -> RunContext:
+    return RunContext.start(
+        max_run_seconds=None,
+        base_logger=logging.getLogger("generation-test"),
+    )
+
+
+async def _generation_chunks(
+    llm: LLMClient,
+    *,
+    stream: bool,
+    limits: RunLimits | None = None,
+) -> list[StreamChunk]:
+    return [
+        chunk
+        async for chunk in generation_module.generate_with_retry(
+            llm,
+            GenerationRequest(messages=[]),
+            limits=limits or RunLimits(),
+            context=_generation_context(),
+            stream=stream,
+            log=logging.getLogger("generation-test"),
+        )
+    ]
+
+
+async def test_buffered_generation_normalizes_to_one_stream_end() -> None:
+    llm = ParityLLM([_answer("buffered")])
+
+    chunks = await _generation_chunks(llm, stream=False)
+
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], StreamEnd)
+    assert chunks[0].message == _answer("buffered")
+    assert not any(isinstance(chunk, TextDelta) for chunk in chunks)
+
+
+class NativeSignalLLM(LLMClient):
+    def __init__(self) -> None:
+        self.closes = 0
+
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        raise AssertionError("stream expected")
+
+    async def stream(
+        self, request: GenerationRequest
+    ) -> AsyncIterator[StreamChunk]:
+        try:
+            yield ReasoningDelta("thinking")
+            yield TextDelta("streamed")
+            yield StreamEnd(_answer("streamed"))
+        finally:
+            self.closes += 1
+
+
+async def test_streaming_generation_forwards_signals_and_one_end() -> None:
+    llm = NativeSignalLLM()
+
+    chunks = await _generation_chunks(llm, stream=True)
+
+    assert chunks == [
+        ReasoningDelta("thinking"),
+        TextDelta("streamed"),
+        StreamEnd(_answer("streamed")),
+    ]
+    assert llm.closes == 1
+
+
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streaming"])
 async def test_first_attempt_success_has_no_retry_sleep(
     stream: bool,
@@ -125,7 +196,7 @@ async def test_transient_failure_then_success_has_exact_calls_and_sleep(
     agent_event_collector,
 ) -> None:
     sleeps = _capture_retry_sleeps(monkeypatch)
-    monkeypatch.setattr(loop_module.random, "uniform", lambda low, high: 0.0)
+    monkeypatch.setattr(generation_module.random, "uniform", lambda low, high: 0.0)
     llm = ParityLLM([TransientFailure("retry me"), _answer("recovered")])
     events = await agent_event_collector(
         llm=llm,
@@ -168,7 +239,7 @@ async def test_empty_response_recovers_and_exhaustion_returns_empty(
     agent_event_collector,
 ) -> None:
     sleeps = _capture_retry_sleeps(monkeypatch)
-    monkeypatch.setattr(loop_module.random, "uniform", lambda low, high: 0.0)
+    monkeypatch.setattr(generation_module.random, "uniform", lambda low, high: 0.0)
 
     recovered = ParityLLM([_empty(), _answer("recovered")])
     recovered_events = await agent_event_collector(
@@ -244,6 +315,128 @@ async def test_missing_stream_end_retries_only_before_visible_output(
     assert [event.text for event in events if isinstance(event, TextEvent)] == text
     assert llm.calls == calls
     assert llm.closes == calls
+
+
+@pytest.mark.parametrize(
+    ("visible", "expected_text", "expected_reason", "expected_calls"),
+    [
+        (False, ["recovered"], "end_turn", 2),
+        (True, ["partial"], "incomplete_stream", 1),
+    ],
+)
+async def test_generation_normalizes_streams_without_terminal_chunks(
+    visible: bool,
+    expected_text: list[str],
+    expected_reason: str,
+    expected_calls: int,
+) -> None:
+    llm = IncompleteStreamLLM(visible)
+
+    chunks = await _generation_chunks(
+        llm,
+        stream=True,
+        limits=RunLimits(max_retries=1, retry_base_delay=0),
+    )
+
+    assert [
+        chunk.text for chunk in chunks if isinstance(chunk, TextDelta)
+    ] == expected_text
+    end = next(chunk for chunk in chunks if isinstance(chunk, StreamEnd))
+    assert end.message.stop_reason == expected_reason
+    assert llm.calls == expected_calls
+    assert llm.closes == expected_calls
+
+
+class ReasoningThenTransientLLM(LLMClient):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.closes = 0
+        self.requests: list[GenerationRequest] = []
+
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        raise AssertionError("stream expected")
+
+    async def stream(
+        self, request: GenerationRequest
+    ) -> AsyncIterator[StreamChunk]:
+        self.calls += 1
+        self.requests.append(request)
+        try:
+            if self.calls == 1:
+                yield ReasoningDelta("first thought")
+                raise TransientFailure("retry after reasoning")
+            yield TextDelta("recovered")
+            yield StreamEnd(_answer("recovered"))
+        finally:
+            self.closes += 1
+
+    def is_transient_error(self, exc: BaseException) -> bool:
+        return isinstance(exc, TransientFailure)
+
+
+async def test_reasoning_only_retry_marks_the_interrupted_attempt(
+    scripted_mcp_factory,
+    agent_event_collector,
+) -> None:
+    llm = ReasoningThenTransientLLM()
+
+    events = await agent_event_collector(
+        llm=llm,
+        mcp=scripted_mcp_factory(tools=[]),
+        stream=True,
+        max_retries=1,
+        retry_base_delay=0,
+    )
+
+    assert [event.text for event in events if isinstance(event, ReasoningEvent)] == [
+        "first thought",
+        "\n\n[Generation was interrupted; retrying...]\n\n",
+    ]
+    assert [event.text for event in events if isinstance(event, TextEvent)] == [
+        "recovered"
+    ]
+    assert _done(events) == "end_turn"
+    assert llm.calls == 2
+    assert llm.closes == 2
+    assert llm.requests[0] is llm.requests[1]
+
+
+class ReasoningThenIncompleteLLM(LLMClient):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        raise AssertionError("stream expected")
+
+    async def stream(
+        self, request: GenerationRequest
+    ) -> AsyncIterator[StreamChunk]:
+        self.calls += 1
+        if self.calls == 1:
+            yield ReasoningDelta("unfinished thought")
+            return
+        yield TextDelta("recovered")
+        yield StreamEnd(_answer("recovered"))
+
+
+async def test_reasoning_only_incomplete_stream_marks_retry_boundary() -> None:
+    llm = ReasoningThenIncompleteLLM()
+
+    chunks = await _generation_chunks(
+        llm,
+        stream=True,
+        limits=RunLimits(max_retries=1, retry_base_delay=0),
+    )
+
+    assert chunks == [
+        ReasoningDelta("unfinished thought"),
+        ReasoningDelta(
+            "\n\n[Generation was interrupted; retrying...]\n\n"
+        ),
+        TextDelta("recovered"),
+        StreamEnd(_answer("recovered")),
+    ]
+    assert llm.calls == 2
 
 
 class BlockingLLM(LLMClient):
@@ -335,8 +528,8 @@ class FakeClockContext:
 async def test_backoff_cap_clamp_and_deadline_during_sleep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(loop_module.random, "uniform", lambda low, high: 0.25)
-    assert loop_module._backoff_delay_seconds(2.0, 10) == 30.25
+    monkeypatch.setattr(generation_module.random, "uniform", lambda low, high: 0.25)
+    assert generation_module._backoff_delay_seconds(2.0, 10) == 30.25
 
     clock = FakeClockContext(0.2)
     slept: list[float] = []
@@ -345,14 +538,14 @@ async def test_backoff_cap_clamp_and_deadline_during_sleep(
         slept.append(delay)
         clock.now += delay
 
-    monkeypatch.setattr(loop_module.asyncio, "sleep", advance)
-    attempts = loop_module._AttemptController(
+    monkeypatch.setattr(generation_module.asyncio, "sleep", advance)
+    attempts = generation_module._AttemptController(
         limits=RunLimits(max_retries=1, retry_base_delay=2.0),
         context=clock,  # type: ignore[arg-type]
         log=logging.getLogger("retry-policy-test"),
     )
 
-    with pytest.raises(loop_module._RunDeadlineExceeded):
+    with pytest.raises(RunDeadlineExceeded):
         await attempts.retry(
             0,
             eligible=True,
@@ -397,7 +590,7 @@ async def test_cancellation_during_retry_sleep_occurs_after_stream_close(
         sleep_started.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(loop_module.asyncio, "sleep", blocking_sleep)
+    monkeypatch.setattr(generation_module.asyncio, "sleep", blocking_sleep)
     llm = ParityLLM([TransientFailure("retry"), _answer()])
     task = asyncio.create_task(
         agent_event_collector(
@@ -517,6 +710,24 @@ async def test_agent_generator_close_closes_active_stream_exactly_once(
     first = await anext(events)
     assert isinstance(first, TextEvent)
     await events.aclose()
+
+    assert llm.closes == 1
+
+
+async def test_generation_consumer_close_closes_active_stream_exactly_once() -> None:
+    llm = DeltaThenBlockLLM()
+    generation = generation_module.generate_with_retry(
+        llm,
+        GenerationRequest(messages=[]),
+        limits=RunLimits(),
+        context=_generation_context(),
+        stream=True,
+        log=logging.getLogger("generation-test"),
+    )
+
+    first = await anext(generation)
+    assert first == TextDelta("visible")
+    await generation.aclose()
 
     assert llm.closes == 1
 

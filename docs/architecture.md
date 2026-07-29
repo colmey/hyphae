@@ -166,8 +166,9 @@ hyphae/
 │   │                         #   DoneEvent / ErrorEvent
 │   ├── context.py            # assemble_context() seam: token estimator, budget,
 │   │                         #   naive / compaction strategies (view-only)
+│   ├── generation.py         # Provider-neutral attempts, retries, stream cleanup
 │   ├── tracing.py            # Async bounded JSONL tracing + run_id log adapter
-│   └── loop.py               # run_agent() - the async-generator reasoning loop
+│   └── loop.py               # run_agent() - event/transcript/tool composition
 │
 ├── orchestrator/             # Routes requests to model + tool subset + system
 │   ├── __init__.py
@@ -303,7 +304,7 @@ speaks:
 | `content_filter` | Provider safety/content policy blocked output |
 | `refusal` | Provider returned an explicit refusal |
 | `provider_error` | Missing, unknown, or abnormal provider termination |
-| `incomplete_stream` | Visible deltas arrived without a terminal provider message |
+| `incomplete_stream` | Visible answer text arrived without a terminal provider message |
 
 Real tool-use blocks are authoritative over missing or inconsistent provider
 finish reasons. Only `empty` is response-retryable; blocked, refused, truncated,
@@ -342,8 +343,12 @@ SDK-specific** (importing it never pulls in a provider SDK):
   `ReasoningDelta(text=...)` carries sanitized optional reasoning without
   provider wrapper syntax, and `StreamEnd(message=...)` carries the fully
   assembled `AssistantMessage`. Provider adapters own all vendor fields and
-  tag parsing. The agent loop streams deltas to callers immediately, then
-  reuses the normal assistant/session/usage/tool tail once `StreamEnd` arrives.
+  tag parsing. Streamed reasoning remains provisional until answer text begins:
+  if an eligible retry follows reasoning-only output, the generation layer
+  inserts an explicit interruption marker before the next attempt. The failed
+  attempt is not added to model history. The agent loop streams deltas to
+  callers immediately, then reuses the normal assistant/session/usage/tool tail
+  once `StreamEnd` arrives.
 - **`_PROVIDERS`** — the single source of truth mapping a provider name onto a
   builder. Each builder imports its provider module *lazily* (inside the
   function), so the ABC can be imported without dragging in any SDK, and each
@@ -564,14 +569,15 @@ async def run_agent(
 `RunLimits` is the immutable policy object built once from Settings by
 `TurnRunner`; `RunContext` carries the one live run ID, absolute deadline,
 logger, and trace sequence. Direct callers may omit both to receive defaults.
-The loop owns timeout/retry policy while providers classify transient errors.
-
-Buffered and streaming generation share one private attempt-policy controller
-for attempt counts, deadline-aware timeout bounds, transient eligibility,
-jittered exponential backoff, and cancellable retry sleep. Their completion
-mechanics remain separate: buffered generation awaits one response, while
-streaming applies the configured LLM timeout to every incremental read and
-never retries after a visible delta has been emitted.
+`agent/generation.py` owns provider-neutral timeout and retry policy while
+providers classify transient errors. Buffered and streaming generation share
+one private attempt-policy controller for attempt counts, deadline-aware
+timeout bounds, transient eligibility, jittered exponential backoff, and
+cancellable retry sleep. Their completion mechanics remain separate: buffered
+generation awaits one response, while streaming applies the configured LLM
+timeout to every incremental read. Emitted answer text commits the attempt and
+prevents retry. Emitted reasoning remains provisional; if a retry is still
+eligible, an interruption marker separates it from the next attempt.
 
 **The caller appends the user message before invoking `run_agent`.**
 `TurnRunner` does so only on its staged copy after routing; the loop owns
@@ -597,22 +603,25 @@ and backoff all consume the same budget. See *Bounded & safe runs* below.
 Per-iteration algorithm:
 
 0. Check bounded-run guards before another LLM call.
-1. Assemble the outgoing context view, then call the LLM with timeout/retry.
-   Exhausted LLM failures yield `ErrorEvent` + `DoneEvent("llm_error")`.
+1. Assemble the outgoing context view, then consume the normalized generation
+   stream from `agent.generation`. Exhausted LLM failures yield `ErrorEvent` +
+   `DoneEvent("llm_error")`.
 2. Append the complete assistant response only to the staged session. A
    non-tool response is now a safe terminal checkpoint; a tool-use response is
    not publishable yet.
-3. Publish a complete non-tool assistant response once. Visible deltas followed
-   by ordinary provider exhaustion are synthesized as an `incomplete_stream`
-   assistant response, saved with identical text, and terminated abnormally.
+3. Publish a complete non-tool assistant response once. Visible answer-text
+   deltas followed by ordinary provider exhaustion are synthesized as an
+   `incomplete_stream` assistant response, saved with identical text, and
+   terminated abnormally.
 4. Yield a `UsageEvent` for this iteration's tokens. Provider-reported usage
    is used as-is; absent/all-zero usage is filled by the local estimator
    (`estimate_usage_tokens`, chars/4 heuristic over the outgoing view +
    system + response) so the token cap works against local servers that
    report zero usage. Never double-counted.
 5. Stream sanitized reasoning as `ReasoningEvent` values when the provider
-   supplies it. Reasoning is not appended to session content; `/v1` may render
-   it through `delta.reasoning_content`.
+   supplies it. A reasoning-only retry inserts an interruption marker before
+   the next attempt. Reasoning is not appended to session content; `/v1` may
+   render it through `delta.reasoning_content`.
 6. Yield a `TextEvent` for each non-empty text block.
 7. Collect tool calls first; if none were requested, finish with the explicit
    canonical provider outcome or the applicable run-limit reason.
@@ -891,11 +900,12 @@ Startup order:
 Shutdown attempts LLM, MCP, and tracer cleanup independently. The default LLM
 and every constructed registry client are deduplicated by object identity and
 closed once; never-constructed lazy clients have no resources to release.
-Provider generators own their SDK streams, while the agent loop owns only the
-provider generator. Cleanup failures are logged without replacing the request
-exception or cancellation that initiated shutdown. Tracer cleanup first stops
-acceptance, then drains healthy accepted records through the background writer;
-its final counters are logged before active cancellation is re-raised.
+Provider generators own their SDK streams. The generation layer owns each
+provider iterator, and the agent loop owns only the normalized generation
+adapter. Cleanup failures are logged without replacing the request exception or
+cancellation that initiated shutdown. Tracer cleanup first stops acceptance,
+then drains healthy accepted records through the background writer; its final
+counters are logged before active cancellation is re-raised.
 
 **`api/dependencies.py`** — `Depends()` providers that pull from `app.state`.
 `require_api_key` is the optional route-layer auth gate for `/chat`,

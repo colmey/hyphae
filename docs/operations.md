@@ -110,8 +110,10 @@ stream when the selected OpenAI-compatible model client supports it. The
 existing `LLM_TIMEOUT_SECONDS` caps each incremental provider read for this
 path, so the idle timeout resets after every chunk while `RUN_MAX_SECONDS`
 continues shrinking absolutely. After the first text delta is emitted, the
-harness does not retry or resume a broken stream. A later provider failure is
-surfaced as partial text followed by an error event and
+harness does not retry or resume a broken stream. Before answer text begins,
+reasoning-only output remains provisional: an eligible retry is separated from
+the abandoned reasoning by a visible interruption marker. A later provider
+failure is surfaced as partial text followed by an error event and
 `done_reason=llm_error`.
 
 Local harness verification:
@@ -210,7 +212,8 @@ harness stays a dumb event source; each consumer is a renderer at the edge.
 Providers with native streaming produce incremental `text` events on both SSE
 surfaces. Complete-only providers use the `LLMClient.stream()` fallback and emit
 coarse final text blocks. Every provider stream has explicit cleanup ownership;
-after visible output, a broken stream is never replayed.
+after visible answer text, a broken stream is never replayed. Reasoning-only
+retries carry an explicit interruption marker between attempts.
 
 ### Choosing a context strategy (`naive` vs `compaction`)
 
@@ -412,10 +415,11 @@ shutdown drains all accepted buffered records before closing and logs its final
 failure permanently disables further writes and discards its remaining backlog
 so shutdown does not retry-spin.
 
-For OpenAI streaming, the agent loop closes the provider generator and the
-provider generator closes its inner SDK stream. This releases the HTTP response
-on normal completion, timeout, provider failure, cancellation, and clients that
-stop reading early. Repeated graceful shutdown is safe. A forced process kill
+For OpenAI streaming, the agent loop closes the normalized generation adapter,
+the generation layer closes the provider iterator, and the provider iterator
+closes its inner SDK stream. This releases the HTTP response on normal
+completion, timeout, provider failure, cancellation, and clients that stop
+reading early. Repeated graceful shutdown is safe. A forced process kill
 (`SIGKILL`, container hard-stop, or equivalent) bypasses Python lifespan hooks,
 so the operating system must reclaim any remaining sockets and file handles;
 queued trace records may be lost.

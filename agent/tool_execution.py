@@ -251,6 +251,16 @@ class ToolDispatcher:
         tool_use: ToolUseBlock,
     ) -> ToolDispatchResult:
         """Dispatch one call after applying all run-local synthetic guards."""
+        guard_result = self._guard_result(tool_use)
+        if guard_result is not None:
+            return guard_result
+        return await self._invoke(batch, tool_use)
+
+    def _guard_result(
+        self,
+        tool_use: ToolUseBlock,
+    ) -> ToolDispatchResult | None:
+        """Return a synthetic result or authorize one real invocation."""
         call_key = (tool_use.name, _canonical_args(tool_use.input))
         if call_key in self._seen_calls:
             self._log.info(
@@ -286,6 +296,14 @@ class ToolDispatcher:
             assert reason is not None
             return ToolDispatchResult(reason, True, None)
 
+        return None
+
+    async def _invoke(
+        self,
+        batch: ActiveToolBatch,
+        tool_use: ToolUseBlock,
+    ) -> ToolDispatchResult:
+        """Invoke one authorized tool with timeout and deadline classification."""
         effective_timeout = self._context.effective_timeout(
             self._limits.tool_timeout_seconds
         )

@@ -5,16 +5,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
-from dataclasses import dataclass, field
-from typing import Any, Protocol
-
-import jsonschema
-from jsonschema.validators import validator_for
+from typing import Any
 
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
@@ -47,8 +42,13 @@ from .events import (
 )
 from .generation import generate_with_retry
 from .session import Session, SessionStore
-from .tool_policy import ToolPolicy, PolicyVerdict
 from .runtime import RunContext, RunDeadlineExceeded, RunLimits
+from .tool_execution import (
+    ActiveToolBatch,
+    ToolDispatcher,
+    make_skipped_tool_result,
+)
+from .tool_policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +56,6 @@ logger = logging.getLogger(__name__)
 _FINAL_ITERATION_WRAPUP = (
     "This is your final step; you cannot call any more tools after this. "
     "Provide your best final answer using the information you already have."
-)
-
-# Synthetic error for exact repeat calls in the same run.
-_STALL_MESSAGE = (
-    "You already called this tool with identical arguments; re-running it will "
-    "not produce a different result. Try different arguments or a different "
-    "approach."
 )
 
 # Appended once when consecutive tool failures cross the threshold.
@@ -80,176 +73,6 @@ _SKIPPED_TOOL_DEADLINE_MESSAGE = (
 _SKIPPED_TOOL_BUDGET_MESSAGE = (
     "tool call skipped because the run token budget was exceeded"
 )
-_CANCELLED_TOOL_UNKNOWN_MESSAGE = "tool call outcome is unknown because execution was cancelled while the call was in flight"
-_CANCELLED_TOOL_NOT_STARTED_MESSAGE = (
-    "tool call was not executed because execution was cancelled"
-)
-
-
-@dataclass
-class _ActiveToolBatch:
-    """Cancellation state for one sequential assistant tool-use batch."""
-
-    tool_uses: list[ToolUseBlock]
-    _results: list[ToolResultBlock] = field(default_factory=list, init=False)
-    _next_index: int = field(default=0, init=False)
-    _in_flight: ToolUseBlock | None = field(default=None, init=False)
-    _appended: bool = field(default=False, init=False)
-
-    def start_dispatch(self, tool_use: ToolUseBlock) -> None:
-        if self._in_flight is not None:
-            raise RuntimeError("another tool call is already in flight")
-        expected = self.tool_uses[self._next_index]
-        if tool_use is not expected:
-            raise ValueError("tool calls must be dispatched in batch order")
-        self._in_flight = tool_use
-
-    def complete(self, result: ToolResultBlock) -> None:
-        expected = self.tool_uses[self._next_index]
-        if (result.tool_use_id, result.name) != (
-            expected.id,
-            expected.name,
-        ):
-            raise ValueError("tool result does not match the next tool call")
-        self._results.append(result)
-        self._next_index += 1
-        self._in_flight = None
-
-    def complete_remaining(self, results: list[ToolResultBlock]) -> None:
-        remaining = self.tool_uses[self._next_index :]
-        expected = [
-            (tool_use.id, tool_use.name) for tool_use in remaining
-        ]
-        actual = [(result.tool_use_id, result.name) for result in results]
-        if actual != expected:
-            raise ValueError("synthetic results must match every remaining tool call")
-        self._results.extend(results)
-        self._next_index = len(self.tool_uses)
-        self._in_flight = None
-
-    def balance_after_interruption(self) -> None:
-        if self._appended:
-            return
-        if self._in_flight is not None:
-            self._results.append(
-                ToolResultBlock(
-                    tool_use_id=self._in_flight.id,
-                    name=self._in_flight.name,
-                    content=_CANCELLED_TOOL_UNKNOWN_MESSAGE,
-                    is_error=True,
-                )
-            )
-            self._next_index += 1
-            self._in_flight = None
-        for tool_use in self.tool_uses[self._next_index :]:
-            self._results.append(
-                ToolResultBlock(
-                    tool_use_id=tool_use.id,
-                    name=tool_use.name,
-                    content=_CANCELLED_TOOL_NOT_STARTED_MESSAGE,
-                    is_error=True,
-                )
-            )
-        self._next_index = len(self.tool_uses)
-
-    def append_to(self, session: Session) -> None:
-        if self._appended:
-            return
-        if self._next_index != len(self.tool_uses):
-            raise ValueError("cannot append an incomplete tool-result batch")
-        session.append_tool_results(self._results)
-        self._appended = True
-
-
-def _canonical_args(args: dict[str, Any]) -> str:
-    """Stable string key for a tool call's arguments (for stall detection).
-
-    Sort keys so reordered-but-equivalent calls match; fall back to repr() so
-    stall detection never breaks dispatch.
-    """
-    try:
-        return json.dumps(args, sort_keys=True, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return repr(args)
-
-
-class _ArgumentValidator(Protocol):
-    """Run-local argument-validation seam used by tool dispatch."""
-
-    def validate(self, args: dict[str, Any]) -> str | None: ...
-
-
-class _ConcreteSchemaValidator(Protocol):
-    """Minimal jsonschema validator surface retained by the run wrapper."""
-
-    def validate(self, instance: Any) -> None: ...
-
-
-class _PermissiveArgumentValidator:
-    """Sentinel used for absent or unusable schemas."""
-
-    def validate(self, args: dict[str, Any]) -> None:
-        return None
-
-
-_PERMISSIVE_VALIDATOR = _PermissiveArgumentValidator()
-
-
-@dataclass
-class _CompiledArgumentValidator:
-    """Concrete JSON Schema validator isolated to one run and tool."""
-
-    name: str
-    concrete: _ConcreteSchemaValidator
-    log: logging.Logger | logging.LoggerAdapter
-    _disabled: bool = field(default=False, init=False)
-
-    def validate(self, args: dict[str, Any]) -> str | None:
-        if self._disabled:
-            return None
-        try:
-            self.concrete.validate(args)
-        except jsonschema.ValidationError as exc:
-            field_path = "/".join(str(part) for part in exc.path) or "(top level)"
-            return (
-                f"invalid arguments for field {field_path!r}: {exc.message}. "
-                f"Expected shape: {json.dumps(exc.schema, ensure_ascii=False)}"
-            )
-        except Exception:  # noqa: BLE001 -- a broken schema stays permissive.
-            self._disabled = True
-            self.log.warning(
-                "tool %s input validator failed; disabling arg validation for this run",
-                self.name,
-                exc_info=True,
-            )
-        return None
-
-
-def _compile_tool_validators(
-    tools: list[dict[str, Any]],
-    *,
-    log: logging.Logger | logging.LoggerAdapter = logger,
-) -> dict[str, _ArgumentValidator]:
-    """Compile each advertised tool schema once for this run."""
-    schemas = {tool["name"]: tool.get("input_schema") or {} for tool in tools}
-    validators: dict[str, _ArgumentValidator] = {}
-    for name, schema in schemas.items():
-        try:
-            validator_cls = validator_for(schema)
-            validator_cls.check_schema(schema)
-            validators[name] = _CompiledArgumentValidator(
-                name=name,
-                concrete=validator_cls(schema),
-                log=log,
-            )
-        except Exception:  # noqa: BLE001 -- malformed tool schemas are permissive.
-            log.warning(
-                "tool %s input_schema is invalid; skipping arg validation",
-                name,
-                exc_info=True,
-            )
-            validators[name] = _PERMISSIVE_VALIDATOR
-    return validators
 
 
 def _with_wrapup(system: str | None) -> str:
@@ -291,7 +114,6 @@ async def run_agent(
     max_iterations = limits.max_iterations
     max_tokens = limits.max_tokens
     llm_timeout_seconds = limits.llm_timeout_seconds
-    tool_timeout_seconds = limits.tool_timeout_seconds
     tool_result_max_chars = limits.tool_result_max_chars
     max_run_tokens = limits.max_run_tokens
     max_run_seconds = limits.max_run_seconds
@@ -305,16 +127,22 @@ async def run_agent(
     # `tools` controls what the model sees; MCP dispatch still routes by name.
     if tools is None:
         tools = mcp.get_tools_for_llm()
-    tool_validators = _compile_tool_validators(tools, log=run_log)
     # Policy controls what may run.
     policy = policy if policy is not None else ToolPolicy()
+    tool_dispatcher = ToolDispatcher(
+        runtime=mcp,
+        policy=policy,
+        tools=tools,
+        limits=limits,
+        context=context,
+        log=run_log,
+    )
     iteration = 0
     cumulative = CompletionUsage()
 
-    # Run-scoped state for repeat-call detection and failure nudging.
-    seen_calls: set[tuple[str, str]] = set()
+    # Run-scoped state for failure nudging and cancellation repair.
     consecutive_tool_errors = 0
-    active_tool_batch: _ActiveToolBatch | None = None
+    active_tool_batch: ActiveToolBatch | None = None
 
     _emit = context.emit
 
@@ -350,25 +178,17 @@ async def run_agent(
             session = session.staged_copy()
 
     async def _publish_tool_batch(
-        batch: _ActiveToolBatch,
+        batch: ActiveToolBatch,
         *,
         continue_work: bool,
     ) -> None:
         batch.append_to(session)
         await _publish_checkpoint(continue_work=continue_work)
 
-    async def _balance_interrupted_tool_batch(batch: _ActiveToolBatch) -> None:
+    async def _balance_interrupted_tool_batch(batch: ActiveToolBatch) -> None:
         """Best-effort protocol balancing without replacing the primary signal."""
         batch.balance_after_interruption()
         await _publish_tool_batch(batch, continue_work=False)
-
-    def _skipped_result(tool_use: ToolUseBlock, content: str) -> ToolResultBlock:
-        return ToolResultBlock(
-            tool_use_id=tool_use.id,
-            name=tool_use.name,
-            content=content,
-            is_error=True,
-        )
 
     def _skipped_tool_events(
         skipped_tools: list[ToolUseBlock],
@@ -387,7 +207,7 @@ async def run_agent(
                         input=skipped.input,
                     )
                 )
-            result = _skipped_result(skipped, content)
+            result = make_skipped_tool_result(skipped, content)
             events.append(
                 ToolResultEvent(
                     id=skipped.id,
@@ -520,7 +340,9 @@ async def run_agent(
         # Establish tool-batch state before any post-response cancellation point.
         session.append_assistant(response)
         tool_uses = response.tool_uses()
-        active_tool_batch = _ActiveToolBatch(tool_uses) if tool_uses else None
+        active_tool_batch = (
+            ActiveToolBatch(tuple(tool_uses)) if tool_uses else None
+        )
 
         try:
             # A complete non-tool response is terminal and safe immediately.
@@ -663,118 +485,40 @@ async def run_agent(
                     yield await _emit(_done(reason="deadline_exceeded"))
                     return
 
-                # Exact repeat calls get a synthetic error instead of re-execution.
-                call_key = (
-                    tool_use.name,
-                    _canonical_args(tool_use.input),
+                try:
+                    dispatch_result = await tool_dispatcher.dispatch(
+                        active_tool_batch,
+                        tool_use,
+                    )
+                except RunDeadlineExceeded:
+                    events, skipped_results = _skipped_tool_events(
+                        tool_uses[tool_index:],
+                        _SKIPPED_TOOL_DEADLINE_MESSAGE,
+                        first_call_already_emitted=True,
+                    )
+                    active_tool_batch.complete_remaining(skipped_results)
+                    for event in events:
+                        yield await _emit(event)
+                    await _publish_tool_batch(
+                        active_tool_batch,
+                        continue_work=False,
+                    )
+                    active_tool_batch = None
+                    elapsed = context.elapsed_seconds()
+                    run_log.warning(
+                        "run exceeded max_run_seconds=%.1f during tool "
+                        "dispatch (elapsed=%.1fs)",
+                        max_run_seconds,
+                        elapsed,
+                    )
+                    yield await _emit(_done(reason="deadline_exceeded"))
+                    return
+
+                content = clip_content(
+                    dispatch_result.content,
+                    tool_result_max_chars,
                 )
-                tool_latency_ms: float | None = None
-                if call_key in seen_calls:
-                    run_log.info(
-                        "stall: repeat call to %s with identical args; skipping",
-                        tool_use.name,
-                    )
-                    content = _STALL_MESSAGE
-                    is_error = True
-                else:
-                    seen_calls.add(call_key)
-                    validation_error: str | None
-                    if tool_use.parse_error is not None:
-                        validation_error = (
-                            "tool call arguments were not valid JSON "
-                            f"({tool_use.parse_error}); "
-                            "return the arguments as a JSON object matching the tool schema."
-                        )
-                    else:
-                        validator = tool_validators.get(
-                            tool_use.name, _PERMISSIVE_VALIDATOR
-                        )
-                        validation_error = validator.validate(tool_use.input)
-
-                    decision = (
-                        policy.check(tool_use.name, tool_use.input)
-                        if validation_error is None
-                        else None
-                    )
-                    if validation_error is not None:
-                        run_log.info(
-                            "invalid args for %s: %s",
-                            tool_use.name,
-                            validation_error,
-                        )
-                        content = validation_error
-                        is_error = True
-                    elif decision is not None and decision.verdict is PolicyVerdict.DENY:
-                        run_log.info("policy denied %s", tool_use.name)
-                        reason = decision.reason
-                        assert reason is not None
-                        content = reason
-                        is_error = True
-                    else:
-                        tool_started = time.perf_counter()
-                        active_tool_batch.start_dispatch(tool_use)
-                        try:
-                            effective_tool_timeout = _effective_timeout(
-                                tool_timeout_seconds
-                            )
-                            if effective_tool_timeout and effective_tool_timeout > 0:
-                                async with asyncio.timeout(effective_tool_timeout):
-                                    call_result = await mcp.call_tool(
-                                        tool_use.name,
-                                        tool_use.input,
-                                    )
-                            else:
-                                call_result = await mcp.call_tool(
-                                    tool_use.name,
-                                    tool_use.input,
-                                )
-                            content = call_result.content
-                            is_error = call_result.is_error
-                        except TimeoutError:
-                            if _deadline_exceeded():
-                                events, skipped_results = _skipped_tool_events(
-                                    tool_uses[tool_index:],
-                                    _SKIPPED_TOOL_DEADLINE_MESSAGE,
-                                    first_call_already_emitted=True,
-                                )
-                                active_tool_batch.complete_remaining(skipped_results)
-                                for event in events:
-                                    yield await _emit(event)
-                                await _publish_tool_batch(
-                                    active_tool_batch,
-                                    continue_work=False,
-                                )
-                                active_tool_batch = None
-                                elapsed = context.elapsed_seconds()
-                                run_log.warning(
-                                    "run exceeded max_run_seconds=%.1f during tool "
-                                    "dispatch (elapsed=%.1fs)",
-                                    max_run_seconds,
-                                    elapsed,
-                                )
-                                yield await _emit(_done(reason="deadline_exceeded"))
-                                return
-                            run_log.warning(
-                                "tool %s timed out after %ss",
-                                tool_use.name,
-                                tool_timeout_seconds,
-                            )
-                            content = (
-                                f"tool {tool_use.name!r} timed out after "
-                                f"{tool_timeout_seconds}s"
-                            )
-                            is_error = True
-                        except Exception as exc:
-                            run_log.exception(
-                                "tool execution raised for %s", tool_use.name
-                            )
-                            content = f"tool execution raised: {exc}"
-                            is_error = True
-                        tool_latency_ms = round(
-                            (time.perf_counter() - tool_started) * 1000, 2
-                        )
-
-                content = clip_content(content, tool_result_max_chars)
+                is_error = dispatch_result.is_error
                 consecutive_tool_errors = consecutive_tool_errors + 1 if is_error else 0
                 if (
                     is_error
@@ -795,7 +539,7 @@ async def run_agent(
                         name=tool_use.name,
                         content=content,
                         is_error=is_error,
-                        latency_ms=tool_latency_ms,
+                        latency_ms=dispatch_result.latency_ms,
                     )
                 )
 

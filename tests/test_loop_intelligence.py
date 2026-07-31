@@ -32,7 +32,8 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from agent.loop import _FAILURE_NUDGE, _FINAL_ITERATION_WRAPUP, _STALL_MESSAGE
+from agent.loop import _FAILURE_NUDGE, _FINAL_ITERATION_WRAPUP
+from agent.tool_execution import _STALL_MESSAGE
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from mcp_layer.client import ToolCallResult

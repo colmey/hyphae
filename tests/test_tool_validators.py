@@ -1,4 +1,4 @@
-"""Plan 08 coverage for run-scoped compiled tool validators."""
+"""Session 07 coverage for run-scoped compiled tool validators."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-import agent.loop as loop_module
+import agent.tool_execution as tool_execution_module
 from agent import DoneEvent, InMemorySessionStore, RunLimits, ToolPolicy, run_agent
 from agent.tool_policy import PolicyDecision, PolicyVerdict
 from llm.client import GenerationRequest, LLMClient
@@ -105,7 +105,7 @@ async def test_valid_schema_compiles_once_and_validator_is_reused(
         "properties": {"q": {"type": "string"}},
         "required": ["q"],
     }
-    real_validator_for = loop_module.validator_for
+    real_validator_for = tool_execution_module.validator_for
     counts = {"select": 0, "check": 0, "construct": 0, "validate": 0}
 
     class CountingValidator:
@@ -126,7 +126,7 @@ async def test_valid_schema_compiles_once_and_validator_is_reused(
         counts["select"] += 1
         return CountingValidator
 
-    monkeypatch.setattr(loop_module, "validator_for", select_validator)
+    monkeypatch.setattr(tool_execution_module, "validator_for", select_validator)
     llm = ScriptedLLM(
         [_tool_call({"q": "one"}, "c1"), _tool_call({"q": "two"}, "c2"), _answer()]
     )
@@ -143,19 +143,23 @@ async def test_duplicate_tool_names_compile_only_the_last_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     selected: list[Any] = []
-    real_validator_for = loop_module.validator_for
+    real_validator_for = tool_execution_module.validator_for
 
     def recording_validator_for(schema: Any) -> Any:
         selected.append(schema)
         return real_validator_for(schema)
 
-    monkeypatch.setattr(loop_module, "validator_for", recording_validator_for)
+    monkeypatch.setattr(
+        tool_execution_module,
+        "validator_for",
+        recording_validator_for,
+    )
     tools = [
         {"name": "srv__tool", "input_schema": {"type": "string"}},
         {"name": "srv__tool", "input_schema": {"type": "object"}},
     ]
 
-    validators = loop_module._compile_tool_validators(tools)
+    validators = tool_execution_module._compile_tool_validators(tools)
 
     assert len(validators) == 1
     assert selected == [{"type": "object"}]
@@ -200,7 +204,11 @@ async def test_runtime_validator_failure_warns_once_then_stays_permissive(
             validate_calls += 1
             raise RuntimeError("unresolvable schema reference")
 
-    monkeypatch.setattr(loop_module, "validator_for", lambda schema: BrokenValidator)
+    monkeypatch.setattr(
+        tool_execution_module,
+        "validator_for",
+        lambda schema: BrokenValidator,
+    )
     llm = ScriptedLLM(
         [_tool_call({"q": 1}, "c1"), _tool_call({"q": 2}, "c2"), _answer()]
     )
@@ -277,14 +285,18 @@ async def test_different_runs_build_independent_validator_maps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     selected = 0
-    real_validator_for = loop_module.validator_for
+    real_validator_for = tool_execution_module.validator_for
 
     def recording_validator_for(schema: Any) -> Any:
         nonlocal selected
         selected += 1
         return real_validator_for(schema)
 
-    monkeypatch.setattr(loop_module, "validator_for", recording_validator_for)
+    monkeypatch.setattr(
+        tool_execution_module,
+        "validator_for",
+        recording_validator_for,
+    )
     schema = {"type": "object"}
 
     await _collect(ScriptedLLM([_answer()]), MutableMCP(schema))

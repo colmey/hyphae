@@ -31,7 +31,8 @@ from agent import (
     UsageEvent,
     run_agent,
 )
-from agent.loop import _FAILURE_NUDGE, _STALL_MESSAGE
+from agent.loop import _FAILURE_NUDGE
+from agent.tool_execution import _STALL_MESSAGE
 from llm.client import GenerationRequest, LLMClient
 from llm.providers.gemini import GeminiLLMClient
 from llm.providers.openai_compatible import OpenAICompatibleLLMClient

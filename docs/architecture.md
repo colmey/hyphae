@@ -1,4 +1,4 @@
-# PyAiHarness — Architecture
+# hyphae — Architecture
 
 How the harness is put together: the request flow, the stack, the
 directory layout, every subsystem, and the architectural principles and
@@ -23,36 +23,36 @@ design decisions behind them.
 ## System Overview
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                              HTTP Client                              │
-│                                  │                                    │
-│                                  ▼                                    │
-│                          POST /chat, GET /health                      │
-│                                                                       │
-│  ┌──────────────────────── api/routes.py ───────────────────────┐    │
-│  │                                                                │    │
-│  │  1. Read the plain-text prompt; resolve/create the session     │    │
-│  │  2. Orchestrate -> pick model + tools + system                 │    │
-│  │  3. Append user message, run agent loop with the selections    │    │
-│  │  4. Stream-collect the answer text                             │    │
-│  │  5. Return plain text + X-Session-Id / X-Done-Reason headers   │    │
-│  │                                                                │    │
-│  └────────────┬──────────────────────────┬───────────────────────┘    │
-│               │                          │                              │
-│               ▼                          ▼                              │
-│  ┌───── orchestrator/orchestrator.py ──┐  ┌── agent/loop.py: run_agent()│
-│  │  one LLM call w/ response_schema    │  │                              │
-│  │  -> OrchestrationDecision {result,  │  │  ┌── one iteration ─────┐   │
-│  │     fallback_used, fallback_reason} │  │  │ llm.complete(...)    │   │
-│  └─────────────┬───────────────────────┘  │  │ for each tool_use:   │   │
-│                │                            │  │   mcp.call_tool(...) │   │
-│                ▼                            │  │ session save         │   │
-│  ┌────────── LLMRegistry ─────────────┐    │  │ if no tool_uses:done │   │
-│  │  model_id -> LLMClient (lazy)      │    │  └─────────────────────┘   │
-│  └─────────────────────────────────────┘    └──────────────────────────┘  │
-│                                                                            │
-│       LLMs ◄────────────── used by both ────────────► MCP servers          │
-└────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              HTTP Client                                    │
+│                                  │                                          │
+│                                  ▼                                          │
+│                          POST /chat, GET /health                            │
+│                                                                             │
+│  ┌──────────────────────── api/routes.py ───────────────────────┐           │
+│  │                                                                │         │
+│  │  1. Read the plain-text prompt; resolve/create the session     │         │
+│  │  2. Orchestrate -> pick model + tools + system                 │         │
+│  │  3. Append user message, run agent loop with the selections    │         │
+│  │  4. Stream-collect the answer text                             │         │
+│  │  5. Return plain text + X-Session-Id / X-Done-Reason headers   │         │
+│  │                                                                │         │
+│  └────────────┬─────────────────────────────────┬────────────────┘          │
+│               │                                 │                           │
+│               ▼                                 ▼                           │
+│  ┌───── orchestrator/orchestrator.py ──┐  ┌── agent/loop.py: run_agent()    │
+│  │  one LLM call w/ response_schema    │  │                            │    │
+│  │  -> OrchestrationDecision {result,  │  │  ┌── one iteration ─────┐  │    │
+│  │     fallback_used, fallback_reason} │  │  │ llm.complete(...)    │  │    │
+│  └─────────────┬───────────────────────┘  │  │ for each tool_use:   │  │    │
+│                │                          │  │   mcp.call_tool(...) │  │    │
+│                ▼                          │  │ session save         │  │    │
+│  ┌────────── LLMRegistry ─────────────┐   │  │ if no tool_uses:done │  │    │
+│  │  model_id -> LLMClient (lazy)      │   │  └──────────────────────┘  │    │
+│  └─────────────────────────────────────┘  └────────────────────────────┘    │
+│                                                                             │
+│       LLMs ◄────────────── used by both ────────────► MCP servers           │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 The **orchestrator** is an LLM-driven router that runs once per request
@@ -63,10 +63,17 @@ system prompt the agent will run with. Its output is then fed into
 worlds** — the only module that touches both the LLM client and the MCP
 manager.
 
-> **Caching lives outside the harness.** Response caching is handled by a
-> separate layer/service in front of this harness, not inside it. The
-> request body is kept small and declarative (`prompt` + optional
-> `commands` + optional `MCP`) so a fronting cache can forward it unchanged.
+`TurnRunner.open()` owns the accepted-turn envelope. After the route resolves or
+creates the session identity, it claims that identity before consuming the
+latest stored history, inventory, or routing inputs. It then creates one
+`RunContext` with one run ID and absolute deadline, snapshots tools once,
+resolves the actual model, and holds the claim until event iteration and cleanup
+finish. `TurnMetadata` carries the resolved model and optional sanitized
+`OrchestrationDecisionEvent` for both buffered and streaming renderers.
+
+> **Caching lives outside the harness.** Native chat is a plain-text dumb pipe;
+> the OpenAI-compatible surface accepts the standard `messages` history. A
+> fronting cache can treat both contracts without harness-owned response state.
 
 ---
 
@@ -78,29 +85,28 @@ manager.
 - **`google-genai`** for the LLM (not the deprecated `google-generativeai`).
 - **Pydantic + pydantic-settings** for config and request/response schemas.
 - **PyYAML** for the MCP config file and the models registry.
-- **`asgi-lifespan`** (test-only) for running FastAPI lifespan in
-  in-process httpx tests.
+- **`jsonschema`** to validate tool-call arguments against each tool's
+  declared `input_schema` at the dispatch seam (Phase 1 bounded runs).
+- **`pytest` + AnyIO** for hermetic regression discovery and async tests, and
+  **`asgi-lifespan`** for FastAPI lifespan in in-process httpx checks.
 
 ### Runtime conventions
 
-- **Bootstrap is in-process and explicit.** `bootstrap.load_secrets()`
-  loads the project's `.env` file into `os.environ` (via `python-dotenv`).
-  Every entry point (`main.py`, `tests/smoke_test_*.py`, any future CLI)
-  calls `load_secrets()` as its first action.
-- **Config lives in `.env`.** All environment variables are kept in a
-  `.env` file at the project root (template: `.env.example`). Real
-  environment variables already set in the process win over `.env`, so the
-  same file works for local dev, containers, and CI.
-- **Settings are pulled lazily** via `harness_config.get_settings()`.
-  Nothing in the codebase should `from harness_config import settings` at
-  module level — the global instance doesn't exist. Lazy + cached means
-  bootstrap runs first and is picked up correctly.
+- **Pydantic Settings owns `.env`.** `SettingsConfigDict.env_file` is the only
+  production reader. A private interpolation map retains raw, source-provided
+  declared and undeclared values without exposing undeclared keys as Settings
+  fields or mutating `os.environ`; real process values win.
+  `Settings(_env_file=None)` is the hermetic-test boundary.
+- **Settings are pulled lazily** via `config.get_settings()`. Nothing imports a
+  module-level settings instance, so importing `main` is credential-free and
+  leaves process environment state untouched.
 - **`runscript.sh`** is the canonical launcher; it cd's to the project
   root, activates the venv, prepends `.` to `PYTHONPATH` (so scripts in
-  subdirs like `tests/` can still import `bootstrap`, `harness_config`,
+  subdirs like `tests/` can still import `config`, `main`,
   etc.), and runs Python.
 - **LLM providers implemented: Gemini and OpenAI-compatible**, each isolated in
-  `llm/providers/`. The OpenAI client (`llm/providers/openai.py`) speaks the
+  `llm/providers/`. The OpenAI-compatible client
+  (`llm/providers/openai_compatible/`) speaks the
   OpenAI wire protocol, so it also drives any OpenAI-compatible server (local
   Ollama/vLLM) via `base_url`. The **default runtime** is a local
   OpenAI-compatible Qwen (see `config/models.yaml`). Anthropic key fields exist
@@ -116,32 +122,26 @@ manager.
 ## Directory Layout
 
 ```
-PyAiHarness/
+hyphae/
 ├── main.py                   # FastAPI app, lifespan, wires everything
-├── bootstrap.py              # load_secrets() - loads .env into os.environ
-├── harness_config.py         # Settings (env) + MCPConfig (YAML loader)
-├── requirements.txt
+├── pyproject.toml            # Direct dependencies and tool configuration
+├── uv.lock                   # Exact tested dependency graph
 ├── .env.example              # Template for .env (copy and fill in)
-├── setup.sh                  # Creates .venv + installs deps + seeds .env
+├── setup.sh                  # Frozen uv sync + one-time .env seeding
 ├── runscript.sh              # Standard launcher (venv + PYTHONPATH + python)
 ├── chat_client.py            # Optional interactive REPL client (uses HTTP)
 ├── harness_client.py         # Reference async Python client (orchestration-aware)
 │
-├── config/                   # All runtime YAML/text config
-│   ├── mcp_config.yaml       # MCP server definitions
+├── config/                   # Config package: Settings, schemas, typed loaders
+│   ├── mcp_config.yaml       #   ...plus the runtime YAML/text config it loads
 │   ├── models.yaml           # Routable model registry for the orchestrator
 │   └── orchestrator_prompt.md  # Orchestrator's own system prompt
 │
-├── tests/                    # Standalone smoke scripts (NOT pytest)
-│   ├── README.md
-│   ├── smoke_test_config.py        # Step 1: settings + MCP config parsing
-│   ├── smoke_test_mcp.py           # Step 2: MCP connectivity
-│   ├── smoke_test_llm.py           # Step 3: LLM client round-trips
-│   ├── smoke_test_session.py       # Step 4: session store, eviction, guard
-│   ├── smoke_test_agent.py         # Step 5: full agent loop (Python API)
-│   ├── smoke_test_orchestrator.py  # Step 6: orchestration decisions
-│   ├── smoke_test_http.py          # Step 7: full HTTP surface in-process
-│   └── smoke_test_concurrency.py   # Concurrent requests: isolation + 409 guard
+├── tests/                    # Hermetic pytest suite + marked live checks
+│   ├── conftest.py               # Focused shared fakes and fixtures
+│   ├── test_*.py                  # Hermetic regression tests
+│   ├── test_*_live.py             # Explicit configured-backend integrations
+│   └── eval_agent.py              # Separate YAML-driven evaluation runner
 │
 ├── mcp_layer/                # NOT `mcp/` - shadow-free name for the SDK
 │   ├── __init__.py
@@ -152,10 +152,11 @@ PyAiHarness/
 │   ├── __init__.py
 │   ├── schemas.py            # Provider-agnostic Message / *Block / AssistantMessage
 │   ├── client.py             # LLMClient ABC + _PROVIDERS registry + factories (SDK-free)
-│   └── providers/            # One file per provider; imported lazily by the registry
+│   ├── tool_prompt_protocol.py  # JSON tool protocol for prose-only models
+│   └── providers/            # Provider modules/packages; imported lazily by the registry
 │       ├── __init__.py
-│       ├── gemini.py         # GeminiLLMClient (owns the google-genai SDK)
-│       └── openai.py         # OpenAILLMClient (OpenAI + OpenAI-compatible, e.g. Ollama)
+│       ├── gemini/           # Gemini client lifecycle + provider-specific codec
+│       └── openai_compatible/  # OpenAICompatibleLLMClient (OpenAI wire protocol)
 │
 ├── agent/
 │   ├── __init__.py
@@ -163,29 +164,31 @@ PyAiHarness/
 │   ├── events.py             # TextEvent / ToolCallEvent / ToolResultEvent /
 │   │                         #   UsageEvent / OrchestrationDecisionEvent /
 │   │                         #   DoneEvent / ErrorEvent
-│   ├── tracing.py            # Tracer ABC / NoOpTracer / JSONLTracer + run_id log adapter
-│   └── loop.py               # run_agent() - the async-generator reasoning loop
+│   ├── context.py            # assemble_context() seam: token estimator, budget,
+│   │                         #   naive / compaction strategies (view-only)
+│   ├── generation.py         # Provider-neutral attempts, retries, stream cleanup
+│   ├── tracing.py            # Async bounded JSONL tracing + run_id log adapter
+│   └── loop.py               # run_agent() - event/transcript/tool composition
 │
 ├── orchestrator/             # Routes requests to model + tool subset + system
 │   ├── __init__.py
-│   ├── schemas.py            # ModelEntry, ModelsConfig, OrchestrationResult,
-│   │                         #   OrchestrationDecision
-│   ├── config.py             # load_models_config, load_orchestrator_prompt
+│   ├── schemas.py            # OrchestrationProposal / decision/preferences values
 │   ├── registry.py           # LLMRegistry (lazy LLMClient cache per model_id)
 │   └── orchestrator.py       # Orchestrator.decide() -> OrchestrationDecision
 │
 ├── api/
-│   ├── __init__.py
-│   ├── schemas.py            # ChatRequest (strict; prompt + Commands + MCP prefs),
-│   │                         #   ChatResponse, HealthResponse, OrchestrationInfo (Pydantic)
+│   ├── __init__.py           # Combines the routers into one
+│   ├── schemas.py            # HealthResponse and HTTP TokenUsage (Pydantic)
 │   ├── dependencies.py       # FastAPI Depends() providers (pull from app.state)
-│   └── routes.py             # POST /chat, GET /health
+│   ├── turn.py               # Shared orchestrate→loop core + TurnRunner seam (events/run)
+│   ├── routes.py             # Native: GET /health, POST /chat, POST /chat/stream
+│   └── openai_compatible.py  # OpenAI adapter: POST /v1/chat/completions, GET /v1/models
 │
 └── docs/                     # Split reference docs (read on demand)
     ├── README.md             # Index / router + quick start
     ├── architecture.md       # This file: overview, subsystems, principles, decisions
     ├── configuration.md      # Env vars + config/*.yaml + orchestrator prompt
-    ├── api.md                # HTTP /chat and /health contract
+    ├── api.md                # HTTP /chat, /chat/stream, /health, and /v1 contract
     └── operations.md         # Running, extending, smoke tests, limitations
 ```
 
@@ -195,57 +198,53 @@ PyAiHarness/
 
 ### Config Layer
 
-`harness_config.py` exposes two things:
-
-**`Settings`** — pydantic-settings model. Always accessed via
-`get_settings()`, never instantiated directly.
+The `config` package exposes runtime `Settings` and typed file-config loading.
+`Settings` is accessed via `get_settings()` in production and never instantiated
+at module import.
 
 - `Settings.api_key_for_provider(provider)` returns the key for an
   arbitrary provider — used by each provider's builder so the orchestrator
   can spin up clients for multiple providers in one process. It checks the
   typed key fields first, then falls back to the conventional
-  `<PROVIDER>_API_KEY` env var, so a newly registered credentialed provider
-  needs no change here (and key-less providers like a local Ollama never
-  call it).
-- `Settings.required_api_key()` is a thin wrapper over
-  `api_key_for_provider(llm_provider)`, preserved for backward compatibility.
+  `<PROVIDER>_API_KEY` from the Settings-owned `.env`/process mapping, so a newly
+  registered credentialed provider needs no change here (and key-less
+  providers never call it).
+- `Settings.interpolation_environment()` exposes only raw source-provided
+  values, with the process environment overlaid last. Declared defaults are not
+  synthesized, and undeclared dotenv values remain private to this mapping.
 
-**`MCPConfig`** + **`load_mcp_config(path)`** — discriminated-union Pydantic
-model. `MCPConfig.enabled_servers()` filters out disabled entries.
+`load_mcp_config_from_settings(settings)` composes that mapping with the
+configured MCP path. Direct callers can instead use
+`load_mcp_config(path, environment=...)`, which defaults to `os.environ`.
+Both return `MCPConfig`, whose discriminated server-transport union and
+`enabled_servers()` method define the typed file boundary.
 
 ### MCP Layer
 
 `mcp_layer/` (not `mcp/`, to avoid shadowing the official SDK package).
 
-**`MCPClient`** — one instance per configured server.
+**`MCPClient`** wraps one server session and transport. It connects, lists tools,
+filters `disabled_tools`, calls raw tool names, and flattens MCP content blocks
+to text for v1. MCP-declared errors remain ordinary tool results; exceptions at
+the SDK call boundary become provider-neutral transport/protocol failures.
 
-- Wraps `mcp.ClientSession` and its transport.
-- Uses `AsyncExitStack` to manage layered async-context-managers (transport
-  → ClientSession) imperatively. Standard pattern; don't refactor away.
-- Picks the right transport: `streamablehttp_client`, `sse_client`, or
-  `stdio_client`.
-- `connect()`: opens transport, initializes session, fetches `list_tools()`,
-  filters out `disabled_tools`.
-- `call_tool(name, args)` returns `ToolCallResult(content: str, is_error: bool)`.
-  Content blocks are flattened to text in v1; non-text blocks are
-  `repr()`'d.
-- `close()`: tears down both session and transport.
+**`MCPManager`** aggregates clients, connects enabled servers in parallel, and
+indexes healthy tools as `{server}__{tool}` using provider-neutral `ToolSpec`
+records. It retains a typed state record for every enabled server, bounds each
+complete startup or recovery connection, and permits partial startup: failed
+servers become `unhealthy` while healthy servers and the HTTP application remain
+available.
+Its immutable status snapshot drives `/health`; `connected_servers` remains the
+healthy-only compatibility view.
 
-**`MCPManager`** — aggregates all clients.
-
-- Holds `dict[server_name, MCPClient]` plus a `_tool_index` mapping
-  namespaced names to `(server, raw_tool)`.
-- `startup()`: connects to all enabled servers in parallel via
-  `asyncio.gather`. Graceful degradation: a failed server is logged and
-  skipped, not fatal.
-- **Tool namespacing**: external callers see `{server}__{tool}`. The
-  separator `__` is enforced by config validation.
-- `get_tools_for_llm()` returns provider-agnostic dicts: `{name,
-  description, input_schema}`. The LLM client reshapes per provider.
-- `call_tool(namespaced_name, args)` parses the namespace, routes to the
-  right client. Unknown tools / disconnected servers return
-  `is_error=True` rather than raising.
-- `shutdown()` closes all clients in parallel.
+Current advertised inventory is separate from last-known route ownership.
+Transport/protocol failure removes all advertised tools for that server and
+marks it unhealthy, but retains formerly known names solely to route a later
+call into one lock-coordinated lazy reconnect. The ambiguous failed call is
+never replayed. Successful reconnect atomically replaces that server's current
+and last-known inventories; removed tools are not dispatched and newly added
+tools become visible to the next inventory snapshot. Never-seen names do not
+probe servers, and no periodic recovery task exists.
 
 ### LLM Layer
 
@@ -259,10 +258,18 @@ speaks:
   constructors `user(text)`, `assistant(blocks)`, `tool_results(results)`.
 - Content blocks:
   - `TextBlock(text, provider_metadata)`
-  - `ToolUseBlock(id, name, input, provider_metadata)`
+  - `ToolUseBlock(id, name, input, provider_metadata, parse_error)`
   - `ToolResultBlock(tool_use_id, name, content, is_error)`
-- **`AssistantMessage(content, stop_reason, model)`** with helpers
-  `text_blocks()`, `tool_uses()`, `to_message()`.
+- **`AssistantMessage(content, stop_reason, model, reasoning, raw_stop_reason)`**
+  with helpers `text_blocks()`, `tool_uses()`, `to_message()`. `stop_reason`
+  uses the canonical vocabulary below; `raw_stop_reason` retains the optional
+  provider-native value for diagnostics. `reasoning` is never replayed through
+  `to_message()`; the `/v1` streaming adapter may render its sanitized text
+  through `delta.reasoning_content`.
+- **`ModelProfile`**: the immutable, provider-agnostic capability profile
+  resolved from one `models.yaml` row. It carries
+  `supports_native_tools`, `thinking`, and optional sampling
+  (`temperature`, `top_p`, `top_k`) across the client build chain as one value.
 
 **Two non-obvious fields** that exist for specific reasons:
 
@@ -276,21 +283,72 @@ speaks:
    the `tool_use_id`, but Gemini's `function_response` requires the
    function name. The agent loop populates it from the matching
    `ToolUseBlock`.
+3. **`parse_error`** on `ToolUseBlock`. Providers set this when the model
+   emitted a tool call whose argument string was not valid JSON. The input
+   remains `{}` for shape compatibility, but the loop turns the parse failure
+   into a teaching `is_error` result instead of silently executing an empty
+   call.
+4. **`reasoning`** on `AssistantMessage`. Provider-extracted thinking lives as
+   a sibling of content, not inside `provider_metadata`. The loop may emit it
+   as a `ReasoningEvent`; session replay stays clean, while `/v1` streaming can
+   expose the sanitized text through its configured reasoning channel.
+
+**Canonical provider outcomes:**
+
+| Outcome | Meaning |
+|---|---|
+| `end_turn` | Ordinary natural completion |
+| `tool_use` | One or more real tool-use blocks were returned |
+| `max_tokens` | Provider output limit reached |
+| `empty` | No candidate or usable content from an otherwise normal response |
+| `content_filter` | Provider safety/content policy blocked output |
+| `refusal` | Provider returned an explicit refusal |
+| `provider_error` | Missing, unknown, or abnormal provider termination |
+| `incomplete_stream` | Visible answer text arrived without a terminal provider message |
+
+Real tool-use blocks are authoritative over missing or inconsistent provider
+finish reasons. Only `empty` is response-retryable; blocked, refused, truncated,
+incomplete, and provider-error outcomes are never retried merely for lacking
+text.
 
 `llm/client.py` — the abstraction + the provider registry, and **nothing
 SDK-specific** (importing it never pulls in a provider SDK):
 
-- **`LLMClient`** ABC with one method:
+- **`GenerationRequest`** is the single shallow-immutable provider-generation
+  input. Its message/tool containers are borrowed and must not be mutated;
+  retries, timeouts, deadlines, cancellation, tracing, and persistence remain
+  with their execution owners.
+- **`LLMClient`** ABC with two call modes:
   ```python
-  async complete(
-      messages: list[Message],
-      tools: list[dict] | None = None,
-      system: str | None = None,
-      max_tokens: int | None = None,
-      response_schema: type | None = None,
-      thinking_level: str | None = None,
-  ) -> AssistantMessage
+  async complete(request: GenerationRequest) -> AssistantMessage
+
+  async stream(
+      request: GenerationRequest,
+  ) -> AsyncIterator[StreamChunk]
+
+  async aclose() -> None
   ```
+  `complete()` is the canonical completed-turn API and remains the path for
+  structured-output calls such as orchestration. `stream()` is an optional
+  token-streaming call mode for ordinary agent turns; the ABC fallback calls
+  `complete()`, emits optional reasoning as a coarse `ReasoningDelta`, then
+  emits each final text block as a coarse `TextDelta` and finishes with
+  `StreamEnd(AssistantMessage)`. Native streaming providers override it.
+  Streaming rejects a non-`None` `response_schema` explicitly before making a
+  provider call.
+  `aclose()` is an idempotent no-op for resource-free clients. Provider
+  implementations override it to release their long-lived async SDK client.
+- **`StreamChunk`** is provider-agnostic and SDK-free:
+  `TextDelta(text=...)` carries visible assistant text,
+  `ReasoningDelta(text=...)` carries sanitized optional reasoning without
+  provider wrapper syntax, and `StreamEnd(message=...)` carries the fully
+  assembled `AssistantMessage`. Provider adapters own all vendor fields and
+  tag parsing. Streamed reasoning remains provisional until answer text begins:
+  if an eligible retry follows reasoning-only output, the generation layer
+  inserts an explicit interruption marker before the next attempt. The failed
+  attempt is not added to model history. The agent loop streams deltas to
+  callers immediately, then reuses the normal assistant/session/usage/tool tail
+  once `StreamEnd` arrives.
 - **`_PROVIDERS`** — the single source of truth mapping a provider name onto a
   builder. Each builder imports its provider module *lazily* (inside the
   function), so the ABC can be imported without dragging in any SDK, and each
@@ -299,33 +357,53 @@ SDK-specific** (importing it never pulls in a provider SDK):
 - **`supported_providers()`** exposes the registry's keys; config validators
   (`ModelEntry.provider`) key off it so no other place enumerates providers.
 - **`build_llm_client(settings)`** factory dispatches on
-  `settings.llm_provider`. Used by `main.py` to build the legacy/default
+  `settings.llm.provider`. Used by `main.py` to build the legacy/default
   client at startup.
 - **`build_llm_client_from_entry(entry, settings)`** is the multi-model
-  variant. Takes a `ModelEntry` (from `models.yaml`) and pulls the API
-  key by `entry.provider` (not by `settings.llm_provider`), so one
-  process can hold clients for multiple providers simultaneously. Used
-  by `LLMRegistry`.
+  variant. Takes a `ModelEntry` (from `models.yaml`), resolves its
+  `ModelProfile`, and pulls the API key by `entry.provider` (not by
+  `settings.llm.provider`), so one process can hold clients for multiple
+  providers simultaneously. Used by `LLMRegistry`. If the profile declares
+  `supports_native_tools: false`, this factory wraps the provider client in
+  `PromptedToolLLMClient`; omitted or `true` profiles are not wrapped.
 
-**Adding a provider is two steps:** drop `llm/providers/<name>.py` implementing
-the `LLMClient` ABC, and add one entry to `_PROVIDERS`. Nothing else in the
-harness changes — the agent loop, orchestrator routing, session store, MCP
-layer, and `models.yaml` validation are all provider-blind.
+`llm/tool_prompt_protocol.py` — the prompted-tool dialect adapter for weak/prose
+models:
+
+- Renders the already-filtered tool list into compact system-prompt text:
+  tool name, one-line description, and compressed JSON schema.
+- Calls the wrapped provider with `request.tools=None`, so endpoints without
+  native tool calling see only ordinary text.
+- Parses one fenced or whole-response JSON action from visible prose and
+  returns a normal `ToolUseBlock`; final prose remains normal `TextBlock`
+  content.
+- Bad JSON gets one repair prompt. Parsed semantic errors such as an unknown
+  tool or non-object arguments become `ToolUseBlock(parse_error=...)`, which
+  the unchanged loop turns into a model-facing `is_error` result instead of
+  executing `{}`.
+
+This is the second-dialect drop-in proof: native function calls and prompted
+JSON actions differ at the model-interface edge, but both normalize to the
+same `AssistantMessage` contract before the agent loop sees them.
+
+**Adding a provider is two steps:** add `llm/providers/<name>.py` implementing
+`LLMClient`, then add one `_PROVIDERS` entry. The loop, orchestrator, session
+store, MCP layer, and `models.yaml` validation remain provider-blind.
 
 **Structured output (`response_schema`).** Providers that support
-structured output (Gemini, OpenAI) honor a Pydantic class passed here
+structured output (Gemini, OpenAI) honor a Pydantic class carried by the request
 and return JSON conforming to its schema. The orchestrator uses this
-for its routing decision; the agent loop does not. Providers without
-native support may ignore the kwarg.
+for its routing decision; the agent loop does not. It is completion-only;
+streaming rejects it rather than silently ignoring it.
 
 **Thinking level (`thinking_level`).** `"low" | "medium" | "high"` (or
-`None` to leave the model default). The Gemini client maps it to
-`ThinkingConfig(thinking_level=...)`, the model-native deliberation knob;
-an unrecognized value is logged and skipped rather than failing the call.
-The agent loop passes the orchestrator's chosen level through on every
-iteration. Providers without a thinking control may ignore the kwarg.
+`None` to leave the model default). The agent loop passes the orchestrator's
+chosen level through on every iteration. Providers consult the selected
+model's `ModelProfile`: `hint-param` profiles may map it to a request field
+such as `reasoning_effort`, `think-tags` profiles do not add a request knob,
+and `none` profiles log once that the knob is inert.
 
-**Gemini specifics worth knowing** (all isolated in `llm/providers/gemini.py`):
+**Gemini specifics** (isolated in `llm/providers/gemini/`):
 
 - Async via `client.aio.models.generate_content`.
 - **Automatic function calling is disabled** — the agent loop is the
@@ -345,8 +423,59 @@ iteration. Providers without a thinking control may ignore the kwarg.
   subset of OpenAPI 3 — it does **not** accept `additionalProperties`.
   Pydantic emits that field when a model has `ConfigDict(extra="forbid")`.
   Schemas you pass as `response_schema` must therefore avoid `extra="forbid"`
-  (see `OrchestrationResult` for the reference pattern: lenient at the
+  (see `OrchestrationProposal` for the reference pattern: lenient at the
   parse boundary, then sanitized in code).
+- **Reasoning extraction is conservative**: Gemini returns `reasoning=None`
+  unless the SDK exposes thought content in a form the provider can identify
+  without guessing. Gemini `thought_signature` still uses `provider_metadata`
+  for round-trip state.
+
+Gemini preserves the provider enum name in `raw_stop_reason` and applies this
+terminal map:
+
+| Provider state | Canonical outcome |
+|---|---|
+| Actual function-call part | `tool_use`, regardless of finish reason |
+| `STOP` with visible content | `end_turn` |
+| `STOP` without usable content | `empty` |
+| `MAX_TOKENS` | `max_tokens` |
+| `SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`, `IMAGE_RECITATION` | `content_filter` |
+| `FINISH_REASON_UNSPECIFIED`, `LANGUAGE`, `OTHER`, `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, `NO_IMAGE`, `IMAGE_OTHER`, missing, or unknown | `provider_error` |
+| No candidates | `empty` |
+
+**OpenAI-compatible specifics** (isolated in `llm/providers/openai_compatible/`):
+
+- Per-model sampling from `ModelProfile` is copied into the chat-completions
+  request when present.
+- For `thinking: hint-param`, `thinking_level` is passed as
+  `reasoning_effort`. Structured compatible fields (`reasoning_content`,
+  `reasoning`, or `thinking`) and leading `<think>...</think>` content are
+  normalized inside the provider into wrapper-free reasoning values and
+  removed from visible content. For `thinking: none`, the request knob is
+  logged as inert once and omitted.
+- Malformed tool-call argument JSON is surfaced as `ToolUseBlock.parse_error`
+  instead of disappearing into an empty argument object.
+- Missing OpenAI tool IDs are minted once as `call_<uuid>` when the complete
+  tool call is finalized, then reused through dispatch, results, checkpoints,
+  and replay.
+- Real OpenAI requests use `max_completion_tokens`, omit `max_tokens`, and omit
+  `top_k`. Configured compatible endpoints use `max_tokens` and merge `top_k`
+  into `extra_body` without replacing other extension values.
+
+OpenAI preserves the original finish-reason string in `raw_stop_reason` and
+applies this terminal map:
+
+| Provider state | Canonical outcome |
+|---|---|
+| Actual native or legacy function-call block | `tool_use`, regardless of finish reason |
+| `refusal` field without tool content | `refusal` |
+| `stop` with visible content | `end_turn` |
+| `stop` without usable content | `empty` |
+| `length` | `max_tokens` |
+| `content_filter` | `content_filter` |
+| `tool_calls` or `function_call` without a parsed call | `provider_error` |
+| Missing or unknown finish reason | `provider_error` |
+| No choices | `empty` |
 
 ### Agent Layer
 
@@ -357,6 +486,12 @@ iteration. Providers without a thinking control may ignore the kwarg.
 - Mutation API: `append_user(text)`, `append_assistant(response)`,
   `append_tool_results(results)`. The agent loop uses these rather than
   poking `.messages` directly — one seam for future invariant checks.
+- `staged_copy()` preserves identity/timestamps, copies the metadata bag and
+  message list, and shares immutable canonical messages. Native turns route and
+  execute against this copy, never the object currently owned by the store.
+  Persistent turns resolve the latest checkpoint by session ID before staging,
+  so an older caller-held `Session` remains a safe identity handle rather than
+  overwriting newer stored history.
 - `last_assistant_tool_uses()` — convenience for "what tools did the
   model just ask me to run?"
 - `SessionStore` ABC: `create(metadata)`, `get(session_id)`,
@@ -365,7 +500,7 @@ iteration. Providers without a thinking control may ignore the kwarg.
   lands. The harness keeps no durable copy (LibreChat re-feeds context),
   so the ABC is retained purely as that future seam.
 - `InMemorySessionStore` is **bounded**: it evicts on idle TTL
-  (`SESSION_TTL_SECONDS`) and on a max-size cap (`SESSION_MAX_COUNT`,
+  (`SESSION_TTL_SECONDS`) and on a max-size cap (`SESSION_CAPACITY`,
   oldest-updated first) so it can't grow without limit under concurrent
   load. Eviction is lazy (swept on `create()`), not a background task.
   Active/in-flight sessions stay "young" because `save()` bumps
@@ -374,21 +509,16 @@ iteration. Providers without a thinking control may ignore the kwarg.
   existing `except KeyError` catches still work; callers wanting
   specificity have it.
 
-**Concurrency model.** FastAPI runs the `async def` handlers concurrently
-on a single event loop. Every per-request value in the `/chat` handler is a
-local, and `run_agent` is a fresh async generator per request, so two
-requests with **distinct** `session_id`s touch disjoint memory — there is no
-crossover, even though they interleave at `await` points. The shared
-`app.state` singletons (LLM client, MCP manager, orchestrator, registry)
-carry no per-user data: each takes the request's messages as arguments. The
-**only** crossover vector is two concurrent requests on the **same**
-`session_id`, which would share one `.messages` list.
+**Concurrency model.** FastAPI interleaves async handlers on one event loop.
+Distinct sessions use distinct `Session` objects; shared `app.state` singletons
+carry no per-user state. The only crossover vector is two concurrent requests on
+the same `session_id`.
 
 - `SessionGuard` (`agent/session.py`) closes that vector: `claim(session_id)`
   is an async context manager that registers the id as in-flight; a second
   concurrent `claim` of the same id raises `SessionBusyError`, which the
   route maps to **HTTP 409**. New sessions get a fresh id and never contend;
-  only client-supplied `commands.session` ids can collide.
+  only repeated client-supplied `X-Session-Id` values can collide.
 - It is **lock-free**: on the single-threaded event loop the membership
   check and the add happen with no `await` between them, so they're atomic
   relative to other tasks. To switch to wait-semantics (queue instead of
@@ -399,24 +529,22 @@ discriminators for JSON serialization at the API boundary:
 
 | Event                          | Fields                                       | Emitted when                              |
 |--------------------------------|----------------------------------------------|-------------------------------------------|
+| `ReasoningEvent`               | `text`                                       | Provider extracted sanitized reasoning from a model response |
 | `TextEvent`                    | `text`                                       | Model produced a text block               |
 | `ToolCallEvent`                | `id, name, input`                            | Model decided to call a tool (pre-call)   |
 | `ToolResultEvent`              | `id, name, content, is_error, latency_ms`    | Tool call completed (`latency_ms` = `call_tool` duration; `None` if stall-skipped) |
 | `UsageEvent`                   | `input_tokens, output_tokens, total_tokens, thinking_tokens, cached_tokens, iteration, latency_ms` | One LLM completion finished (`latency_ms` = `complete()` duration incl. retries) |
-| `OrchestrationDecisionEvent`   | `model_id, tools, system_prompt, fallback_used` | Defined for tracing/SSE; not emitted into the plain-text `/chat` response today |
+| `OrchestrationDecisionEvent`   | `model_id, tools, system_prompt, fallback_used, thinking_level` | Emitted first for orchestrated turns; traced and exposed by native SSE |
 | `DoneEvent`                    | `reason, iterations, total_tokens, input_tokens, output_tokens, thinking_tokens` | Loop finished |
 | `ErrorEvent`                   | `message`                                    | Unrecoverable internal failure            |
 
-`DoneEvent.reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty", "truncated"}`.
-`"truncated"` = stopped on `max_tokens` mid-answer. `"max_iterations"` = the run
-hit the iteration cap; the loop forces a best-effort final answer on that last
-step (see the final-iteration wrap-up below), so this reason now ships *with* an
-answer rather than fragments.
+`DoneEvent.reason` ∈ `{"end_turn", "max_iterations", "llm_error", "empty",
+"truncated", "budget_exceeded", "deadline_exceeded", "no_progress",
+"content_filter", "refusal", "provider_error", "incomplete_stream"}`. Guard
+exits carry any answer text already accrued.
 
-**Important distinction**: tool execution failures do **not** emit
-`ErrorEvent`. They become `ToolResultEvent(is_error=True)` so the model
-can see them and recover. `ErrorEvent` is only for failures the model
-never sees (e.g. LLM API errors after retries).
+Tool execution failures become `ToolResultEvent(is_error=True)` so the model can
+recover. `ErrorEvent` is only for failures the model never sees.
 
 **`agent/loop.py`**
 
@@ -428,30 +556,32 @@ async def run_agent(
     *,
     store: SessionStore | None = None,
     system: str | None = None,
-    max_iterations: int = 25,
-    max_tokens: int | None = None,
     tools: list[dict] | None = None,
-    llm_timeout_seconds: float | None = None,
-    tool_timeout_seconds: float | None = None,
-    max_retries: int = 0,
-    retry_base_delay: float = 0.5,
-    tool_result_max_chars: int | None = None,
     thinking_level: str | None = None,
+    limits: RunLimits | None = None,
+    context: RunContext | None = None,
+    policy: ToolPolicy | None = None,
+    stream: bool = False,
 ) -> AsyncIterator[Event]:
     ...
 ```
 
-The **reliability params** (timeouts, retries, tool-result cap) default to
-legacy behavior — no timeout, no retry, no clip — so direct callers (CLI,
-smoke tests) are unaffected. The `/chat` route opts in by passing the
-corresponding `Settings` values. The loop owns the retry/backoff and timeout
-*policy*; the provider-specific question "is this error transient?" is
-delegated to `LLMClient.is_transient_error()` so the loop stays
-provider-agnostic and the single-bridge invariant holds.
+`RunLimits` is the immutable policy object built once from Settings by
+`TurnRunner`; `RunContext` carries the one live run ID, absolute deadline,
+logger, and trace sequence. Direct callers may omit both to receive defaults.
+`agent/generation.py` owns provider-neutral timeout and retry policy while
+providers classify transient errors. Buffered and streaming generation share
+one private attempt-policy controller for attempt counts, deadline-aware
+timeout bounds, transient eligibility, jittered exponential backoff, and
+cancellable retry sleep. Their completion mechanics remain separate: buffered
+generation awaits one response, while streaming applies the configured LLM
+timeout to every incremental read. Emitted answer text commits the attempt and
+prevents retry. Emitted reasoning remains provisional; if a retry is still
+eligible, an interruption marker separates it from the next attempt.
 
-**The caller appends the user message before invoking `run_agent`.** The
-loop owns assistant turns and tool round-trips. This keeps the loop
-callable identically from a CLI, a FastAPI route, or a test.
+**The caller appends the user message before invoking `run_agent`.**
+`TurnRunner` does so only on its staged copy after routing; the loop owns
+assistant turns and tool round-trips.
 
 The **`tools` parameter** is the orchestration seam. When `None`, the
 loop pulls the full MCP inventory (`mcp.get_tools_for_llm()`) — legacy
@@ -459,54 +589,145 @@ behavior, used by code paths that aren't orchestration-aware. When
 provided, the loop uses the list verbatim — this is how the route
 hands the orchestrator's filtered tool subset to the model.
 
-The **`thinking_level` parameter** is the deliberation seam. It is passed
-straight through to every `llm.complete()` call of the run; the loop never
+The **`thinking_level` parameter** is the deliberation seam. It is carried
+straight through on every generation request of the run; the loop never
 inspects it. `None` (the default) leaves the model's own default. The route
 supplies the orchestrator's chosen level here; see *Thinking level* under
 the Orchestration Layer.
 
+**The bounded-run guard values** on `RunLimits` follow the default-disabled
+`None`/`<=0` convention. `TurnRunner` starts the wall-clock deadline immediately
+after the session claim, so routing, model resolution, generation, tool calls,
+and backoff all consume the same budget. See *Bounded & safe runs* below.
+
 Per-iteration algorithm:
 
-1. `await llm.complete(session.messages, tools=tools or None, system=...)`,
-   wrapped in a per-attempt `asyncio.timeout` and bounded retry (transient
-   429/5xx/timeout/reset, plus one more try on an empty response). If it
-   still raises after retries, yield `ErrorEvent` + `DoneEvent("llm_error")`
-   and stop.
-2. `session.append_assistant(response)` immediately — a later crash in
-   this iteration still leaves the session consistent.
-3. Yield a `UsageEvent` for this iteration's tokens.
-4. If `store` was provided, `await store.save(session)`.
-5. Yield a `TextEvent` for each non-empty text block.
-6. Collect `ToolUseBlock`s. If none → yield `DoneEvent("end_turn")` and stop,
-   unless the response stopped on `max_tokens` (truncated mid-answer →
-   `DoneEvent("truncated")`) or this is the forced final iteration (→
-   `DoneEvent("max_iterations")`, see below).
-7. For each tool_use, **sequentially**:
-   - Yield `ToolCallEvent`.
-   - **Stall check:** if `(name, canonical-JSON(args))` matches a call
-     already executed this run, skip `mcp.call_tool` and return a synthetic
-     `is_error=True` result telling the model the result won't change — this
-     breaks the fixation loops that otherwise burn the iteration budget.
-   - Otherwise `await mcp.call_tool(name, input)`, wrapped in `asyncio.timeout`.
-     Any failure — including a timeout — becomes `is_error=True`, not
-     loop-terminating, so the model can react. The flattened result is clipped
-     to `tool_result_max_chars` before it enters history (one large output
-     can't flood context for the rest of the run).
-   - **Consecutive-failure nudge:** after several `is_error` results in a row, a
-     one-line steering note is appended (once) to the crossing result, telling
-     the model to re-read the errors and reconsider.
-   - Yield `ToolResultEvent`.
-   - Build a `ToolResultBlock(tool_use_id, name, content, is_error)`.
-8. `session.append_tool_results(results)` and save again.
-9. Loop. **Final-iteration wrap-up:** on the last allowed iteration the
+0. Check bounded-run guards before another LLM call.
+1. Assemble the outgoing context view, then consume the normalized generation
+   stream from `agent.generation`. Exhausted LLM failures yield `ErrorEvent` +
+   `DoneEvent("llm_error")`.
+2. Append the complete assistant response only to the staged session. A
+   non-tool response is now a safe terminal checkpoint; a tool-use response is
+   not publishable yet.
+3. Publish a complete non-tool assistant response once. Visible answer-text
+   deltas followed by ordinary provider exhaustion are synthesized as an
+   `incomplete_stream` assistant response, saved with identical text, and
+   terminated abnormally.
+4. Yield a `UsageEvent` for this iteration's tokens. Provider-reported usage
+   is used as-is; absent/all-zero usage is filled by the local estimator
+   (`estimate_usage_tokens`, chars/4 heuristic over the outgoing view +
+   system + response) so the token cap works against local servers that
+   report zero usage. Never double-counted.
+5. Stream sanitized reasoning as `ReasoningEvent` values when the provider
+   supplies it. A reasoning-only retry inserts an interruption marker before
+   the next attempt. Reasoning is not appended to session content; `/v1` may
+   render it through `delta.reasoning_content`.
+6. Yield a `TextEvent` for each non-empty text block.
+7. Collect tool calls first; if none were requested, finish with the explicit
+   canonical provider outcome or the applicable run-limit reason.
+8. For each tool call, sequentially: emit `ToolCallEvent`, run repeat-call
+   detection, convert provider parse errors or schema validation failures into
+   teaching `is_error` results, enforce `ToolPolicy`, call MCP with timeout,
+   clip the result, update failure counters, emit `ToolResultEvent`, and build
+   the matching `ToolResultBlock`.
+9. Append the complete matching result batch and publish the balanced tool
+   protocol. Continue from a fresh `staged_copy()` so later mutation cannot
+   alias the object just saved by `InMemorySessionStore`. Cancellation keeps
+   completed results, marks an in-flight call as outcome-unknown, marks
+   unstarted calls cancelled, best-effort publishes the balanced batch, and
+   re-raises the original cancellation or generator-close signal. Once the
+   consumer has cancelled or closed, synthetic results are checkpointed for
+   safe replay but cannot be delivered on that terminated event stream.
+10. Loop. **Final-iteration wrap-up:** on the last allowed iteration the
    loop withholds tools and appends a wrap-up note to the per-call system prompt
    so the model produces a best-effort final answer instead of dying
    mid-investigation; the run reports `DoneEvent("max_iterations")`.
+
+### Bounded & safe runs (Phase 1)
+
+Three **independent stop conditions**, layered on top of `max_iterations`,
+each with its own `done_reason` and the partial answer accrued so far —
+never a silent truncation:
+
+| Guard | Settings field | Checked | `done_reason` |
+|---|---|---|---|
+| Token budget | `max_run_tokens` | Before each iteration and immediately after each reported `CompletionUsage.total_tokens` update | `budget_exceeded` |
+| Wall clock | `max_run_seconds` | Starts after the session claim; covers routing, retries, generation, tool calls, and backoff | `deadline_exceeded` |
+| No-progress abort | `abort_after_consecutive_tool_failures` | After each tool result, against the consecutive-failure counter | `no_progress` |
+
+All three default to `0` (disabled) in `Settings`, matching the repo's
+established pattern for new safety knobs (e.g. `trace_enabled`) — installing
+the harness doesn't change behavior until an operator opts in.
+
+**Token cap and zero-usage providers:** when a provider reports absent or
+all-zero `CompletionUsage` (common on local OpenAI-compatible servers), the loop fills
+in a local estimate from the outgoing messages + system prompt + response
+(`agent/context.py: estimate_usage_tokens`, chars/4 heuristic), so
+`max_run_tokens` still trips. Non-zero provider usage is authoritative and
+never mixed with estimates; a missing `total_tokens` is filled from
+`input + output`.
+
+**Tool-argument validation** lives at the same dispatch seam (see step 8
+above) but is always on — it isn't a stop condition, it's a per-call check
+that turns a would-be opaque MCP error into a teaching `is_error` result
+before the call ever reaches the server. Provider parse failures
+(`ToolUseBlock.parse_error`) take the same path, so invalid JSON arguments are
+visible feedback rather than a silent `{}` execution. Validation and parse
+failures count toward the consecutive-failure counter like any other tool
+error, so a model stuck sending malformed args still trips the no-progress
+abort if one is configured. Concrete JSON Schema validators are selected,
+schema-checked, and compiled once from the turn's immutable tool inventory,
+then reused for every matching call in that run. A malformed advertised schema
+warns once during setup and is permissive for that run; validator state never
+mutates the snapshot or MCP inventory.
+
+If any bounded-run guard trips after an assistant has requested tools, the loop
+emits and persists compact synthetic `is_error=True` results for skipped tool
+calls before `DoneEvent`. That keeps provider histories well-formed for a later
+turn: every assistant tool call still has a matching tool result.
 
 The loop-intelligence behaviors (stall check, final-iteration wrap-up, and the
 consecutive-failure nudge) are **always on** — pure
 steering with no failure mode that warrants a kill switch, so unlike the
 reliability params they carry no `Settings` toggle.
+
+### Context assembly (Phase 3)
+
+`agent/context.py` shapes session history into the outgoing LLM view. The loop
+calls `assemble_context()` per LLM call against
+`context_window − max_output_tokens − safety_margin`, using a cheap local token
+estimate that includes messages, tool schemas, and the effective system prompt.
+
+Two strategies, selected by `CONTEXT_STRATEGY` (config selects strategies;
+code implements them):
+
+- **`naive`** (default, behavior-preserving): pass-through. Over budget only
+  logs a warning — no message is altered, no request is blocked.
+- **`compaction`** (opt-in): when the estimate exceeds the budget, the view
+  becomes *task header (first user message, verbatim) + one summary message +
+  the last N protocol-safe units (verbatim)*. The middle is summarized by one
+  tool-less LLM call on the same selected client (bounded `max_tokens`, no
+  recursive assembly; the transcript is clipped to roughly the input budget).
+  The summary is a plain user message prefixed `Conversation summary so
+  far:` — no new role or block type.
+
+**View-only, always.** Compaction shapes the outgoing view for one call;
+`session.messages` remains the append-only source of truth. The view is
+reassembled every iteration as history grows.
+
+**Protocol safety.** Assistant tool-use messages travel with their tool results,
+so compaction does not split provider-required pairs. Malformed history degrades
+to pass-through.
+
+**Budget inputs.** Selected model entries provide `context_window` and
+`max_tokens`; Settings fill gaps. Direct `run_agent` callers that pass no
+`context_window` skip assembly.
+
+**Degrade, never break.** Summarizer failures, malformed boundaries, or
+too-short histories fall back to full history with a warning.
+
+The module also owns `estimate_usage_tokens()`, the estimator behind the
+token-cap fallback described under *Bounded & safe runs*.
 
 ### Orchestration Layer
 
@@ -519,9 +740,8 @@ request, it makes one LLM call to decide:
 - **how hard the model should think** — a `thinking_level` of `low`,
   `medium`, or `high`.
 
-Its output is then handed to `run_agent()` as concrete arguments. The
-loop itself is unchanged from the pre-orchestrator design — it just
-receives its LLM client, tool list, and thinking level from somewhere new.
+Its output is handed to `run_agent()` as concrete arguments; the loop remains
+provider- and orchestrator-blind.
 
 **`orchestrator/schemas.py`**
 
@@ -531,12 +751,18 @@ class ModelEntry(BaseModel):
     model: str
     description: str       # what the orchestrator LLM sees
     max_tokens: int | None = None
+    context_window: int | None = None  # feeds the loop's context budget
+    supports_native_tools: bool = True
+    thinking: Literal["none","hint-param","think-tags"] = "none"
+    sampling: SamplingParams | None = None
     default: bool = False  # exactly one entry should be default
+
+    def to_profile(self) -> ModelProfile: ...
 
 class ModelsConfig(BaseModel):
     models: dict[str, ModelEntry]
 
-class OrchestrationResult(BaseModel):
+class OrchestrationProposal(BaseModel):
     selected_model_id: str
     selected_tools: list[str]              # namespaced tool names
     generated_system_prompt: str
@@ -544,20 +770,17 @@ class OrchestrationResult(BaseModel):
 
 @dataclass
 class OrchestrationDecision:
-    result: OrchestrationResult
+    result: OrchestrationProposal
     fallback_used: bool = False
     fallback_reason: str | None = None
 ```
 
-`OrchestrationResult` is the LLM's structured output. `OrchestrationDecision`
-wraps it for in-process callers, with `fallback_used` flagging when the
-orchestrator's LLM call failed and the result is the safe default rather
-than a real decision. Callers (the route, smoke tests) read this flag
-to distinguish a healthy orchestration from a degraded one.
+`OrchestrationProposal` is the LLM's structured output. `OrchestrationDecision`
+adds fallback metadata for in-process callers.
 
 **`orchestrator/config.py`** — `load_models_config(path)` and
 `load_orchestrator_prompt(path)`. Mirrors the loader pattern in
-`harness_config.load_mcp_config`.
+`config.load_mcp_config`.
 
 **`orchestrator/registry.py`** — `LLMRegistry`:
 
@@ -568,54 +791,50 @@ to distinguish a healthy orchestration from a degraded one.
   silently falls back to default on unknown id.
 - `registry.describe_for_prompt()` formats the model inventory as the
   orchestrator-prompt block ("AVAILABLE MODELS").
+- `registry.aclose()` snapshots and clears the lazy cache, deduplicates concrete
+  client identities, and closes them best-effort. The lifespan includes the
+  legacy/default client in that identity set so an alias is never closed twice.
 - Concurrency: clients are built on first use and stashed in a dict
   with no lock. Client construction is idempotent, so a rare double-build
   wastes a few cycles but cannot produce wrong behavior.
 
 **`orchestrator/orchestrator.py`** —
-`Orchestrator.decide(user_message, preferences=None, history=None)`:
+`Orchestrator.decide(user_message, tools, preferences=None, history=None, ...)`:
 
-1. Builds the prompt: orchestrator system instruction (from the
+1. Builds the prompt from the immutable per-turn tool snapshot: orchestrator system instruction (from the
    `orchestrator_prompt.md` file) + AVAILABLE MODELS block + AVAILABLE
-   TOOLS block (live MCP inventory) + an optional CONVERSATION SO FAR
+   TOOLS block + optional PREFERRED TOOLS and CONVERSATION SO FAR
    block (see *Context-aware routing* below) + USER MESSAGE.
-2. Calls the orchestrator's own LLM client with
-   `response_schema=OrchestrationResult`. Tools are **not** exposed —
+2. Calls the orchestrator's own LLM client with a `GenerationRequest` carrying
+   `response_schema=OrchestrationProposal`. Tools are **not** exposed —
    the orchestrator must decide, not act.
-3. Parses the JSON response into `OrchestrationResult`. Strips any
+3. Parses the JSON response into `OrchestrationProposal`. Strips any
    stray markdown fences defensively. `thinking_level` is coerced
    leniently (a stray/unknown value clamps to `"medium"`) so one odd
    field can't sink an otherwise-valid decision.
-4. Sanitizes the result: drops tool names not in the live MCP inventory;
+4. Sanitizes the result against that same snapshot: drops unknown tool names;
    rewrites an unknown `selected_model_id` to the registry default.
    Sanitization is **not** counted as fallback — the orchestrator made
    a real decision, we just trimmed it.
 5. Returns `OrchestrationDecision(result=..., fallback_used=False)`.
 
-**Thinking level.** `result.thinking_level` is plumbed by the route into
-`run_agent(thinking_level=...)`, which passes it to every
-`llm.complete()` call of that run. The Gemini client maps it to
-`ThinkingConfig(thinking_level=...)` (the model-native deliberation knob);
-`None` anywhere in the chain leaves the model default, so legacy mode and
-the orchestrator's own call are unaffected. This is the per-request
-"intelligence on demand" lever — `low` for lookups, `high` for genuinely
-hard reasoning — and it routes independently of the model choice.
+**Thinking level.** The route passes `result.thinking_level` to `run_agent()`,
+which forwards it on every `GenerationRequest`. The selected client's
+`ModelProfile` decides whether that value becomes a provider request hint
+(`hint-param`), is intentionally inert (`none`), or is represented by
+self-emitted reasoning tags (`think-tags`). The loop never branches on provider
+or model name.
 
-**Context-aware routing.** On a continued session the route resolves the
-session *before* routing and passes the prior messages as `history`. The
-orchestrator renders a compact tail (last few messages, text only, each
-clipped) into a CONVERSATION SO FAR block so a pronoun-heavy follow-up
-("now do the same for last month") is routed with the conversation in
-view — it can resolve what the request refers to and keep the tools the
-thread depends on, instead of routing from the bare fragment. A first
-turn (no history) behaves exactly as before.
+**Context-aware routing.** Continued sessions pass prior messages to the
+orchestrator as a compact text-only tail, so follow-up turns route with enough
+context to resolve references and keep thread-critical tools.
 
 **Failure handling.** ANY failure (LLM call error, parse error,
 validation error) is caught and replaced with a safe fallback:
 
 ```python
 OrchestrationDecision(
-    result=OrchestrationResult(
+    result=OrchestrationProposal(
         selected_model_id=registry.default_id(),
         selected_tools=[all available tool names],
         generated_system_prompt="You are a helpful assistant. Use the available tools when relevant.",
@@ -625,61 +844,72 @@ OrchestrationDecision(
 )
 ```
 
-The fallback preserves the **pre-orchestrator behavior** so requests
-still succeed. The `fallback_used` flag makes the degradation observable
-to clients and smoke tests.
+The fallback preserves pre-orchestrator behavior while `fallback_used` makes the
+degradation observable.
 
-**The system-prompt override.** The route, not the orchestrator,
-implements precedence: if the request sets `commands.system`, that wins
-over `result.generated_system_prompt`. Orchestration still runs (to pick
-model + tools), only the system prompt is overridden. This lets a client
-pin an explicit system prompt while keeping orchestration on.
+Startup also rejects a prompted-only orchestrator control model. If
+`ORCHESTRATOR_MODEL_ID` or the registry default points to a row with
+`supports_native_tools: false`, `_try_build_orchestration()` logs a warning and
+runs in legacy mode. Prompted-tool models may still be selected for downstream
+agent turns; they are not supported as the structured-output control model in
+this v1 adapter.
 
-**MCP tool preferences.** The route normalizes the request's `MCP` list
-into a `ToolPreferences` value object and hands it to
-`orchestrator.decide()`. Preferred tools are rendered into the
-orchestrator prompt as a priority hint, and `_sanitize()` unions the
-valid ones into the final selection so they're *guaranteed* exposed —
-while the orchestrator's own picks remain as fallback. It's a priority,
-not a lock-out. Per-tool argument lists are informational context only.
+**The system-prompt override.** `TurnRunner`, not the orchestrator, implements
+precedence: an OpenAI `system` message override wins over
+`result.generated_system_prompt`. Orchestration still runs to pick model and
+tools; native `/chat` has no per-call system field.
 
-**Disabled mode.** When `ORCHESTRATION_ENABLED=false` (or when
-`config/models.yaml` or `config/orchestrator_prompt.md` is missing /
-unparseable), `main.py` doesn't construct the orchestrator. The route
-detects `app.state.orchestrator is None` and falls back to legacy
-behavior: default LLM client, **all** MCP tools, `request.system` (or
-`None`) as the system prompt. This makes orchestration a fully optional
-subsystem — the harness keeps working without it.
+**MCP tool preferences.** `ToolPreferences` remains an intentional direct
+`Orchestrator.decide()` seam. Explicit in-process callers can supply priority
+hints; `_sanitize()` unions valid preferred tools into the selection. HTTP
+routes and `TurnRunner` carry no preference value because neither HTTP surface
+accepts one.
+
+**Disabled mode.** If orchestration is disabled or its config cannot load,
+`TurnRunner` uses the default LLM, all MCP tools, and an optional `/v1` system
+override directly.
 
 ### HTTP Layer
 
 **`main.py`** — FastAPI entry point with a `lifespan` context manager.
 
 Startup order:
-1. `bootstrap.load_secrets()` (called at the top of `main.py`).
-2. `get_settings()` — reads from env.
-3. `build_llm_client(settings)` — fails fast if API key missing.
+1. `get_settings()` — Pydantic reads process variables and the project `.env`
+   without mutating global environment state.
+2. `build_llm_client(settings)` — fails fast if API key missing.
    This is the *legacy/default* client used when orchestration is
    disabled.
-4. `load_mcp_config(settings.mcp_config_path)`.
-5. `MCPManager(mcp_config).startup()` — connects to all enabled servers
-   in parallel.
-6. `InMemorySessionStore()`.
-7. `_try_build_orchestration(settings, mcp)` — returns
-   `(LLMRegistry | None, Orchestrator | None)`. Returns `(None, None)`
-   on any failure (missing file, schema violation, bad model_id) and
-   logs a warning. The harness keeps running in legacy mode.
-8. All values stashed on `app.state` (`settings`, `llm`, `mcp`, `store`,
-   `guard`, `registry`, `orchestrator`).
-9. A single consolidated "harness ready" INFO log line is emitted.
+3. `load_mcp_config_from_settings(settings)` using the precedence-resolved,
+   raw Settings mapping.
+4. `MCPManager(mcp_config, connect_timeout_seconds=...).startup()` — connects
+   to all enabled servers in parallel. Each transport-open + initialize +
+   list operation, at startup or during lazy recovery, is bounded as one unit
+   unless the setting is `<= 0`; startup failures degrade MCP health without
+   aborting application startup.
+5. `InMemorySessionStore()` and `SessionGuard()`.
+6. `_try_build_orchestration(settings)` — returns registry/orchestrator or
+   `(None, None)` on optional-layer failure. The legacy default LLM is built
+   only for that fallback path; successful orchestration owns its clients
+   exclusively through the registry.
+7. Policy and tracer are built. An enabled tracer opens its sink and starts its
+   bounded writer after the event loop exists; routine tracer startup failure
+   degrades to `None`. Only the successfully started tracer is published on
+   `app.state`.
+8. A single consolidated "harness ready" INFO log line is emitted.
 
-Shutdown closes MCP connections cleanly. Session store, LLM clients, and
-orchestrator don't need explicit teardown today.
+Shutdown attempts LLM, MCP, and tracer cleanup independently. The default LLM
+and every constructed registry client are deduplicated by object identity and
+closed once; never-constructed lazy clients have no resources to release.
+Provider generators own their SDK streams. The generation layer owns each
+provider iterator, and the agent loop owns only the normalized generation
+adapter. Cleanup failures are logged without replacing the request exception or
+cancellation that initiated shutdown. Tracer cleanup first stops acceptance,
+then drains healthy accepted records through the background writer; its final
+counters are logged before active cancellation is re-raised.
 
-**`api/dependencies.py`** — small `Depends()` providers that pull from
-`app.state`. Routes take their deps as parameters; nothing reaches into
-globals. Test override is one line. `get_orchestrator` and `get_registry`
-return `Optional` — routes must handle the `None` case (legacy mode).
+**`api/dependencies.py`** — `Depends()` providers that pull from `app.state`.
+`require_api_key` is the optional route-layer auth gate for `/chat`,
+`/chat/stream`, and `/v1/*`; `/health` stays open.
 
 **`api/routes.py`** — request flow:
 
@@ -689,18 +919,15 @@ return `Optional` — routes must handle the `None` case (legacy mode).
    with the conversation in view. The new prompt is **not** appended yet — it's
    passed to the orchestrator separately, so `session.messages` at routing time
    is the prior history only.
-2. **`_run_turn(...)`** is the shared core (also reused by the planned
-   OpenAI-compatible endpoint). It calls
-   **`_resolve_routing(prompt, system_override, preferences, ...)`** which
-   returns `(llm_client, tools_for_llm, system_prompt, thinking_level,
-   OrchestrationInfo | None)`. In legacy mode (orchestrator is `None`): default
-   LLM, all tools, `system_override`, no thinking level. In orchestrated mode:
-   the prior `history` is passed to `decide()`, and `system_override` (if any)
-   wins over the generated prompt. `/chat` passes `system_override=None` and
-   `preferences=None` — its dumb-pipe contract exposes neither.
+2. **`runner.open(...)` / `runner.run(...)`** — every renderer reaches the
+   shared core through `TurnRunner`. `open()` claims the session before consuming
+   current history or inventory, creates the run context/deadline, stages the latest
+   safe checkpoint, snapshots tools once, and resolves LLM, tools, system,
+   thinking level, model ID, and optional orchestration metadata. `run()` is the
+   buffered collector over the same owned event iterator.
 3. **Per-request log line** at INFO level summarizing the routing decision
    (model, tool count, thinking level, fallback flag).
-4. Under the same-session guard, append the prompt and iterate `run_agent(...)`
+4. On the staged session, append the prompt and iterate `run_agent(...)`
    with the orchestrator's selections — including `thinking_level` — collecting
    `TextEvent` text into the answer and reading the final `DoneEvent` for the
    done-reason and token usage.
@@ -709,17 +936,15 @@ return `Optional` — routes must handle the `None` case (legacy mode).
 The full event stream is no longer serialized into the response (the body is
 plain text); routing/usage detail lives in the logs and the JSONL trace.
 
-`_turn_events` also mints the per-request **`run_id`** (one place, covering both
-`/chat` and `/v1`), wraps the route's log lines in a `run_id`-tagged adapter, and
-threads `run_id` + the optional `Tracer` into `run_agent`. The loop serializes
-every event it yields to the tracer as one trace record (`run_id`, monotonic
-`step`, ISO `ts`, plus `latency_ms` on the LLM/tool steps) — the trace *is* the
-serialized event log. A `Tracer` is neither the LLM client nor the MCP manager,
-so the "one bridge" invariant holds; and tracing is optional and best-effort
-(`tracer=None` by default; a failing sink degrades silently), exactly like
-orchestration. See `agent/tracing.py` (the `Tracer` ABC / `NoOpTracer` /
-`JSONLTracer` seam, mirroring `SessionStore`) and the operations guide's
-*Observability* section.
+The `RunContext` minted by `TurnRunner.open()` tags logs, native SSE, and trace
+records with the same **`run_id`**. Tracing is best-effort and mirrors the event
+stream. `emit()` serializes and submits synchronously to a 4096-record bounded
+queue but performs no file I/O and never waits. One writer task preserves FIFO
+order and performs append-plus-flush batches off the event-loop thread: at most
+100 records, or a partial batch after 250 ms from its first record. A full queue
+drops the newest submission, preserving older queued records. The first sink
+write failure permanently disables tracing and accounts for the failed batch
+and backlog as dropped; see `agent/tracing.py` and operations docs.
 
 ---
 
@@ -734,24 +959,27 @@ orchestration. See `agent/tracing.py` (the `Tracer` ABC / `NoOpTracer` /
 3. **One bridge between worlds.** `agent/loop.py` is the only module
    that touches both the LLM client and the MCP manager. Neither of
    those two knows the other exists.
-4. **The loop is an async generator** yielding typed events. The
-   non-streaming endpoint collects all events into one response.
-   Streaming endpoints become trivial to add later — same generator,
-   adapt to SSE frames.
+4. **The loop is an async generator** yielding typed events. Each HTTP
+   surface is a thin renderer over the same generator (`api/turn.py`):
+   `/chat` collects all events into one plain-text response, `/chat/stream`
+   forwards them as native SSE event frames, and the `/v1` adapter maps them
+   to OpenAI `chat.completion.chunk` frames. Adding a transport is a new
+   renderer, not a loop change.
 5. **Session abstraction from day one.** Even v1 threads message history
    through loop iterations via a `Session` object. A minimal abstraction
    now beats retrofitting it later.
 6. **Orchestration is a router, not a part of the loop.** It runs ONCE
-   per request, takes no tools (it must decide, not act), and produces
+   per request, receives tool descriptions but exposes no callable tools to its
+   own LLM (it must decide, not act), and produces
    a structured decision that's fed into `run_agent()` as concrete
    arguments. The loop is unchanged from the pre-orchestrator design.
 7. **A minimal, explicit boundary.** `/chat` is a plain-text dumb pipe — the
    body *is* the prompt, so there is nothing to over-accept; an empty body is
    the only rejection (400). Optional behavior travels as named headers
-   (`X-Session-Id`), never as free-form fields. JSON request schemas that do
-   survive (e.g. the planned OpenAI-compatible endpoint, `/health`) stay strict.
-   The surface is small and explicit; new capabilities are added as new typed
-   inputs, not by accepting unknown ones.
+   (`X-Session-Id`), never as free-form fields. The `/v1` adapter accepts the
+   standard OpenAI envelope, validates model identity and message ordering at
+   its boundary, and tolerates unsupported standard fields without forwarding
+   them. The surface is small and explicit.
 8. **Orchestration must never break a request.** Every failure path in
    the orchestrator (LLM error, parse error, validation error) degrades
    to a safe default (the registry's default model, all tools, generic
@@ -770,13 +998,16 @@ resolve a problem we hit; don't change them without understanding why.
    know what model is being used. Provider-specific tool schema shaping
    happens only inside the provider's `llm/providers/<name>.py` (the LLM
    layer's ABC and registry in `llm/client.py` stay SDK-free).
-2. **Settings are pulled lazily**, not snapshotted at import. Bootstrap
-   (which loads `.env` into `os.environ`) and the harness run in the same
-   process; lazy + cached means env vars are read after bootstrap, not before.
+2. **Settings are pulled lazily**, not snapshotted at import. Pydantic Settings
+   is the sole production `.env` owner; imports remain credential-free and
+   `Settings(_env_file=None)` keeps hermetic tests isolated.
 3. **`mcp_layer/` not `mcp/`** to avoid shadowing the SDK's `mcp` package.
 4. **`__` is the tool-namespacing separator.** Config validation enforces
    that server names can't contain it.
-5. **Graceful MCP startup**: one bad server doesn't kill the harness.
+5. **Graceful, bounded MCP lifecycle**: one bad server doesn't kill the harness.
+   Every enabled server retains an explicit state, only healthy current tools
+   are advertised, and a formerly known tool may trigger one bounded reconnect
+   on a later call. An ambiguous failed call is never replayed.
 6. **`provider_metadata` round-trips opaque per-provider state.** Required
    for Gemini 3+'s `thought_signature`. Generic mechanism — other providers
    ignore it. Never strip this field anywhere in the pipeline.
@@ -794,8 +1025,10 @@ resolve a problem we hit; don't change them without understanding why.
 12. **`SessionStore.save()` is explicit, not auto-on-mutate.** In-memory
     save is a no-op today; writing the calls explicitly now means durable
     storage can drop in without call-site changes.
-13. **The loop saves after every iteration**, not just at the end. Keeps
-    the session consistent through partial failures.
+13. **The loop publishes only safe checkpoints.** A complete non-tool response
+    or a balanced assistant-tool-call/result batch may be saved; prompt-only and
+    unmatched tool state never becomes visible. Cancellation preserves the last
+    safe checkpoint and propagates.
 14. **Tool execution is sequential, not parallel.** Some MCP tools have
     side effects; parallel makes failure modes harder to reason about.
     Wrap in `asyncio.gather` later if needed.
@@ -803,8 +1036,9 @@ resolve a problem we hit; don't change them without understanding why.
     A `mcp.call_tool` error becomes `ToolResultBlock(is_error=True)` and
     goes back to the model. An `llm.complete` exception yields
     `ErrorEvent` + `DoneEvent("llm_error")` and stops.
-16. **Caller appends the user message before invoking `run_agent`.** The
-    loop owns only assistant turns and tool round-trips.
+16. **Caller appends the user message before invoking `run_agent`.**
+    `TurnRunner` appends it to a staged session only after routing; the loop owns
+    assistant turns and tool round-trips.
 17. **System prompt is a per-call argument, not stored on the Session.**
     Session = conversation state; system prompt = call-time configuration.
 18. **Routes use `Depends()`, not `request.app.state` directly.** Keeps
@@ -824,11 +1058,11 @@ resolve a problem we hit; don't change them without understanding why.
     bespoke `{prompt, commands, MCP}` request and rich JSON response — the
     serialization-free contract any client can drive. Per-call `system`,
     `max_iterations`, and `MCP` tool preferences left the wire; the orchestrator
-    selects model/tools/system, the iteration cap is config-driven, and a
-    per-call system prompt belongs on the planned OpenAI-compatible endpoint
-    (the `ToolPreferences`/`_resolve_routing(preferences=...)` plumbing stays
-    in-process for an easy re-add).
-22. **`OrchestrationResult` is lenient (no `extra="forbid"`).** Gemini's
+    selects model/tools/system, the iteration cap is config-driven, and `/v1`
+    system messages provide the per-call override. `ToolPreferences` remains
+    only on the intentional direct `Orchestrator.decide()` seam; route and
+    runner contracts do not carry it.
+22. **`OrchestrationProposal` is lenient (no `extra="forbid"`).** Gemini's
     `response_schema` dialect doesn't accept `additionalProperties: false`,
     which Pydantic emits when a model is strict. We sanitize the result
     in code instead. This is the reference pattern for any Pydantic
@@ -837,26 +1071,23 @@ resolve a problem we hit; don't change them without understanding why.
     method drops unknown tool names and corrects unknown model_ids
     without raising the `fallback_used` flag. Fallback is reserved for
     cases where the orchestrator's LLM call itself failed.
-24. **The orchestrator gets no tools.** It must decide, not act. Calling
-    `complete()` with `tools=None` enforces this.
+24. **The orchestrator gets no tools.** It must decide, not act. Its
+    `GenerationRequest` carries `tools=None` to enforce this.
 25. **Orchestration is optional and degradable.** Missing config files,
     failed LLM calls, or bad outputs all degrade to the legacy
-    (pre-orchestrator) behavior. The route checks
-    `app.state.orchestrator is None` and routes around it. This is what
-    lets the orchestration subsystem be installed or removed without
-    affecting anything else.
-26. **`request.system` overrides `generated_system_prompt`.** The
-    orchestrator still runs (to pick model + tools) but the user's
-    explicit system prompt wins. Keeps pre-orchestrator clients working
-    unchanged.
+    (pre-orchestrator) behavior. `TurnRunner` checks its optional orchestrator
+    and registry and resolves the legacy path when either is absent.
+26. **`TurnRequest.system_override` overrides `generated_system_prompt`.** The
+    orchestrator still runs to pick model and tools, but combined `/v1` system
+    messages win for downstream generation. Native `/chat` supplies no override.
 27. **One LLM provider's keys aren't all of them.** Each provider's builder
     pulls its own credentials via `Settings.api_key_for_provider(...)`, so one
     process can hold clients for any provider in `models.yaml`. The lookup
-    falls back to `<PROVIDER>_API_KEY` for providers without a typed field, and
-    `required_api_key()` is preserved as a thin wrapper for legacy callers.
+    falls back to `<PROVIDER>_API_KEY` from the Settings-owned environment
+    mapping for providers without a typed field.
 28. **Thinking level is a routing dimension, not just a model choice.** The
     orchestrator emits `thinking_level` (`low`/`medium`/`high`) alongside
-    the model, and the loop passes it to every `complete()` call. This makes
+    the model, and the loop carries it on every `GenerationRequest`. This makes
     deliberation a per-request lever independent of model selection — cheap
     requests can shed thinking for latency, hard ones can buy more. `None`
     leaves the model default, so legacy callers are unaffected. The field is

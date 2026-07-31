@@ -1,24 +1,10 @@
-#mcp_layer/client.py
+# mcp_layer/client.py
 
-"""
-Per-server MCP client wrapper.
-
-Each MCPClient owns one ClientSession to one configured MCP server. The session
-is established via the appropriate transport (streamable-http / sse / stdio)
-and kept alive for the lifetime of the harness process.
-
-This module knows nothing about the LLM or about tool namespacing. It exposes a
-single server's tools by their raw names; the MCPManager handles namespacing.
-
-Lifecycle:
-  client = MCPClient(name, config)
-  await client.connect()        # opens transport, initializes session, lists tools
-  await client.call_tool(...)   # any number of times
-  await client.close()          # closes session and transport
-"""
+"""Per-server MCP client wrapper; MCPManager handles aggregation/namespacing."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -29,7 +15,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from harness_config import MCPServerConfig, SSEServer, StdioServer, StreamableHTTPServer
+from config import MCPServerConfig, SSEServer, StdioServer, StreamableHTTPServer
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Tool:
     """A tool exposed by an MCP server (un-namespaced)."""
+
     name: str
     description: str
     input_schema: dict[str, Any]
@@ -45,8 +32,17 @@ class Tool:
 @dataclass
 class ToolCallResult:
     """Result of a tool call. `content` is the concatenated text output."""
+
     content: str
     is_error: bool
+
+
+class MCPTransportError(RuntimeError):
+    """Provider-neutral wrapper for an SDK call-boundary failure."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__("MCP transport/protocol failure during tool call")
+        self.cause = cause
 
 
 class MCPClient:
@@ -69,34 +65,32 @@ class MCPClient:
         return self._session is not None
 
     async def connect(self) -> None:
-        """Open the transport, initialize the MCP session, and fetch tool list.
-
-        On any failure, ensures partial resources are cleaned up before raising.
-        """
+        """Open transport, initialize the session, and fetch tools."""
         if self._session is not None:
             raise RuntimeError(f"MCPClient {self.name!r} is already connected")
 
         stack = AsyncExitStack()
         connected = False
+        primary_error: BaseException | None = None
         try:
-            # Open the right transport. Each transport context manager returns
-            # (read_stream, write_stream); streamable-http also returns a third
-            # value (session_id callback) which we don't need.
-            # streamable-http
             if isinstance(self.config, StreamableHTTPServer):
-                logger.info("connecting to %r via streamable-http: %s", self.name, self.config.url)
+                logger.info(
+                    "connecting to %r via streamable-http: %s",
+                    self.name,
+                    self.config.url,
+                )
                 read, write, _ = await stack.enter_async_context(
                     streamablehttp_client(self.config.url)
                 )
-            # sse
             elif isinstance(self.config, SSEServer):
                 logger.info("connecting to %r via sse: %s", self.name, self.config.url)
                 read, write = await stack.enter_async_context(
                     sse_client(self.config.url)
                 )
-            # stdio
             elif isinstance(self.config, StdioServer):
-                logger.info("connecting to %r via stdio: %s", self.name, self.config.command)
+                logger.info(
+                    "connecting to %r via stdio: %s", self.name, self.config.command
+                )
                 params = StdioServerParameters(
                     command=self.config.command,
                     args=self.config.args,
@@ -109,7 +103,6 @@ class MCPClient:
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
 
-            # Fetch and filter the tool list.
             tool_response = await session.list_tools()
             disabled = set(self.config.disabled_tools)
             self._tools = [
@@ -125,19 +118,42 @@ class MCPClient:
             self._session = session
             self._exit_stack = stack
             connected = True
-            logger.info("connected to %r: %d tool(s) available", self.name, len(self._tools))
+            logger.info(
+                "connected to %r: %d tool(s) available", self.name, len(self._tools)
+            )
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
-            # Tear down anything we opened unless we fully connected. This MUST
-            # run on BaseException, not just Exception: an unreachable server
-            # makes the SDK's transport cancel its internal task-group scope,
-            # surfacing as CancelledError. A bare `except Exception` misses it,
-            # leaving the transport's background tasks alive and spinning the
-            # event loop on a dead connection (100% CPU). A finally keyed on a
-            # success flag always unwinds the stack and re-raises the original.
+            # CancelledError from failed transports is BaseException, so cleanup
+            # must live in finally rather than `except Exception`.
             if not connected:
-                await stack.aclose()
+                try:
+                    await stack.aclose()
+                except asyncio.CancelledError:
+                    # A new application cancellation takes precedence over an
+                    # ordinary connection error. If cancellation was already the
+                    # primary outcome, preserve that original cancellation.
+                    if not isinstance(primary_error, asyncio.CancelledError):
+                        raise
+                    logger.warning(
+                        "cleanup after cancelled connection to %r was cancelled",
+                        self.name,
+                    )
+                except BaseException:
+                    if primary_error is None:
+                        raise
+                    # Cleanup failure must not replace a timeout, connection
+                    # exception, or application cancellation already in flight.
+                    logger.warning(
+                        "cleanup after failed connection to %r failed",
+                        self.name,
+                        exc_info=True,
+                    )
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> ToolCallResult:
+    async def call_tool(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> ToolCallResult:
         """Call a tool by its un-namespaced name."""
         if self._session is None:
             raise RuntimeError(f"MCPClient {self.name!r} is not connected")
@@ -150,16 +166,12 @@ class MCPClient:
 
         try:
             result = await self._session.call_tool(tool_name, arguments)
-        except Exception as e:
+        except Exception as exc:
             logger.exception("tool call %s.%s failed", self.name, tool_name)
-            return ToolCallResult(content=f"tool call failed: {e}", is_error=True)
+            raise MCPTransportError(exc) from exc
 
-        # MCP tool results are a list of content blocks. For v1 we flatten
-        # everything to text; richer handling (images, embedded resources) can
-        # come later.
         parts: list[str] = []
         for block in result.content:
-            # text blocks have .text; other types we stringify their repr.
             text = getattr(block, "text", None)
             parts.append(text if text is not None else repr(block))
 
@@ -168,7 +180,7 @@ class MCPClient:
             is_error=bool(result.isError),
         )
 
-    async def close(self) -> None:
+    async def aclose(self) -> None:
         """Tear down the session and transport."""
         if self._exit_stack is None:
             return

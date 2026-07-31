@@ -1,20 +1,32 @@
 """LLM integration layer for the harness."""
+
 from .schemas import (
     AssistantMessage,
     Message,
+    ModelProfile,
+    ReasoningDelta,
     Role,
+    StreamChunk,
+    StreamEnd,
     TextBlock,
+    TextDelta,
     ToolResultBlock,
     ToolUseBlock,
 )
-from .client import LLMClient, build_llm_client
+from .client import GenerationRequest, LLMClient, build_llm_client
 
 __all__ = [
     "AssistantMessage",
+    "GenerationRequest",
     "LLMClient",
     "Message",
+    "ModelProfile",
+    "ReasoningDelta",
     "Role",
+    "StreamChunk",
+    "StreamEnd",
     "TextBlock",
+    "TextDelta",
     "ToolResultBlock",
     "ToolUseBlock",
     "build_llm_client",

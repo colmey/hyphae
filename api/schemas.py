@@ -7,56 +7,58 @@ The chat endpoint is plain-text in / plain-text out (see api/routes.py), so it
 has no request/response body schema. What remains here are the JSON shapes the
 harness still uses:
   - HealthResponse: the GET /health body.
-  - OrchestrationInfo / TokenUsage: internal value objects produced while
-    running a turn (routing metadata, token cost) — surfaced in logs/traces,
-    not in the /chat response.
+  - TokenUsage: internal token-cost value surfaced by buffered turns.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Literal, Self
+
 from pydantic import BaseModel, Field
+
+from mcp_layer import MCPServerState
+
+if TYPE_CHECKING:
+    from agent import DoneEvent
 
 
 class TokenUsage(BaseModel):
     """Token counts: what a request spent."""
+
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
     thinking_tokens: int = 0
 
+    @classmethod
+    def from_done_event(cls, event: "DoneEvent") -> Self:
+        """Convert flattened terminal-event usage at the HTTP boundary."""
+        return cls(
+            input_tokens=event.input_tokens,
+            output_tokens=event.output_tokens,
+            total_tokens=event.total_tokens,
+            thinking_tokens=event.thinking_tokens,
+        )
 
-class OrchestrationInfo(BaseModel):
-    """The orchestrator's routing decision for one request.
 
-    Null when orchestration is disabled. Carried internally for logging/tracing.
-    """
-    model_id: str = Field(..., description="The model_id the orchestrator selected.")
-    tools: list[str] = Field(
-        default_factory=list,
-        description="Namespaced tool names the orchestrator exposed to the agent.",
-    )
-    system_prompt: str = Field(
-        ...,
-        description="The system prompt the agent actually ran with (after override resolution).",
-    )
-    fallback_used: bool = Field(
-        default=False,
-        description="True if orchestration failed and a safe default was substituted.",
-    )
-    thinking_level: str | None = Field(
-        default=None,
-        description="Deliberation level (low/medium/high) the orchestrator chose. "
-                    "Null in legacy/fallback when unset.",
-    )
+class MCPServerHealth(BaseModel):
+    """One configured enabled MCP server's current retained status."""
+
+    name: str
+    state: MCPServerState
+    last_error: str | None
+    tool_count: int
 
 
 class HealthResponse(BaseModel):
     """Body for GET /health."""
-    status: str
+
+    status: Literal["ok", "degraded"]
     provider: str
     model: str
     connected_servers: list[str]
     tool_count: int
+    mcp_servers: list[MCPServerHealth]
     orchestration_enabled: bool = Field(
         default=False,
         description="True if the orchestration layer is active.",

@@ -5,8 +5,8 @@ Events yielded by the agent loop.
 
 The loop is an async generator that streams these events as the conversation
 unfolds. Non-streaming callers (the current /chat endpoint) collect them all
-before responding. Streaming callers (future SSE endpoint) forward them
-directly to the client.
+before responding. Native and OpenAI-compatible streaming callers render them
+as SSE frames.
 
 Events are dataclasses, not plain dicts, so callers get type checking and
 can dispatch with isinstance. The JSON serialization happens at the API
@@ -15,7 +15,7 @@ boundary, not here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, Union
 
 
@@ -23,13 +23,23 @@ from typing import Literal, Union
 class TextEvent:
     """The model emitted a text block. Cumulative across an iteration if the
     model produced multiple text blocks in one turn."""
+
     text: str
     type: Literal["text"] = "text"
 
 
 @dataclass
+class ReasoningEvent:
+    """The provider surfaced reasoning text for trace/debug consumers."""
+
+    text: str
+    type: Literal["reasoning"] = "reasoning"
+
+
+@dataclass
 class ToolCallEvent:
     """The model decided to invoke a tool. Emitted before the call runs."""
+
     id: str
     name: str
     input: dict
@@ -39,6 +49,7 @@ class ToolCallEvent:
 @dataclass
 class ToolResultEvent:
     """A tool call completed (successfully or not)."""
+
     id: str
     name: str
     content: str
@@ -52,6 +63,7 @@ class ToolResultEvent:
 @dataclass
 class UsageEvent:
     """Token usage reported for one LLM completion (one loop iteration)."""
+
     input_tokens: int
     output_tokens: int
     total_tokens: int
@@ -67,12 +79,13 @@ class UsageEvent:
 class OrchestrationDecisionEvent:
     """The orchestrator picked a model, tool subset, and system prompt.
 
-    Emitted by the route (not the loop) before run_agent() runs, so that
+    Emitted by TurnRunner before run_agent() runs, so that
     clients can see why a particular model was chosen. Carries the same
-    fields as orchestrator.schemas.OrchestrationResult but lives here so
+    fields as orchestrator.schemas.OrchestrationProposal but lives here so
     the API layer doesn't have to import the orchestrator package just to
     type-check event serialization.
     """
+
     model_id: str
     tools: list[str]
     system_prompt: str
@@ -98,12 +111,14 @@ class ErrorEvent:
     model itself never sees (e.g. an LLM API error after retries). Tool
     failures don't go here — those become ToolResultEvent(is_error=True)
     so the model can react."""
+
     message: str
     type: Literal["error"] = "error"
 
 
 Event = Union[
     TextEvent,
+    ReasoningEvent,
     ToolCallEvent,
     ToolResultEvent,
     UsageEvent,

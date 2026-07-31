@@ -1,4 +1,4 @@
-# PyAiHarness — Configuration
+# hyphae — Configuration
 
 Everything the harness reads at startup: environment variables and the
 three files under `config/` (MCP servers, the model registry, and the
@@ -10,40 +10,85 @@ orchestrator's system prompt).
 
 ## Environment Variables
 
-Read into `Settings` via `pydantic-settings`. They live in a `.env` file at
-the project root; `bootstrap.load_secrets()` loads it into `os.environ`
-before settings are read. Copy `.env.example` to `.env` (the `setup.sh`
-script does this for you) and fill in your values. Real environment
-variables already set in the process take precedence over `.env`, so the
-same file works for local dev, containers, and CI.
+Read lazily into `Settings` via `pydantic-settings`. `SettingsConfigDict.env_file`
+is the sole production reader for the project-root `.env`; importing `main`
+does not load credentials or mutate `os.environ`. Copy `.env.example` to `.env`
+(the `setup.sh` script does this for you) and fill in your values. Real process
+environment variables take precedence over `.env`, so the same file works for
+local dev, containers, and CI. Tests that need hermetic defaults construct
+`Settings(_env_file=None)`.
+
+LLM values are grouped in application code under the typed `settings.llm`
+object (`settings.llm.provider`, `settings.llm.model_name`,
+`settings.llm.max_tokens`, and the retry/timeout controls). Environment
+variables retain their existing flat `LLM_*` names. Sampling values such as
+`temperature` remain per-model settings in `models.yaml`; there is no global
+`settings.llm.temperature` override.
 
 | Variable                       | Default                       | Purpose                                            |
 |--------------------------------|-------------------------------|----------------------------------------------------|
-| `LLM_PROVIDER`                 | `gemini`                      | Any provider registered in `llm/client.py`'s `_PROVIDERS` (currently `gemini`, `openai`); validated at build time |
-| `LLM_MODEL`                    | `gemini-3-flash-preview`      | Model identifier (legacy default; orchestrator overrides per request) |
+| `LLM_PROVIDER`                 | `gemini`                      | Any provider registered in `llm/client.py`'s `_PROVIDERS` (currently `gemini`, `openai_compatible`; deprecated `openai` alias accepted); validated at build time |
+| `LLM_MODEL_NAME`                    | `gemini-3-flash-preview`      | Model identifier (legacy default; orchestrator overrides per request) |
 | `LLM_MAX_TOKENS`               | `4096`                        | Default max tokens per completion                  |
 | `ANTHROPIC_API_KEY`            | `""`                          | Anthropic key (if used by any model in `models.yaml`) |
 | `GEMINI_API_KEY`               | `""`                          | Gemini key (if used by any model in `models.yaml`)    |
 | `OPENAI_API_KEY`               | `""`                          | OpenAI key (if used by any model in `models.yaml`); also required by the SDK for OpenAI-compatible servers (e.g. Ollama) even when the server ignores it |
-| `OPENAI_BASE_URL`              | `""`                          | Base URL for the OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1` for local Ollama). Empty targets real OpenAI |
+| `OPENAI_COMPAT_BASE_URL`              | `""`                          | Base URL for the OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1` for local Ollama). Empty targets real OpenAI |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MODE` | `reasoning`               | OpenAI-compatible activity mode: `reasoning` emits model reasoning and compact tool status through optional `delta.reasoning_content`; `reasoning_full` also includes bounded arguments and results; `hidden` omits that channel |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS` | `2000`              | Presentation threshold for arguments or results in one `/v1` tool-activity payload in `reasoning_full` mode; distinct from `TOOL_RESULT_MAX_CHARS` |
 | `MCP_CONFIG_PATH`              | `config/mcp_config.yaml`      | Path to MCP server config                          |
-| `MAX_LOOP_ITERATIONS`          | `25`                          | Cap on agent loop iterations                       |
+| `MCP_CONNECT_TIMEOUT_SECONDS`  | `30`                          | Cap on one complete MCP startup or lazy-recovery connection (transport open, initialize, and tool discovery); `<= 0` disables |
+| `LOOP_MAX_ITERATIONS`          | `10`                          | Cap on agent loop iterations                       |
 | `LLM_TIMEOUT_SECONDS`          | `120`                         | Per-attempt cap on a single `llm.complete()` call (`<= 0` disables) |
 | `TOOL_TIMEOUT_SECONDS`         | `60`                          | Cap on a single `mcp.call_tool()`; on timeout the model gets an `is_error` tool result (`<= 0` disables) |
 | `LLM_MAX_RETRIES`              | `3`                           | Retries on transient LLM failures (429/5xx/timeout/reset) and empty responses (`0` disables) |
 | `LLM_RETRY_BASE_DELAY`         | `0.5`                         | Base seconds for jittered exponential backoff between LLM retries |
 | `TOOL_RESULT_MAX_CHARS`        | `20000`                       | Clip threshold for a single flattened tool result before it enters session history (`<= 0` disables) |
+| `RUN_MAX_TOKENS`               | `0`                           | Hard ceiling on cumulative `total_tokens` for one run; ends the run `budget_exceeded` (`<= 0` disables). When a provider reports absent/all-zero usage, the local token estimator (`agent/context.py`) fills in, so the cap works against local OpenAI-compatible servers too |
+| `RUN_MAX_SECONDS`              | `0`                           | Hard wall-clock ceiling on one accepted turn, including routing, retries, LLM/tool calls, and backoff; ends the run `deadline_exceeded` (`<= 0` disables) |
+| `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` | `0`                   | Abort the run `no_progress` after this many tool-call failures in a row (a success resets the count); `<= 0` disables. Should exceed the fixed at-3 nudge so the model gets a chance to recover first |
+| `CONTEXT_STRATEGY`             | `naive`                       | How the agent loop shapes the outgoing message view per LLM call: `naive` (pass-through; over budget only logs a warning) or `compaction` (summarize the over-budget middle of the history, keep the task header + recent tail verbatim). Unknown values degrade to `naive` with a warning. The view is per-call only — session history is never rewritten |
+| `CONTEXT_DEFAULT_WINDOW_TOKENS` | `32768`                      | Assumed context window for models whose `models.yaml` entry has no `context_window`, and for legacy/no-orchestrator mode. Budget = window − max output tokens − safety margin |
+| `CONTEXT_SAFETY_MARGIN_TOKENS` | `1024`                        | Headroom subtracted when computing the input budget; absorbs token-estimator error |
+| `CONTEXT_RECENT_MESSAGES`      | `6`                           | Recent protocol-safe units (a user turn, a no-tool assistant turn, or an assistant tool call plus its results) kept verbatim under compaction; shrinks automatically if the tail alone overflows |
+| `CONTEXT_SUMMARY_MAX_TOKENS`   | `512`                         | Output cap for the one-call compaction summarizer |
 | `SESSION_TTL_SECONDS`          | `3600`                        | Idle TTL before an in-memory session is evicted (`<= 0` disables) |
-| `SESSION_MAX_COUNT`            | `1000`                        | Max sessions retained in memory; oldest-updated evicted first (`<= 0` disables) |
+| `SESSION_CAPACITY`            | `1000`                        | Max sessions retained in memory; oldest-updated evicted first (`<= 0` disables) |
 | `LOG_LEVEL`                    | `INFO`                        | Python logging level (DEBUG opens per-request orchestrator detail) |
 | `TRACE_ENABLED`                | `false`                       | Serialize the loop's event stream to a JSONL trace (one record per event, tagged with `run_id` + step + timestamp + latency). Off = `tracer=None`, zero hot-path cost |
-| `TRACE_PATH`                   | `traces/harness.jsonl`        | Append-only JSONL trace file; parent dirs are created. Captures full prompts/args/results — treat as sensitive (no auth yet) |
+| `TRACE_JSONL_PATH`                   | `traces/harness.jsonl`        | Append-only JSONL trace file; parent dirs are created. Captures full prompts/args/results — treat as sensitive and guard at the filesystem level (the trace file is not covered by `HYPHAE_API_KEY`) |
+| `HYPHAE_API_KEY`              | `""`                          | Optional API key gating `/chat`, `/chat/stream`, `/v1/*` (`/health` stays open). Empty = auth off (single-operator dev default); set = 401 without a valid key. Accepts `X-API-Key: <key>` or `Authorization: Bearer <key>`; compared constant-time |
 | `ORCHESTRATION_ENABLED`        | `true`                        | Master toggle for the orchestration layer          |
 | `MODELS_CONFIG_PATH`           | `config/models.yaml`          | Path to the model registry YAML                    |
 | `ORCHESTRATOR_PROMPT_PATH`     | `config/orchestrator_prompt.md` | Path to orchestrator's system prompt             |
 | `ORCHESTRATOR_MODEL_ID`        | `""`                          | Override which model the orchestrator itself uses (empty = default from models.yaml) |
 | `GOOGLE_TOOLBOX_URL`           | _(none)_                      | Endpoint for the `google-toolbox` MCP server, interpolated into `mcp_config.yaml` |
 | `OPEN_WEBSEARCH_URL`           | _(none)_                      | Endpoint for the `open-websearch` MCP server, interpolated into `mcp_config.yaml` |
+
+Trace buffering is fixed internal policy, not environment configuration: the
+queue holds 4096 records, batches contain at most 100 records, partial batches
+flush after 250 ms, and overflow warnings repeat at most once per 60 seconds.
+There are deliberately no queue-size, batch-size, flush-interval, warning-rate,
+or overflow-policy settings.
+
+Renamed settings retain deprecated input aliases so existing deployments can
+migrate without an abrupt configuration break:
+
+| Canonical name | Deprecated input alias |
+|---|---|
+| `OPENAI_COMPAT_BASE_URL` | `OPENAI_PROVIDER_BASE_URL`, `OPENAI_BASE_URL` |
+| `LLM_MODEL_NAME` | `LLM_MODEL` |
+| `LOOP_MAX_ITERATIONS` | `MAX_LOOP_ITERATIONS` |
+| `RUN_MAX_TOKENS` | `MAX_RUN_TOKENS` |
+| `RUN_MAX_SECONDS` | `MAX_RUN_SECONDS` |
+| `SESSION_CAPACITY` | `SESSION_MAX_COUNT` |
+| `HYPHAE_API_KEY` | `HARNESS_API_KEY` |
+| `TRACE_JSONL_PATH` | `TRACE_PATH` |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MODE` | `OPENAI_COMPAT_TOOL_ACTIVITY` |
+| `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS` | `OPENAI_TOOL_BLOCK_MAX_CHARS` |
+
+When both forms are set, the canonical name wins. New deployments should use
+the canonical names in the main table.
 
 ## MCP Config YAML — `config/mcp_config.yaml`
 
@@ -66,6 +111,11 @@ mcpServers:
   #   args: ["mcp-server-github"]
   #   env:
   #     GITHUB_TOKEN: ${GITHUB_TOKEN}
+
+# Optional top-level block: dispatch-time tool policy (what may EXECUTE).
+tool_policy:
+  mode: allow_all        # allow_all (default) | allow_list
+  allow: []              # fnmatch patterns over {server}__{tool}, e.g. ["web-search__*"]
 ```
 
 **Schema notes:**
@@ -77,9 +127,23 @@ mcpServers:
   validates its own required fields.
 - `disabled: true` skips the server entirely at startup.
 - `disabled_tools: [...]` hides specific tools from the LLM (defense in
-  depth: filtered at list time and at call time).
-- String values support `${ENV_VAR}` interpolation; missing vars raise
-  immediately rather than producing empty strings.
+  depth: filtered at list time and at call time). This is a **visibility**
+  control (what the model sees) — separate from `tool_policy` below.
+- `tool_policy` (optional, top-level) is the **enforcement** control (what
+  actually runs), checked at dispatch after argument validation and before the
+  MCP call. `mode: allow_all` (default; or omit the block) runs every tool.
+  `mode: allow_list` runs only tools whose namespaced name matches an `allow`
+  fnmatch pattern; anything else is denied with a teaching `is_error` result the
+  model can adapt to (a denial is feedback, not a run failure, and repeated
+  denials trip the no-progress abort). An `allow_list` with an empty `allow`
+  **fails loudly at startup** — it would otherwise silently deny every tool.
+  Visibility (orchestrator selection + `disabled_tools`) and enforcement
+  (`tool_policy`) are deliberately distinct layers.
+- String values support `${ENV_VAR}` interpolation from raw, source-provided
+  Settings values plus the process environment. Undeclared `.env` names are
+  retained privately for this purpose, real process values win, declared
+  defaults are not synthesized, and missing names raise immediately rather
+  than producing empty strings.
 - Server names cannot contain `__` (reserved for tool namespacing) and
   must be alphanumeric (dashes/underscores allowed).
 - URLs are typed as `str`, not `HttpUrl`, so internal `.local` hostnames
@@ -104,6 +168,21 @@ models:
       Heavyweight advanced reasoning. Use ONLY for complex logic, zero-shot
       architectural design, advanced mathematics, deep analytical work, or
       highly ambiguous workflows demanding deliberate planning.
+
+  qwen3-local:
+    provider: openai_compatible
+    model: qwen3.6-35b-a3b
+    description: >
+      Local Qwen3.6 model served over an OpenAI-compatible endpoint.
+      Strong for agentic coding and deliberate tool-using workflows.
+    context_window: 65536
+    max_tokens: 16384
+    supports_native_tools: true
+    thinking: think-tags
+    sampling:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
 ```
 
 Both models are **active** — the orchestrator routes between them (cheap
@@ -115,21 +194,57 @@ Both models are **active** — the orchestrator routes between them (cheap
 - `provider` must be registered in `llm/client.py`'s `_PROVIDERS` —
   validated against `supported_providers()` at load time, so an unknown
   provider is rejected up front rather than at first request. Implemented
-  today: `gemini` (`llm/providers/gemini.py`) and `openai`
-  (`llm/providers/openai.py`). The `openai` provider is OpenAI-compatible:
-  set `OPENAI_BASE_URL` to point it at a local Ollama (or any compatible)
-  server, otherwise it targets real OpenAI. For Ollama, `model` must match
-  an `ollama list` tag and be a tools-capable model if you need tool calling.
+  today: `gemini` (`llm/providers/gemini/`) and `openai_compatible`
+  (`llm/providers/openai_compatible/`). The deprecated `openai` provider ID
+  remains accepted for existing configuration. Set `OPENAI_COMPAT_BASE_URL`
+  to point the adapter at a local Ollama (or any compatible server); an empty
+  value targets real OpenAI. For Ollama, `model` must match an `ollama list`
+  tag and be tools-capable if you need tool calling.
 - `model` is the provider-specific model identifier.
 - `description` is what the **orchestrator LLM** sees when picking a
   model. Write for an LLM audience: terse, capability-focused, plain
   English.
-- `max_tokens` is optional; falls back to `Settings.llm_max_tokens`.
+- `max_tokens` is optional; falls back to `Settings.llm.max_tokens`.
+- `context_window` is optional; the model's total context window in tokens,
+  used by the agent loop's context budget (`window − max output − safety
+  margin`). Falls back to `CONTEXT_DEFAULT_WINDOW_TOKENS`. Provider-agnostic
+  (a plain size, no vendor branching) — set it accurately for small local
+  models, where overflow is a hard failure.
+- `supports_native_tools` is optional and defaults to `true`. It declares
+  whether the served endpoint supports native tool/function calling. When set
+  to `false`, `build_llm_client_from_entry()` wraps the provider client with
+  the prompted-tool adapter: tools are rendered into the system prompt, the
+  provider receives a request with `tools=None`, and one JSON action from prose is
+  normalized back into a normal `ToolUseBlock`. Omitted or `true` keeps native
+  tool behavior unchanged.
+- `thinking` is optional and defaults to `none`. Values:
+  `none` means the provider has no request-time thinking knob,
+  `hint-param` means the provider can pass the orchestrator's
+  `thinking_level` through as a request hint such as `reasoning_effort`,
+  and `think-tags` means the model may self-emit a leading
+  `<think>...</think>` block that the provider extracts as sanitized
+  reasoning. It is not replayed into model history; `/v1` streaming can display
+  it through `delta.reasoning_content`.
+- `sampling` is optional. Supported fields are `temperature` (`0.0`-`2.0`),
+  `top_p` (`0.0`-`1.0`), and `top_k` (`>= 1`). Omit the block, or omit an
+  individual field, to leave the provider/server default in force. Sampling is
+  per model entry, not an environment variable. Gemini receives its native
+  `top_k`; a configured OpenAI-compatible endpoint receives `top_k` under
+  `extra_body`; real OpenAI omits `top_k` because it is not a supported direct
+  chat-completions parameter.
 - `default: true` on **exactly one** entry. The default model is used
   by the orchestrator itself (unless `ORCHESTRATOR_MODEL_ID` overrides)
   and is the safe fallback when orchestration fails.
+  The orchestrator control model must not be prompted-only: if the resolved
+  orchestrator row has `supports_native_tools: false`, startup logs a warning
+  and runs in legacy no-orchestration mode. Prompted-tool models can still be
+  selected for downstream agent turns.
 - Model IDs must be `[A-Za-z0-9_.\-]+` (clean keys for logging and
   routing).
+
+Unknown fields, invalid enum values, and out-of-range sampling values fail
+startup during `models.yaml` parsing, with the model id and field path in the
+validation error.
 
 ## Orchestrator Prompt — `config/orchestrator_prompt.md`
 

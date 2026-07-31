@@ -1,0 +1,60 @@
+[project]
+name = "hyphae"
+version = "0.2.0"
+description = "Minimal extendable AI harness with MCP tool support"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.136.3",
+    "google-genai>=2.6.0",
+    "jsonschema>=4.26.0",
+    "mcp>=1.28.1",
+    "openai>=2.46.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
+    "sse-starlette>=3.4.5",
+    "starlette>=1.1.0",
+    "uvicorn>=0.48.0",
+]
+
+[dependency-groups]
+dev = [
+    "anyio>=4.13.0",
+    "asgi-lifespan>=2.1.0",
+    "httpx>=0.28.1",
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "ruff>=0.15.22",
+    "types-jsonschema>=4.26.0.20260518",
+    "types-pyyaml>=6.0.12.20260518",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+addopts = '-ra -m "not live"'
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
+markers = [
+    "live: requires configured credentials or an external service",
+    "model: requires a configured model backend",
+    "mcp: requires one or more configured MCP servers",
+    "http_server: exercises the fully configured ASGI application lifespan",
+]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+exclude = ["^tests/"]

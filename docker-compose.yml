@@ -1,0 +1,70 @@
+# docker-compose.yml
+#
+# open-websearch MCP server for the harness.
+#
+# This deploys ONLY the external web-search MCP server (https://github.com/aas-ee/open-websearch),
+# not the harness itself — the harness still runs on the host via runscript.sh while
+# it's under active development. Placed in the project root for convenience for now;
+# move it under a deploy/ dir (or fold into a full stack) once the harness is also
+# containerized.
+#
+# The "search engines" (DuckDuckGo, Brave, StartPage) are remote public websites the
+# container scrapes over the internet — nothing is installed locally. The only
+# requirement is outbound internet access from the container.
+#
+# SECURITY MODEL: open-websearch has NO authentication. Network isolation is the
+# entire security boundary. The port is bound to loopback (127.0.0.1) so only the
+# host-side harness can reach it, not the LAN. When the harness is containerized,
+# delete the `ports:` block and put both services on a shared private network so the
+# port is never exposed to the host at all.
+#
+# Run:   docker compose up -d
+# Logs:  docker compose logs -f open-websearch
+# Stop:  docker compose down
+
+services:
+  open-websearch:
+    image: ghcr.io/aas-ee/open-web-search:latest
+    container_name: open-websearch
+    restart: unless-stopped
+
+    # Loopback-only: reachable from the host (where the harness currently runs),
+    # NOT from the rest of the LAN. Do not change to 0.0.0.0.
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    environment:
+      MODE: http                                      # HTTP transport only; drop stdio
+      ENABLE_CORS: "false"                            # server-side client; no browser CORS needed
+      DEFAULT_SEARCH_ENGINE: duckduckgo               # privacy-respecting default (not stock bing)
+      ALLOWED_SEARCH_ENGINES: duckduckgo,brave,startpage  # restrict to privacy-respecting engines
+      FETCH_WEB_INSECURE_TLS: "false"                 # never disable TLS verification
+      # Egress privacy (optional): route outbound search traffic through a VPN/proxy
+      # so the engines see the proxy IP, not your homelab's. Point at e.g. a gluetun
+      # or Tor SOCKS/HTTP proxy container.
+      # USE_PROXY: "true"
+      # PROXY_URL: http://gluetun:8888
+
+    # --- hardening ---
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true                                   # immutable rootfs...
+    tmpfs:
+      - /tmp                                           # ...with a writable scratch dir
+    mem_limit: 512m
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # The image is Node-based and may not ship wget; if this check flaps, swap to a
+    # `node -e` fetch or remove it (the harness degrades gracefully if the server is down).
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

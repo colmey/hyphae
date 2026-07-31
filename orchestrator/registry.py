@@ -19,12 +19,18 @@ a rare double-build wastes a few cycles but cannot produce wrong behavior.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any
+from collections.abc import Iterable
+from itertools import chain
 
-from llm.client import LLMClient, build_llm_client_from_entry
+from llm.client import (
+    LLMClient,
+    _DefaultClientSettings,
+    build_llm_client_from_entry,
+)
 
-from .schemas import ModelEntry, ModelsConfig
+from config import ModelEntry, ModelsConfig
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +38,9 @@ logger = logging.getLogger(__name__)
 class LLMRegistry:
     """Holds the model inventory and lazily builds LLMClient instances."""
 
-    def __init__(self, models_config: ModelsConfig, settings: Any) -> None:
+    def __init__(
+        self, models_config: ModelsConfig, settings: _DefaultClientSettings
+    ) -> None:
         """
         Args:
           models_config: the parsed models.yaml.
@@ -88,8 +96,12 @@ class LLMRegistry:
         entry = self.get_entry(model_id)
         client = build_llm_client_from_entry(entry, self._settings)
         self._clients[model_id] = client
-        logger.info("built LLM client for model_id=%s (provider=%s model=%s)",
-                    model_id, entry.provider, entry.model)
+        logger.info(
+            "built LLM client for model_id=%s (provider=%s model=%s)",
+            model_id,
+            entry.provider,
+            entry.model,
+        )
         return client
 
     def get_or_default(self, model_id: str | None) -> tuple[str, LLMClient]:
@@ -104,6 +116,53 @@ class LLMRegistry:
         if model_id and model_id != fallback:
             logger.warning(
                 "model_id %r not in registry; falling back to default %r",
-                model_id, fallback,
+                model_id,
+                fallback,
             )
         return fallback, self.get(fallback)
+
+    async def aclose(self, *, additional_clients: Iterable[LLMClient] = ()) -> None:
+        """Detach the cache and close each cached/additional identity once.
+
+        The application lifespan supplies its default client through
+        ``additional_clients`` so aliases across both ownership paths are
+        deduplicated in the same snapshot.
+        """
+        cached = tuple(self._clients.values())
+        self._clients.clear()
+
+        clients: list[LLMClient] = []
+        seen: set[int] = set()
+        for client in chain(additional_clients, cached):
+            identity = id(client)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            clients.append(client)
+
+        if not clients:
+            return
+        await asyncio.gather(
+            *(_close_client(client) for client in clients),
+        )
+
+
+async def _close_client(client: LLMClient) -> None:
+    """Best-effort close for one registry-owned client."""
+    try:
+        await client.aclose()
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise
+        logger.warning(
+            "LLM client cleanup was cancelled for %s",
+            type(client).__name__,
+            exc_info=True,
+        )
+    except Exception:  # noqa: BLE001 -- continue closing sibling clients.
+        logger.warning(
+            "failed to close LLM client %s",
+            type(client).__name__,
+            exc_info=True,
+        )

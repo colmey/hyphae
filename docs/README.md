@@ -1,4 +1,4 @@
-# PyAiHarness — Reference Docs
+# hyphae — Reference Docs
 
 A minimal, extendable AI harness in Python. Receives a prompt over HTTP,
 runs an **orchestrator** to pick a model + tool subset + system prompt,

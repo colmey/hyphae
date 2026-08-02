@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 from agent import InMemorySessionStore, SessionGuard
 from config import Settings
-from mcp_layer import ToolCallResult
+from tooling import ToolCallResult
 
 
 class EmptyMCP:

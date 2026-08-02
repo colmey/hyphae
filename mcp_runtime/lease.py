@@ -11,13 +11,13 @@ from enum import Enum
 from typing import Any
 
 from config import MCPServerConfig
+from tooling import ToolCallResult
 
 from .catalog import ToolRoute, normalize_tools, validation_error
 from .client import (
     MCPTransportError,
     ManagedClient,
     ManagedConnection,
-    ToolCallResult,
 )
 
 logger = logging.getLogger(__name__)

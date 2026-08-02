@@ -37,7 +37,7 @@ from agent import (
 )
 from config import get_settings, load_mcp_config_from_settings, reset_settings
 from llm import build_llm_client
-from mcp_layer import MCPManager, TurnToolRuntime
+from mcp_runtime import MCPManager, TurnToolRuntime
 
 
 logging.basicConfig(

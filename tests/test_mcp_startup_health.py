@@ -10,9 +10,9 @@ from typing import Any
 
 import pytest
 
-import mcp_layer.client as client_module
+import mcp_runtime.client as client_module
 from config import MCPConfig
-from mcp_layer import MCPManager, MCPServerState, Tool
+from mcp_runtime import MCPManager, MCPServerState, Tool
 from tests._app_support import wired_app
 
 pytestmark = pytest.mark.anyio

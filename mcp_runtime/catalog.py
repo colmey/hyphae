@@ -11,9 +11,9 @@ from typing import Any
 import jsonschema
 from jsonschema.protocols import Validator
 from jsonschema.validators import validator_for
+from tooling import NAMESPACE_SEP, ToolSpec
 
 from .client import Tool
-from .contracts import NAMESPACE_SEP, ToolSpec
 
 _MAX_TOOLS_PER_SERVER = 256
 _MAX_TOOL_NAME_CHARS = 128

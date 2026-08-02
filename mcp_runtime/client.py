@@ -1,4 +1,4 @@
-"""Task-local MCP connections; :mod:`mcp_layer.manager` owns catalogs and leases."""
+"""Task-local MCP connections; :mod:`mcp_runtime.manager` owns runtime state."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from config import MCPServerConfig, SSEServer, StdioServer, StreamableHTTPServer
+from tooling import ToolCallResult
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +32,6 @@ class Tool:
     name: str
     description: str
     input_schema: Mapping[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class ToolCallResult:
-    """Result of a tool call. ``content`` is flattened text output."""
-
-    content: str
-    is_error: bool
 
 
 class MCPTransportError(RuntimeError):

@@ -53,7 +53,7 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from mcp_layer.client import ToolCallResult
+from tooling import ToolCallResult
 
 logging.basicConfig(
     level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s"

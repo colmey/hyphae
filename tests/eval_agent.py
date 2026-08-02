@@ -39,7 +39,7 @@ from api.turn import OrchestratedRouting, PersistencePolicy, TurnRequest, TurnRu
 from config import get_settings
 from llm.client import GenerationRequest, LLMClient, build_llm_client
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
-from mcp_layer.client import ToolCallResult
+from tooling import ToolCallResult
 from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
 
 ROOT = Path(__file__).resolve().parents[1]

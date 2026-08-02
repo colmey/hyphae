@@ -14,8 +14,8 @@ import jsonschema
 from jsonschema.validators import validator_for
 
 from llm.schemas import Message, ToolResultBlock, ToolUseBlock
+from tooling import ToolRuntime
 
-from .contracts import ToolRuntime
 from .runtime import RunContext, RunDeadlineExceeded, RunLimits
 from .tool_policy import PolicyVerdict, ToolPolicy
 

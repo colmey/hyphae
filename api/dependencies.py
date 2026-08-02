@@ -21,7 +21,7 @@ from typing import Optional
 from fastapi import HTTPException, Request
 
 from agent import RunLimits, SessionGuard, SessionStore, ToolPolicy, Tracer
-from mcp_layer import MCPManager
+from mcp_runtime import MCPManager
 from orchestrator import LLMRegistry, Orchestrator
 
 from .turn import (

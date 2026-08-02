@@ -11,7 +11,7 @@ from agent.loop import _AgentRun
 from agent.tool_execution import ToolDispatcher
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, CompletionUsage, TextBlock
-from mcp_layer import ToolCallResult
+from tooling import ToolCallResult
 
 
 class _BufferedLLM(LLMClient):

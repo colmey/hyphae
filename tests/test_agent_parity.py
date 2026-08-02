@@ -47,7 +47,7 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from mcp_layer.client import ToolCallResult
+from tooling import ToolCallResult
 
 pytestmark = pytest.mark.anyio
 

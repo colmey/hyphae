@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any
 
 from config import MCPConfig
+from tooling import ToolRuntime
 
 from .catalog import CatalogSnapshot, ToolRoute, normalize_tools
 from .client import ClientFactory, MCPClient, Tool
@@ -484,7 +485,7 @@ class MCPManager:
         self,
         *,
         timeout_seconds: float | None = None,
-    ) -> AsyncIterator[TurnToolRuntime]:
+    ) -> AsyncIterator[ToolRuntime]:
         """Capture a catalog and own every lazy server lease for one turn."""
         if not self._startup_started:
             raise RuntimeError("MCPManager.startup() must run before open_turn()")

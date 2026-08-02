@@ -26,12 +26,12 @@ jobs:
         run: uv run ruff check .
 
       - name: Mypy
-        run: uv run mypy agent api config llm mcp_layer orchestrator main.py
+        run: uv run mypy agent api config llm mcp_runtime orchestrator tooling main.py
 
       - name: Compile
         run: >-
           uv run python -m compileall -q
-          agent api config llm mcp_layer orchestrator main.py tests
+          agent api config llm mcp_runtime orchestrator tooling main.py tests
 
       - name: Collect live tests
         run: uv run pytest --collect-only -q -m live

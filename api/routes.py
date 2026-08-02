@@ -18,7 +18,7 @@ from agent import (
     SessionStore,
 )
 from agent.tracing import event_record
-from mcp_layer import MCPManager, MCPServerState
+from mcp_runtime import MCPManager, MCPServerState
 from orchestrator import LLMRegistry
 
 from .dependencies import (

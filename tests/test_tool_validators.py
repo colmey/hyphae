@@ -13,7 +13,7 @@ from agent import DoneEvent, InMemorySessionStore, RunLimits, ToolPolicy, run_ag
 from agent.tool_policy import PolicyDecision, PolicyVerdict
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
-from mcp_layer.client import ToolCallResult
+from tooling import ToolCallResult
 
 pytestmark = pytest.mark.anyio
 

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import BaseModel, Field
 
-from mcp_layer import MCPServerState
+from mcp_runtime import MCPServerState
 
 if TYPE_CHECKING:
     from agent import DoneEvent

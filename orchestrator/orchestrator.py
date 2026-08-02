@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import Message, Role, TextBlock
-from mcp_layer import ToolSnapshot
+from tooling import ToolSnapshot
 
 from .contracts import ModelRegistry
 from .schemas import OrchestrationDecision, OrchestrationProposal, ToolPreferences

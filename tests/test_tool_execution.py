@@ -20,7 +20,7 @@ from agent.tool_execution import (
 )
 from agent.tool_policy import PolicyDecision, PolicyVerdict
 from llm.schemas import Role, ToolResultBlock, ToolUseBlock
-from mcp_layer import ToolCallResult
+from tooling import ToolCallResult
 
 
 pytestmark = pytest.mark.anyio

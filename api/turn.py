@@ -26,11 +26,10 @@ from agent import (
     Tracer,
     run_agent,
 )
-from agent.contracts import ToolRuntime
 from agent.runtime import ModelLimits
 from llm.client import LLMClient
-from mcp_layer import ToolSnapshot
 from orchestrator.contracts import ModelRegistry, RoutingService
+from tooling import ToolRuntime, ToolSnapshot
 
 from .schemas import TokenUsage
 
@@ -108,7 +107,7 @@ type RoutingRuntime = UnorchestratedRouting | OrchestratedRouting
 
 
 class _TurnToolProvider(Protocol):
-    """Accepted-turn tool-runtime factory; Session 10 relocates this contract."""
+    """Accepted-turn factory for a neutral, turn-local tool runtime."""
 
     def open_turn(
         self,

@@ -29,7 +29,7 @@ from llm import (
     build_llm_client,
 )
 from llm.schemas import TextBlock
-from mcp_layer import MCPManager, TurnToolRuntime
+from mcp_runtime import MCPManager, TurnToolRuntime
 
 
 logging.basicConfig(

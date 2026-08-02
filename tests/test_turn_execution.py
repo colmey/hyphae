@@ -46,7 +46,7 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from mcp_layer import ToolCallResult
+from tooling import ToolCallResult
 from orchestrator import Orchestrator
 from orchestrator.contracts import ModelRegistry, RoutingService
 from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal

@@ -10,7 +10,7 @@ import pytest
 from agent.runtime import ModelLimits
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, Message, TextBlock
-from mcp_layer import ToolSnapshot
+from tooling import ToolSnapshot
 from orchestrator import Orchestrator, ToolPreferences
 from orchestrator.schemas import OrchestrationProposal
 

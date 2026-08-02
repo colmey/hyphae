@@ -24,7 +24,8 @@ from llm.schemas import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from .contracts import ToolRuntime
+from tooling import ToolRuntime
+
 from .context import (
     ContextBudget,
     assemble_context,

@@ -36,7 +36,7 @@ from llm import (
 )
 from llm.schemas import TextBlock
 from llm.providers.openai_compatible import OpenAICompatibleLLMClient
-from mcp_layer import MCPManager, TurnToolRuntime
+from mcp_runtime import MCPManager, TurnToolRuntime
 
 
 logging.basicConfig(

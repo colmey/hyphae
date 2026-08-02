@@ -18,7 +18,7 @@ from agent import JSONLTracer, RunContext, RunLimits, Session, build_tracer, run
 from agent.events import DoneEvent, ToolCallEvent, ToolResultEvent, UsageEvent
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
-from mcp_layer import ToolCallResult
+from tooling import ToolCallResult
 
 
 pytestmark = pytest.mark.anyio

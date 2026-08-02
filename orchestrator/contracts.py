@@ -8,7 +8,7 @@ from typing import Protocol
 from agent.runtime import ModelLimits
 from llm.client import LLMClient
 from llm.schemas import Message
-from mcp_layer import ToolSnapshot
+from tooling import ToolSnapshot
 
 from .schemas import OrchestrationDecision
 

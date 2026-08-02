@@ -12,10 +12,11 @@ from typing import Any
 
 import pytest
 
-import mcp_layer.manager as manager_module
+import mcp_runtime.manager as manager_module
 from config import MCPConfig
-from mcp_layer import MCPManager, MCPServerState, Tool, ToolCallResult, ToolSnapshot
-from mcp_layer.client import MCPConnection, MCPTransportError
+from mcp_runtime import MCPManager, MCPServerState, Tool
+from mcp_runtime.client import MCPConnection, MCPTransportError
+from tooling import ToolCallResult, ToolSnapshot
 
 pytestmark = pytest.mark.anyio
 
@@ -884,7 +885,7 @@ async def test_cleanup_failure_log_is_sanitized(
     manager = _manager({"server": provider})
     await manager.startup()
 
-    with caplog.at_level(logging.WARNING, logger="mcp_layer.lease"):
+    with caplog.at_level(logging.WARNING, logger="mcp_runtime.lease"):
         async with manager.open_turn() as runtime:
             result = await runtime.call_tool("server__read", {})
 

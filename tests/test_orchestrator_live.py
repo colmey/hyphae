@@ -33,7 +33,8 @@ import pytest
 
 from config import get_settings, load_mcp_config_from_settings, reset_settings
 from llm.schemas import Message, TextBlock
-from mcp_layer import MCPManager, ToolSnapshot
+from mcp_runtime import MCPManager
+from tooling import ToolSnapshot
 from config import load_models_config, load_orchestrator_prompt
 from orchestrator import LLMRegistry, Orchestrator, ToolPreferences
 from orchestrator.schemas import OrchestrationProposal

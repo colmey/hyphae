@@ -22,7 +22,7 @@ from api import router
 from api.openai_compatible import openai_auth_exception_handler
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from llm import LLMClient, build_llm_client
-from mcp_layer import MCPManager
+from mcp_runtime import MCPManager
 from config import (
     get_settings,
     load_mcp_config_from_settings,

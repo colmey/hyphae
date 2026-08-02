@@ -10,7 +10,7 @@ from typing import Any
 from agent import InMemorySessionStore, RunLimits, run_agent
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage
-from mcp_layer.client import ToolCallResult
+from tooling import ToolCallResult
 
 
 class ScriptedLLM(LLMClient):

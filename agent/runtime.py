@@ -168,5 +168,5 @@ class RunContext:
                     event_record(event, run_id=self.run_id, step=self.trace_step)
                 )
             except Exception:  # noqa: BLE001 -- tracing must never break a run.
-                self.logger.warning("trace emit failed", exc_info=True)
+                self.logger.warning("trace emit failed")
         return event

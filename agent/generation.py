@@ -193,13 +193,21 @@ async def _close_stream(
         return
     try:
         await close()
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise
-        log.warning("LLM stream cleanup was cancelled", exc_info=True)
-    except Exception:  # noqa: BLE001 -- cleanup must preserve the primary outcome.
-        log.warning("failed to close LLM stream", exc_info=True)
+        log.warning(
+            "LLM stream cleanup was cancelled for %s (%s)",
+            type(stream).__name__,
+            type(exc).__name__,
+        )
+    except Exception as exc:  # noqa: BLE001 -- preserve the primary outcome.
+        log.warning(
+            "failed to close LLM stream %s (%s)",
+            type(stream).__name__,
+            type(exc).__name__,
+        )
 
 
 def _backoff_delay_seconds(base_delay: float, attempt: int) -> float:

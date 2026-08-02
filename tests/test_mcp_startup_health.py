@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -130,9 +131,18 @@ def _manager(
     [
         (
             "streamable_http_client",
-            {"transport": "streamable-http", "url": "http://example.invalid/mcp"},
+            {
+                "transport": "streamable-http",
+                "url": "http://user:password@example.invalid/mcp?token=secret",
+            },
         ),
-        ("sse_client", {"transport": "sse", "url": "http://example.invalid/sse"}),
+        (
+            "sse_client",
+            {
+                "transport": "sse",
+                "url": "https://user:password@example.invalid/sse?api_key=secret",
+            },
+        ),
         ("stdio_client", {"transport": "stdio", "command": "example"}),
     ],
 )
@@ -140,7 +150,9 @@ async def test_startup_discovery_enters_and_exits_resources_in_the_same_task(
     transport: str,
     server: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO)
     active_resources: set[str] = set()
     affinity_errors: list[str] = []
     enter_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -201,6 +213,8 @@ async def test_startup_discovery_enters_and_exits_resources_in_the_same_task(
     assert affinity_errors == []
     assert active_resources == set()
     assert enter_tasks["transport"] is enter_tasks["session"]
+    for secret in ("user:password", "token=secret", "api_key=secret"):
+        assert secret not in caplog.text
 
 
 @pytest.mark.parametrize("phase", ["transport", "initialize", "list_tools"])
@@ -291,6 +305,39 @@ async def test_partial_startup_is_ordered_sanitized_and_resource_free() -> None:
     assert healthy.enter_tasks == healthy.exit_tasks
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("line one password=hunter2\nline two token=topsecret"),
+        RuntimeError({"authorization": "Bearer hidden", "cookie": "secret"}),
+        RuntimeError("https://user:pass@example.invalid/mcp?token=hidden"),
+    ],
+)
+async def test_arbitrary_mcp_exception_text_is_never_exposed(
+    failure: RuntimeError,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    provider = _FakeProvider("broken", [_OpenStep(enter_error=failure)])
+    manager = _manager(_config("broken"), {"broken": provider})
+
+    await manager.startup()
+
+    status = manager.status_snapshot()[0]
+    assert status.last_error == "connection failed"
+    combined = f"{status.last_error}\n{caplog.text}"
+    for secret in (
+        "hunter2",
+        "topsecret",
+        "Bearer hidden",
+        "cookie",
+        "user:pass",
+        "token=hidden",
+        "line two",
+    ):
+        assert secret not in combined
+
+
 async def test_cleanup_failure_prevents_catalog_publication() -> None:
     provider = _FakeProvider(
         "server",
@@ -309,7 +356,7 @@ async def test_cleanup_failure_prevents_catalog_publication() -> None:
     assert provider.active_contexts == 0
     status = manager.status_snapshot()[0]
     assert status.state is MCPServerState.UNHEALTHY
-    assert status.last_error == "RuntimeError: cleanup failed"
+    assert status.last_error == "connection failed"
 
 
 async def test_child_cancellation_degrades_only_that_server() -> None:

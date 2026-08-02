@@ -742,6 +742,7 @@ async def test_cleanup_failure_does_not_replace_primary_outcome(
     has_error: bool,
     scripted_mcp_factory,
     agent_event_collector,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     stream = CleanupStream(outcome, fail_close=True)
     events = await agent_event_collector(
@@ -753,3 +754,6 @@ async def test_cleanup_failure_does_not_replace_primary_outcome(
     assert _done(events) == reason
     assert any(isinstance(event, ErrorEvent) for event in events) is has_error
     assert stream.close_calls == 1
+    assert "cleanup failed" not in caplog.text
+    assert "CleanupStream" in caplog.text
+    assert "RuntimeError" in caplog.text

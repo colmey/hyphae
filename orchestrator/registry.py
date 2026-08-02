@@ -77,8 +77,9 @@ class LLMRegistry:
         verbatim, so prefer clarity over compactness.
         """
         lines: list[str] = []
+        default_id = self.default_id()
         for mid, entry in self._config.models.items():
-            default_marker = " (default)" if entry.default else ""
+            default_marker = " (default)" if mid == default_id else ""
             desc = " ".join(entry.description.split())  # collapse whitespace
             lines.append(f"- {mid}{default_marker}\n    {desc}")
         return "\n".join(lines)
@@ -151,18 +152,18 @@ async def _close_client(client: LLMClient) -> None:
     """Best-effort close for one registry-owned client."""
     try:
         await client.aclose()
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise
         logger.warning(
-            "LLM client cleanup was cancelled for %s",
+            "LLM client cleanup was cancelled for %s (%s)",
             type(client).__name__,
-            exc_info=True,
+            type(exc).__name__,
         )
-    except Exception:  # noqa: BLE001 -- continue closing sibling clients.
+    except Exception as exc:  # noqa: BLE001 -- continue closing sibling clients.
         logger.warning(
-            "failed to close LLM client %s",
+            "failed to close LLM client %s (%s)",
             type(client).__name__,
-            exc_info=True,
+            type(exc).__name__,
         )

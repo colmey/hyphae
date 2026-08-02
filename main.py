@@ -26,9 +26,10 @@ from mcp_runtime import MCPManager
 from config import (
     get_settings,
     load_mcp_config_from_settings,
-    load_models_config,
+    load_models_config_from_settings,
     load_orchestrator_prompt,
 )
+from config.errors import CredentialUnavailableError, safe_path_display
 from llm.client import supported_providers
 from orchestrator import LLMRegistry, Orchestrator
 
@@ -56,9 +57,17 @@ async def _close_application_resources(
             if task is not None and task.cancelling():
                 active_cancellation = active_cancellation or exc
             else:
-                logger.warning("%s cleanup was cancelled", label, exc_info=True)
-        except Exception:  # noqa: BLE001 -- shutdown is best-effort.
-            logger.warning("%s cleanup failed", label, exc_info=True)
+                logger.warning(
+                    "%s cleanup was cancelled (%s)",
+                    label,
+                    type(exc).__name__,
+                )
+        except Exception as exc:  # noqa: BLE001 -- shutdown is best-effort.
+            logger.warning(
+                "%s cleanup failed (%s)",
+                label,
+                type(exc).__name__,
+            )
 
     if registry is not None:
         additional_clients = (
@@ -90,17 +99,27 @@ async def _start_optional_tracer(tracer: Tracer | None) -> Tracer | None:
     except asyncio.CancelledError:
         try:
             await tracer.aclose()
-        except BaseException:  # noqa: BLE001 -- preserve startup cancellation.
+        except BaseException as cleanup_exc:  # noqa: BLE001
             logger.warning(
-                "tracer cleanup after cancelled startup failed", exc_info=True
+                "tracer cleanup after cancelled startup failed for %s (%s)",
+                type(tracer).__name__,
+                type(cleanup_exc).__name__,
             )
         raise
-    except Exception:  # noqa: BLE001 -- tracing is an optional layer.
-        logger.warning("tracing startup failed; running without traces", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 -- tracing is an optional layer.
+        logger.warning(
+            "tracing startup failed for %s (%s); running without traces",
+            type(tracer).__name__,
+            type(exc).__name__,
+        )
         try:
             await tracer.aclose()
-        except Exception:  # noqa: BLE001 -- startup remains best-effort.
-            logger.warning("failed tracer cleanup failed", exc_info=True)
+        except Exception as cleanup_exc:  # noqa: BLE001 -- best-effort startup.
+            logger.warning(
+                "tracer cleanup failed for %s (%s)",
+                type(tracer).__name__,
+                type(cleanup_exc).__name__,
+            )
         return None
     return tracer
 
@@ -108,30 +127,25 @@ async def _start_optional_tracer(tracer: Tracer | None) -> Tracer | None:
 def _try_build_orchestration(
     settings,
 ) -> tuple[LLMRegistry | None, Orchestrator | None]:
-    """Attempt to construct (LLMRegistry, Orchestrator). Returns (None, None) on any failure.
+    """Build optional orchestration, degrading only on optional absence.
 
-    Orchestration is optional; load/build errors degrade to no-orchestration mode.
+    Missing optional files or control-model credentials disable orchestration.
+    Present invalid configuration propagates and aborts application startup.
     """
     if not settings.orchestration_enabled:
         logger.info("orchestration disabled by Settings.orchestration_enabled=False")
         return None, None
 
     try:
-        models_config = load_models_config(
-            settings.models_config_path, known_providers=supported_providers()
+        models_config = load_models_config_from_settings(
+            settings,
+            known_providers=supported_providers(),
         )
     except FileNotFoundError:
         logger.warning(
             "orchestration enabled but models config not found at %s; "
             "running in unorchestrated mode.",
-            settings.models_config_path,
-        )
-        return None, None
-    except Exception as e:
-        logger.warning(
-            "orchestration enabled but models config failed to load: %s; "
-            "running in unorchestrated mode.",
-            e,
+            safe_path_display(settings.models_config_path),
         )
         return None, None
 
@@ -140,36 +154,30 @@ def _try_build_orchestration(
     except FileNotFoundError:
         logger.warning(
             "orchestrator prompt not found at %s; running in unorchestrated mode.",
-            settings.orchestrator_prompt_path,
-        )
-        return None, None
-    except Exception as e:
-        logger.warning(
-            "orchestrator prompt failed to load: %s; unorchestrated mode.", e
+            safe_path_display(settings.orchestrator_prompt_path),
         )
         return None, None
 
     registry = LLMRegistry(models_config, settings)
 
-    # Catch a bad orchestrator_model_id at startup instead of first request.
     orch_model_id = settings.orchestrator_model_id or registry.default_id()
-    try:
-        orch_entry = registry.get_entry(orch_model_id)
-        if orch_entry.supports_native_tools is False:
-            logger.warning(
-                "orchestrator_model_id=%r declares supports_native_tools:false; "
-                "prompted-tool models are not supported as orchestrator control "
-                "models. running in unorchestrated mode.",
-                orch_model_id,
-            )
-            return None, None
-        registry.get(orch_model_id)
-    except Exception as e:
+    orch_entry = registry.get_entry(orch_model_id)
+    if orch_entry.supports_native_tools is False:
         logger.warning(
-            "could not build LLM client for orchestrator_model_id=%r: %s; "
+            "orchestrator_model_id=%r declares supports_native_tools:false; "
+            "prompted-tool models are not supported as orchestrator control "
+            "models. running in unorchestrated mode.",
+            orch_model_id,
+        )
+        return None, None
+
+    try:
+        registry.get(orch_model_id)
+    except CredentialUnavailableError:
+        logger.warning(
+            "provider credential unavailable for orchestrator_model_id=%r; "
             "running in unorchestrated mode.",
             orch_model_id,
-            e,
         )
         return None, None
 

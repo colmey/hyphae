@@ -7,7 +7,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatchcase
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
+
+ToolPolicyMode = Literal["allow_all", "allow_list"]
 
 
 class PolicyVerdict(Enum):
@@ -31,12 +33,18 @@ class ToolPolicy:
     config. Denials become teaching tool-result errors in the loop.
     """
 
-    def __init__(self, mode: str = "allow_all", allow: Sequence[str] = ()) -> None:
-        self._mode = mode
+    def __init__(
+        self,
+        mode: ToolPolicyMode = "allow_all",
+        allow: Sequence[str] = (),
+    ) -> None:
+        if mode not in {"allow_all", "allow_list"}:
+            raise ValueError("unsupported tool policy mode")
+        self._mode: ToolPolicyMode = mode
         self._allow = tuple(allow)
 
     def check(self, tool_name: str, args: Any = None) -> PolicyDecision:
-        if self._mode != "allow_list":
+        if self._mode == "allow_all":
             return PolicyDecision(PolicyVerdict.ALLOW)
         if any(fnmatchcase(tool_name, pattern) for pattern in self._allow):
             return PolicyDecision(PolicyVerdict.ALLOW)

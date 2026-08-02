@@ -133,6 +133,11 @@ def tool_results(events: list[Any]) -> list[ToolResultEvent]:
     return [e for e in events if isinstance(e, ToolResultEvent)]
 
 
+def test_invalid_direct_policy_construction_fails_closed() -> None:
+    with pytest.raises(ValueError, match="unsupported tool policy mode"):
+        ToolPolicy(mode="allow_everything")
+
+
 async def test_allow_all_default_executes_tool() -> None:
     # 1. allow-all default: allowed tool executes.
     llm = ScriptedLLM([tool_call("srv__allowed", {}), text("done")])

@@ -160,6 +160,12 @@ class _FailingSink(_BlockingSink):
         raise OSError("disk failed")
 
 
+class _CloseFailingSink(_RecordingSink):
+    def close(self) -> None:
+        self.closed.set()
+        raise RuntimeError("Authorization: Bearer trace-close-secret")
+
+
 class _BlockingSinkFactory:
     def __init__(self, sink: _RecordingSink) -> None:
         self.sink = sink
@@ -387,6 +393,23 @@ async def test_writer_failure_drops_batch_and_backlog_then_disables(
     assert sink.closed.is_set()
 
 
+async def test_sink_cleanup_failure_logs_only_types(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sink = _CloseFailingSink()
+    tracer = JSONLTracer(tmp_path / "trace.jsonl", _sink_factory=lambda _path: sink)
+    await tracer.start()
+    tracer.emit({"healthy": True})
+
+    await tracer.aclose()
+
+    assert sink.closed.is_set()
+    assert "trace-close-secret" not in caplog.text
+    assert "_CloseFailingSink" in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
 async def test_emit_lifecycle_rejections_and_repeated_lifecycle(
     tmp_path: Path,
 ) -> None:
@@ -446,6 +469,25 @@ async def test_serialization_failure_is_request_isolated(tmp_path: Path) -> None
     assert tracer.accepted == tracer.written == 1
     assert tracer.dropped == 1
     assert json.loads(sink.lines[0]) == {"healthy": True}
+
+
+async def test_trace_failure_logs_render_paths_without_multiline_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sink = _RecordingSink()
+    tracer = JSONLTracer(
+        Path("trace\nsecond-line.jsonl"),
+        _sink_factory=lambda _path: sink,
+    )
+    await tracer.start()
+    circular: dict[str, Any] = {}
+    circular["self"] = circular
+
+    tracer.emit(circular)
+    await tracer.aclose()
+
+    assert "trace second-line.jsonl" in caplog.text
+    assert "\nsecond-line" not in caplog.text
 
 
 async def test_startup_failure_is_terminal_and_cleanup_is_safe(tmp_path: Path) -> None:

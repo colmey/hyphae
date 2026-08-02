@@ -44,15 +44,23 @@ async def _close_sdk_stream(
         result = close()
         if inspect.isawaitable(result):
             await result
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise
         if logger is not None:
-            logger.warning("OpenAI SDK stream cleanup was cancelled", exc_info=True)
-    except Exception:  # noqa: BLE001 -- preserve the active stream outcome.
+            logger.warning(
+                "OpenAI SDK stream cleanup was cancelled for %s (%s)",
+                type(stream).__name__,
+                type(exc).__name__,
+            )
+    except Exception as exc:  # noqa: BLE001 -- preserve the active stream outcome.
         if logger is not None:
-            logger.warning("failed to close OpenAI SDK stream", exc_info=True)
+            logger.warning(
+                "failed to close OpenAI SDK stream %s (%s)",
+                type(stream).__name__,
+                type(exc).__name__,
+            )
 
 
 @dataclass

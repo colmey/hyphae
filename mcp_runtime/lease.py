@@ -107,9 +107,9 @@ class _ServerLeaseWorker:
                 await self.abort()
             except Exception as cleanup_error:
                 logger.warning(
-                    "cleanup after cancelled MCP call for %r failed: %s",
-                    self._server.name,
-                    self._coordinator.sanitize_error(cleanup_error),
+                    "MCP call cleanup failed for %s (%s)",
+                    type(self._server.client).__name__,
+                    type(cleanup_error).__name__,
                 )
             raise
 
@@ -243,13 +243,14 @@ class _ServerLeaseWorker:
             self._cleanup_started = True
             try:
                 await stack.aclose()
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as cleanup_error:
                 cleanup_cancelled = True
                 if primary_error is None:
                     raise
                 logger.warning(
-                    "cleanup after cancelled MCP lease for %r was cancelled",
-                    server_name,
+                    "MCP lease cleanup was cancelled for %s (%s)",
+                    type(self._server.client).__name__,
+                    type(cleanup_error).__name__,
                 )
             except Exception as cleanup_error:
                 if primary_error is None:
@@ -264,9 +265,9 @@ class _ServerLeaseWorker:
                     )
                 else:
                     logger.warning(
-                        "cleanup after failed MCP lease for %r failed: %s",
-                        server_name,
-                        self._coordinator.sanitize_error(cleanup_error),
+                        "MCP lease cleanup failed for %s (%s)",
+                        type(self._server.client).__name__,
+                        type(cleanup_error).__name__,
                     )
             finally:
                 if self._lease_entered and not cleanup_cancelled:

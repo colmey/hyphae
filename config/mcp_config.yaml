@@ -16,9 +16,9 @@
 # server lives in the .env file so this config carries no environment
 # specifics. A referenced var that is unset raises a clear error at startup.
 
-# No MCP servers are running locally right now, so both are disabled. Flip
-# `disabled: false` (and start the server) to re-enable. With both disabled the
-# harness runs tool-less; the model answers from its own knowledge.
+# The executable example uses the modern streamable HTTP endpoint at `/mcp`.
+# Set `disabled: true` when that local service is not running; with every server
+# disabled the harness runs tool-less and answers from model knowledge.
 mcpServers:
   open-websearch:
     transport: streamable-http

@@ -262,7 +262,7 @@ def _build_openai_compatible(
 # providers (config validators key off supported_providers()).
 _PROVIDERS: dict[str, _ProviderBuilder] = {
     "gemini": _build_gemini,
-    # `openai` remains a deprecated compatibility alias for existing configs.
+    # `openai` remains a compatibility alias for existing configs.
     "openai_compatible": _build_openai_compatible,
     "openai": _build_openai_compatible,
     # "anthropic": _build_anthropic,

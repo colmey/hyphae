@@ -88,7 +88,7 @@ in `Settings`, set `LLM_PROVIDER=...` as the legacy default, and/or add
 The `openai_compatible` provider (`llm/providers/openai_compatible/`) speaks
 the OpenAI wire protocol, so it drives real OpenAI and compatible servers —
 including a local Ollama instance — by pointing it at the desired endpoint.
-The old `openai` provider ID remains a deprecated configuration alias.
+The old `openai` provider ID remains a supported compatibility alias.
 
 1. Export `OPENAI_COMPAT_BASE_URL=http://localhost:11434/v1` and `OPENAI_API_KEY=<key>`
    (Ollama may ignore the key, but the SDK requires a non-empty value).
@@ -356,8 +356,9 @@ Two ways:
    runs in legacy mode: default LLM + all tools + an optional `/v1` system
    override. Useful for dev environments or when comparing orchestrated
    vs. unorchestrated behavior.
-2. Don't ship `config/models.yaml`. The lifespan will log a warning
-   and degrade to the same legacy mode.
+2. Don't ship `config/models.yaml`. The lifespan will log a warning and degrade
+   to the same legacy mode. A present but invalid models file is fatal at
+   startup instead of silently disabling orchestration.
 
 ---
 
@@ -475,7 +476,7 @@ deployment requirements need active probes.
 | App fails to start with missing-key error     | Provider key missing from the process environment/project `.env`, or wrong `LLM_PROVIDER` |
 | `/health` is `degraded` or an MCP server is `unhealthy` | The server failed, was cancelled, exceeded `MCP_CONNECT_TIMEOUT_SECONDS` during startup/recovery, or raised a transport/protocol failure during dispatch; healthy siblings remain usable |
 | Tool result says its outcome is unknown and was not replayed | The MCP call crossed the remote invocation boundary and then failed. The server was invalidated; retry only if the operation is safe to issue as a new invocation. |
-| `/health` shows `orchestration_enabled: false` | `models.yaml` or `orchestrator_prompt.md` missing/unparseable, or `ORCHESTRATION_ENABLED=false`. Lifespan logs the reason. |
+| `/health` shows `orchestration_enabled: false` | `models.yaml` or `orchestrator_prompt.md` is missing, or `ORCHESTRATION_ENABLED=false`. Present but invalid orchestration files fail startup. |
 | Every response has `orchestration.fallback_used: true` | Orchestrator's LLM call is failing. Check the `orchestration fallback in effect:` warning logs for the underlying provider error. |
 | 400 from `/chat`                              | Empty request body. `/chat` is plain text — send the prompt as the body. |
 | 400 from Gemini after first tool result       | `provider_metadata` round-trip broken somewhere              |

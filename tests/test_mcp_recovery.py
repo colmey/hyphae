@@ -270,7 +270,7 @@ async def test_disabled_tools_are_validated_before_they_are_filtered() -> None:
 
     status = manager.status_snapshot()[0]
     assert status.state is MCPServerState.UNHEALTHY
-    assert status.last_error is not None and "duplicate tool name" in status.last_error
+    assert status.last_error == "catalog validation failed"
 
 
 async def test_selecting_without_dispatch_opens_no_lease() -> None:
@@ -893,7 +893,8 @@ async def test_cleanup_failure_log_is_sanitized(
     rendered = caplog.text
     assert "hidden" not in rendered
     assert "user:pass" not in rendered
-    assert "[redacted-url]" in rendered
+    assert "_LeaseProvider" in rendered
+    assert "RuntimeError" in rendered
 
 
 async def test_shutdown_aborts_active_leases_without_cross_task_context_exit() -> None:

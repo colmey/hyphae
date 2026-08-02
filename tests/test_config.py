@@ -19,6 +19,8 @@ from config import (
     load_mcp_config_from_settings,
 )
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 _RENAMED_SETTING_CASES = [
     (
         "OPENAI_COMPAT_BASE_URL",
@@ -127,7 +129,8 @@ def test_renamed_setting_legacy_environment_aliases_remain_supported(
 
     settings = Settings(_env_file=None)
 
-    assert str(_setting_value(settings, field_name)) == legacy
+    expected = str(_REPO_ROOT / legacy) if field_name.endswith("_path") else legacy
+    assert str(_setting_value(settings, field_name)) == expected
     assert legacy_name.lower() not in settings.model_dump()
 
 
@@ -148,7 +151,10 @@ def test_renamed_setting_canonical_names_win_over_legacy_aliases(
 
     settings = Settings(_env_file=None)
 
-    assert str(_setting_value(settings, field_name)) == canonical
+    expected = (
+        str(_REPO_ROOT / canonical) if field_name.endswith("_path") else canonical
+    )
+    assert str(_setting_value(settings, field_name)) == expected
 
 
 def test_llm_settings_are_nested_without_flat_runtime_aliases(
@@ -300,10 +306,7 @@ def test_settings_owns_dotenv_values_without_mutating_process_environment(
     environment = settings.interpolation_environment()
 
     assert settings.api_key_for_provider("gemini") == "dotenv-gemini"
-    assert (
-        settings.api_key_for_provider("openai_compatible")
-        == "process-openai"
-    )
+    assert settings.api_key_for_provider("openai_compatible") == "process-openai"
     assert settings.api_key_for_provider("openai") == "process-openai"
     assert settings.api_key_for_provider("future") == "process-future"
     assert settings.api_key_for_provider("dotenv_only") == "dotenv-only"

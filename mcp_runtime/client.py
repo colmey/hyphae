@@ -192,23 +192,24 @@ class MCPClient:
     @asynccontextmanager
     async def open(self) -> AsyncIterator[MCPConnection]:
         """Enter transport and session contexts, and exit them in this task."""
+        transport = self.config.transport
         async with AsyncExitStack() as stack:
             if isinstance(self.config, StreamableHTTPServer):
-                logger.info("connecting to %r via streamable-http", self.name)
+                logger.info("connecting to MCP server %r via %s", self.name, transport)
                 read, write, _ = await stack.enter_async_context(
                     streamable_http_client(self.config.url)
                 )
             elif isinstance(self.config, SSEServer):
-                logger.info("connecting to %r via sse", self.name)
+                logger.info("connecting to MCP server %r via %s", self.name, transport)
                 read, write = await stack.enter_async_context(
                     sse_client(self.config.url)
                 )
             elif isinstance(self.config, StdioServer):
-                logger.info("connecting to %r via stdio", self.name)
+                logger.info("connecting to MCP server %r via %s", self.name, transport)
                 params = StdioServerParameters(
                     command=self.config.command,
-                    args=self.config.args,
-                    env=self.config.env or None,
+                    args=list(self.config.args),
+                    env=dict(self.config.env) or None,
                 )
                 read, write = await stack.enter_async_context(stdio_client(params))
             else:  # pragma: no cover - exhaustive discriminated union.
@@ -216,6 +217,6 @@ class MCPClient:
 
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-            logger.info("initialized connection to %r", self.name)
+            logger.info("initialized MCP server %r via %s", self.name, transport)
             yield MCPConnection(self.name, self.config, session)
-        logger.info("closed connection to %r", self.name)
+        logger.info("closed MCP server %r via %s", self.name, transport)

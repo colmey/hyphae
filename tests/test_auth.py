@@ -24,8 +24,10 @@ class FakeLLM(LLMClient):
 
 
 async def test_auth_disabled_leaves_protected_routes_open(asgi_client) -> None:
-    with wired_app(FakeLLM()) as (app, settings):
-        settings.hyphae_api_key = ""
+    with wired_app(FakeLLM(), settings_overrides={"hyphae_api_key": ""}) as (
+        app,
+        _settings,
+    ):
         client = asgi_client(app)
         assert (await client.post("/chat", content="hello")).status_code == 200
         response = await client.post(
@@ -49,8 +51,10 @@ async def test_auth_disabled_leaves_protected_routes_open(asgi_client) -> None:
 async def test_auth_enabled_rejects_invalid_credentials(
     asgi_client, route, headers
 ) -> None:
-    with wired_app(FakeLLM()) as (app, settings):
-        settings.hyphae_api_key = API_KEY
+    with wired_app(FakeLLM(), settings_overrides={"hyphae_api_key": API_KEY}) as (
+        app,
+        _settings,
+    ):
         client = asgi_client(app)
         if route.startswith("/v1"):
             response = await client.post(
@@ -77,8 +81,10 @@ async def test_auth_enabled_rejects_invalid_credentials(
 async def test_auth_enabled_accepts_valid_credentials(
     asgi_client, route, headers
 ) -> None:
-    with wired_app(FakeLLM()) as (app, settings):
-        settings.hyphae_api_key = API_KEY
+    with wired_app(FakeLLM(), settings_overrides={"hyphae_api_key": API_KEY}) as (
+        app,
+        _settings,
+    ):
         client = asgi_client(app)
         if route.startswith("/v1"):
             response = await client.post(
@@ -92,6 +98,8 @@ async def test_auth_enabled_accepts_valid_credentials(
 
 
 async def test_health_remains_open_when_auth_enabled(asgi_client) -> None:
-    with wired_app(FakeLLM()) as (app, settings):
-        settings.hyphae_api_key = API_KEY
+    with wired_app(FakeLLM(), settings_overrides={"hyphae_api_key": API_KEY}) as (
+        app,
+        _settings,
+    ):
         assert (await asgi_client(app).get("/health")).status_code == 200

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Iterator
 
@@ -26,9 +27,7 @@ class EmptyMCP:
     async def open_turn(self, *, timeout_seconds: float | None = None):
         yield self
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> ToolCallResult:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
         raise AssertionError(f"unexpected tool dispatch: {name} {arguments!r}")
 
 
@@ -52,12 +51,17 @@ def wired_app(
     *,
     mcp: Any | None = None,
     registry: Any | None = None,
+    settings_overrides: Mapping[str, Any] | None = None,
 ) -> Iterator[tuple[Any, Settings]]:
     """Publish deterministic dependencies and restore global app state afterward."""
     from main import app
 
     previous = dict(app.state._state)
-    settings = Settings(_env_file=None, orchestration_enabled=False)
+    settings = Settings(
+        _env_file=None,
+        orchestration_enabled=False,
+        **dict(settings_overrides or {}),
+    )
     app.state.settings = settings
     app.state.unorchestrated_llm = llm
     runtime = mcp if mcp is not None else EmptyMCP()

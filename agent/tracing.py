@@ -60,6 +60,17 @@ TRACE_QUEUE_CAPACITY = 4096
 TRACE_BATCH_SIZE = 100
 TRACE_FLUSH_INTERVAL_SECONDS = 0.250
 TRACE_OVERFLOW_WARNING_INTERVAL_SECONDS = 60.0
+_TRACE_PATH_DISPLAY_MAX_CHARS = 512
+
+
+def _safe_path_display(path: Path) -> str:
+    printable = "".join(
+        character if character.isprintable() else " " for character in str(path)
+    )
+    display = " ".join(printable.split()).strip()
+    if len(display) <= _TRACE_PATH_DISPLAY_MAX_CHARS:
+        return display
+    return f"{display[: _TRACE_PATH_DISPLAY_MAX_CHARS - 3]}..."
 
 
 class _TracerState(Enum):
@@ -230,16 +241,14 @@ class JSONLTracer(Tracer):
         )
         await asyncio.shield(self._startup_ready.wait())
         if self._startup_error is not None:
-            raise RuntimeError(
-                f"failed to open trace sink {self._path}"
-            ) from self._startup_error
+            raise RuntimeError("failed to open trace sink") from None
         if self._state is not _TracerState.STARTING:
             raise RuntimeError(
                 f"JSONL tracer start interrupted in state {self._state.value!r}"
             )
         self._state = _TracerState.RUNNING
         self._accepting = True
-        logger.info("tracing enabled: JSONL trace -> %s", self._path)
+        logger.info("tracing enabled: JSONL trace -> %s", _safe_path_display(self._path))
 
     def emit(self, record: dict) -> None:
         if not self._accepting or self._queue is None:
@@ -251,7 +260,8 @@ class JSONLTracer(Tracer):
         except Exception:  # noqa: BLE001 - tracing is best-effort
             self._dropped += 1
             logger.warning(
-                "trace serialization failed for %s", self._path, exc_info=True
+                "trace serialization failed for %s",
+                _safe_path_display(self._path),
             )
             return
 
@@ -273,7 +283,7 @@ class JSONLTracer(Tracer):
             self._last_overflow_warning_at = now
             logger.warning(
                 "trace queue full for %s; dropping newest record (dropped=%d)",
-                self._path,
+                _safe_path_display(self._path),
                 self._dropped,
             )
 
@@ -293,8 +303,12 @@ class JSONLTracer(Tracer):
         finally:
             try:
                 await asyncio.to_thread(sink.close)
-            except Exception:  # noqa: BLE001 - shutdown remains best-effort.
-                logger.warning("trace close failed for %s", self._path, exc_info=True)
+            except Exception as exc:  # noqa: BLE001 - shutdown is best-effort.
+                logger.warning(
+                    "trace sink cleanup failed for %s (%s)",
+                    type(sink).__name__,
+                    type(exc).__name__,
+                )
 
     async def _consume(self, sink: _BatchSink) -> None:
         assert self._queue is not None
@@ -346,12 +360,11 @@ class JSONLTracer(Tracer):
             logger.warning(
                 "trace writer failed for %s; disabling tracing "
                 "(accepted=%d written=%d dropped=%d writer_failures=%d)",
-                self._path,
+                _safe_path_display(self._path),
                 self._accepted,
                 self._written,
                 self._dropped,
                 self._writer_failures,
-                exc_info=True,
             )
             return False
 
@@ -408,7 +421,7 @@ class JSONLTracer(Tracer):
             logger.info(
                 "tracing stopped: path=%s accepted=%d written=%d dropped=%d "
                 "writer_failures=%d",
-                self._path,
+                _safe_path_display(self._path),
                 self._accepted,
                 self._written,
                 self._dropped,
@@ -422,11 +435,9 @@ def build_tracer(*, enabled: bool, path: Path | str) -> Tracer | None:
         return None
     try:
         return JSONLTracer(path)
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.warning(
-            "tracing enabled but tracer construction failed: %s; "
-            "running without traces.",
-            e,
+            "tracing enabled but tracer construction failed; running without traces."
         )
         return None
 

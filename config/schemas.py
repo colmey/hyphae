@@ -1,191 +1,323 @@
-# config/schemas.py
-
-"""Typed models for all file-based harness config.
-
-MCP server registry + tool policy (mcp_config.yaml) and the orchestrator
-model registry (models.yaml). Pure pydantic: this module imports nothing
-from the rest of the harness, so any layer may depend on it.
-"""
+"""Strict immutable models for file-based harness configuration."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from ipaddress import ip_address
+from types import MappingProxyType
 from typing import Annotated, Literal, Union
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import PydanticCustomError
+
+from ._validation import (
+    reject_bool_or_float_for_int,
+    validate_nonblank_bounded,
+)
+
+_POLICY_PATTERN_MAX_CHARS = 512
+_DESCRIPTION_MAX_CHARS = 20_000
+_MODEL_ID_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+)
+_HTTP_URL_ADAPTER = TypeAdapter(AnyHttpUrl)
 
 
-class _MCPServerBase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+def _validate_http_url(value: str) -> str:
+    if not value.strip():
+        raise PydanticCustomError("nonblank_required", "MCP URL must be nonblank")
+    if any(character.isspace() or not character.isprintable() for character in value):
+        raise PydanticCustomError("url_whitespace", "MCP URL contains whitespace")
+    try:
+        parsed = _HTTP_URL_ADAPTER.validate_python(value)
+        source_hostname = urlsplit(value).hostname
+    except (ValueError, ValidationError) as exc:
+        raise PydanticCustomError("url_malformed", "MCP URL is malformed") from exc
 
+    if source_hostname is None:
+        raise PydanticCustomError("url_host", "MCP URL host is malformed")
+    hostname = parsed.host or ""
+    ip_hostname = (
+        hostname[1:-1]
+        if hostname.startswith("[") and hostname.endswith("]")
+        else hostname
+    )
+    try:
+        ip_address(ip_hostname)
+        return value
+    except ValueError:
+        pass
+
+    labels = hostname.rstrip(".").split(".")
+    if len(hostname) > 253 or any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        for label in labels
+    ):
+        raise PydanticCustomError("url_host", "MCP URL host is malformed")
+    return value
+
+
+class _ImmutableConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class _MCPServerBase(_ImmutableConfigModel):
     disabled: bool = False
-    disabled_tools: list[str] = Field(default_factory=list)
+    disabled_tools: tuple[str, ...] = ()
+
+    @field_validator("disabled_tools")
+    @classmethod
+    def _validate_disabled_tools(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(
+            validate_nonblank_bounded(value, label="disabled tool identifier")
+            for value in values
+        )
 
 
 class StreamableHTTPServer(_MCPServerBase):
     transport: Literal["streamable-http"]
-    url: str  # not HttpUrl: we allow internal hostnames like *.local
+    url: str
+
+    _url_is_http = field_validator("url")(_validate_http_url)
 
 
 class SSEServer(_MCPServerBase):
     transport: Literal["sse"]
     url: str
 
+    _url_is_http = field_validator("url")(_validate_http_url)
+
 
 class StdioServer(_MCPServerBase):
     transport: Literal["stdio"]
     command: str
-    args: list[str] = Field(default_factory=list)
-    env: dict[str, str] = Field(default_factory=dict)
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = Field(default_factory=dict)
+
+    @field_validator("command")
+    @classmethod
+    def _command_is_nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise PydanticCustomError(
+                "nonblank_required",
+                "stdio command must be nonblank",
+            )
+        return value
+
+    @field_validator("env")
+    @classmethod
+    def _freeze_env(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("env")
+    def _serialize_env(self, value: Mapping[str, str]) -> dict[str, str]:
+        return dict(value)
 
 
-# Pydantic picks the right server model based on `transport`.
 MCPServerConfig = Annotated[
     Union[StreamableHTTPServer, SSEServer, StdioServer],
     Field(discriminator="transport"),
 ]
 
 
-class ToolPolicyConfig(BaseModel):
+class ToolPolicyConfig(_ImmutableConfigModel):
     """Dispatch-time policy for what tools may execute."""
 
-    # Typos in security controls must fail loud instead of falling back to allow_all.
-    model_config = ConfigDict(extra="forbid")
-
     mode: Literal["allow_all", "allow_list"] = "allow_all"
-    allow: list[str] = Field(default_factory=list)
+    allow: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_allow_list(self) -> "ToolPolicyConfig":
-        # An allow_list with no usable patterns would silently deny every tool.
-        if self.mode == "allow_list":
-            if not self.allow:
-                raise ValueError(
-                    "tool_policy.mode 'allow_list' requires a non-empty 'allow' list"
-                )
-            if any(not p.strip() for p in self.allow):
-                raise ValueError("tool_policy.allow patterns must be non-empty strings")
+        if self.mode == "allow_list" and not self.allow:
+            raise PydanticCustomError(
+                "allow_list_required",
+                "tool_policy.mode 'allow_list' requires a non-empty 'allow' list"
+            )
+        for pattern in self.allow:
+            validate_nonblank_bounded(
+                pattern,
+                label="tool policy pattern",
+                max_chars=_POLICY_PATTERN_MAX_CHARS,
+            )
         return self
 
 
-class MCPConfig(BaseModel):
-    # Catch top-level typos such as `tool_polciy`, which would disable policy.
-    model_config = ConfigDict(extra="forbid")
-
-    mcp_servers: dict[str, MCPServerConfig] = Field(alias="mcpServers")
+class MCPConfig(_ImmutableConfigModel):
+    mcp_servers: Mapping[str, MCPServerConfig] = Field(alias="mcpServers")
     tool_policy: ToolPolicyConfig = Field(default_factory=ToolPolicyConfig)
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _freeze_servers(
+        cls,
+        value: Mapping[str, MCPServerConfig],
+    ) -> Mapping[str, MCPServerConfig]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("mcp_servers")
+    def _serialize_servers(
+        self,
+        value: Mapping[str, MCPServerConfig],
+    ) -> dict[str, MCPServerConfig]:
+        return dict(value)
 
     @model_validator(mode="after")
     def _validate_names(self) -> "MCPConfig":
-        # Server names are embedded in `{server}__{tool}` namespaced tool IDs.
         for name in self.mcp_servers:
+            validate_nonblank_bounded(name, label="server identifier")
             if "__" in name:
-                raise ValueError(
-                    f"server name {name!r} cannot contain '__' (reserved for tool namespacing)"
+                raise PydanticCustomError(
+                    "identifier_separator",
+                    "server identifier cannot contain '__'",
                 )
-            if not name or not name.replace("-", "").replace("_", "").isalnum():
-                raise ValueError(
-                    f"server name {name!r} must be alphanumeric (dashes/underscores allowed)"
+            if not name.replace("-", "").replace("_", "").isalnum():
+                raise PydanticCustomError(
+                    "identifier_characters",
+                    "server identifier must be alphanumeric with optional dashes/underscores"
                 )
         return self
 
-    def enabled_servers(self) -> dict[str, MCPServerConfig]:
-        """Return only servers not marked disabled."""
-        return {n: s for n, s in self.mcp_servers.items() if not s.disabled}
+    def enabled_servers(self) -> Mapping[str, MCPServerConfig]:
+        """Return an immutable view of servers not marked disabled."""
+        return MappingProxyType(
+            {
+                name: server
+                for name, server in self.mcp_servers.items()
+                if not server.disabled
+            }
+        )
 
 
-class SamplingParams(BaseModel):
+class SamplingParams(_ImmutableConfigModel):
     """Optional per-model sampling parameters passed through to providers."""
-
-    model_config = ConfigDict(extra="forbid")
 
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     top_k: int | None = Field(default=None, ge=1)
 
+    _strict_integers = field_validator("top_k", mode="before")(
+        reject_bool_or_float_for_int
+    )
 
-class ModelEntry(BaseModel):
+
+class ModelEntry(_ImmutableConfigModel):
     """One model the orchestrator may route to."""
 
-    model_config = ConfigDict(extra="forbid")
+    provider: str
+    model: str
+    description: str
+    max_tokens: int | None = Field(default=None, gt=0)
+    context_window: int | None = Field(default=None, gt=0)
+    default: bool = False
+    supports_native_tools: bool = True
+    thinking: Literal["none", "hint-param", "think-tags"] = "none"
+    sampling: SamplingParams | None = None
 
-    provider: str = Field(
-        ...,
-        description="LLM provider name; must be registered in llm.client._PROVIDERS.",
-    )
-    model: str = Field(..., description="Provider-specific model identifier.")
+    _strict_integers = field_validator(
+        "max_tokens",
+        "context_window",
+        mode="before",
+    )(reject_bool_or_float_for_int)
 
-    description: str = Field(..., description="What this model is best at.")
-    max_tokens: int | None = Field(
-        default=None,
-        description=(
-            "Per-model output cap. Falls back to Settings.llm.max_tokens when None."
-        ),
-    )
-    context_window: int | None = Field(
-        default=None,
-        description="Total context window in tokens, used for the agent loop's "
-        "context budget. Falls back to "
-        "Settings.context_default_window_tokens when None. "
-        "Provider-agnostic: a plain size, no vendor branching.",
-    )
-    default: bool = Field(
-        default=False,
-        description="At most one entry should be marked default. Used as the "
-        "registry-wide fallback and as the orchestrator's own model "
-        "unless overridden by Settings.orchestrator_model_id.",
-    )
-    supports_native_tools: bool = Field(
-        default=True,
-        description="Whether the served endpoint supports native tool/function calling. "
-        "Declared only in Phase 5; prompted-tool fallback is Phase 6.",
-    )
-    thinking: Literal["none", "hint-param", "think-tags"] = Field(
-        default="none",
-        description="How this model exposes a thinking control. 'none': no knob; "
-        "'hint-param': a request field like reasoning_effort; "
-        "'think-tags': self-emits <think> inline.",
-    )
-    sampling: SamplingParams | None = Field(
-        default=None,
-        description="Optional per-model sampling passed through to the provider request.",
-    )
+    @field_validator("provider")
+    @classmethod
+    def _provider_is_valid(cls, value: str) -> str:
+        return validate_nonblank_bounded(value, label="provider identifier")
+
+    @field_validator("model")
+    @classmethod
+    def _model_is_valid(cls, value: str) -> str:
+        return validate_nonblank_bounded(value, label="model identifier")
+
+    @field_validator("description")
+    @classmethod
+    def _description_is_valid(cls, value: str) -> str:
+        return validate_nonblank_bounded(
+            value,
+            label="model description",
+            max_chars=_DESCRIPTION_MAX_CHARS,
+        )
+
+    @model_validator(mode="after")
+    def _validate_explicit_bounds(self) -> "ModelEntry":
+        if (
+            self.max_tokens is not None
+            and self.context_window is not None
+            and self.max_tokens >= self.context_window
+        ):
+            raise PydanticCustomError(
+                "inconsistent_context_bounds",
+                "model max_tokens must be smaller than context_window",
+            )
+        return self
 
 
-class ModelsConfig(BaseModel):
-    """Typed parse of models.yaml. Maps model_id -> ModelEntry."""
+class ModelsConfig(_ImmutableConfigModel):
+    """Typed parse of models.yaml. Maps model_id to immutable entries."""
 
-    model_config = ConfigDict(extra="forbid")
+    models: Mapping[str, ModelEntry] = Field(default_factory=dict)
 
-    models: dict[str, ModelEntry] = Field(default_factory=dict)
+    @field_validator("models")
+    @classmethod
+    def _freeze_models(
+        cls,
+        value: Mapping[str, ModelEntry],
+    ) -> Mapping[str, ModelEntry]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("models")
+    def _serialize_models(
+        self,
+        value: Mapping[str, ModelEntry],
+    ) -> dict[str, ModelEntry]:
+        return dict(value)
 
     @model_validator(mode="after")
     def _validate(self) -> "ModelsConfig":
         if not self.models:
-            raise ValueError("models.yaml must define at least one model")
-
-        defaults = [mid for mid, m in self.models.items() if m.default]
-        if len(defaults) > 1:
-            raise ValueError(
-                f"models.yaml has multiple default models: {defaults!r}. "
-                "Mark exactly one entry default: true."
+            raise PydanticCustomError(
+                "missing_model",
+                "models config must define at least one model",
             )
 
-        for mid in self.models:
-            if not mid:
-                raise ValueError("model_id may not be empty")
-            allowed = set(
-                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+        defaults = sum(1 for model in self.models.values() if model.default)
+        if len(self.models) > 1 and defaults == 0:
+            raise PydanticCustomError(
+                "missing_default",
+                "multiple models require exactly one explicit default",
             )
-            bad = set(mid) - allowed
-            if bad:
-                raise ValueError(
-                    f"model_id {mid!r} contains disallowed characters: {sorted(bad)!r}"
+        if len(self.models) > 1 and defaults > 1:
+            raise PydanticCustomError(
+                "multiple_defaults",
+                "models config has multiple default models",
+            )
+
+        for model_id in self.models:
+            validate_nonblank_bounded(model_id, label="model identifier")
+            if set(model_id) - _MODEL_ID_CHARS:
+                raise PydanticCustomError(
+                    "identifier_characters",
+                    "model identifier contains disallowed characters",
                 )
         return self
 
     def default_id(self) -> str:
-        """Return the model_id marked default, or the first one if none is."""
-        for mid, m in self.models.items():
-            if m.default:
-                return mid
+        """Return the explicit default or the sole implicit default."""
+        for model_id, model in self.models.items():
+            if model.default:
+                return model_id
         return next(iter(self.models))

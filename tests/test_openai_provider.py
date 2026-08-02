@@ -127,7 +127,7 @@ def test_public_imports_remain_sdk_lazy() -> None:
 
 
 @pytest.mark.parametrize("provider", ["openai_compatible", "openai"])
-def test_registry_accepts_canonical_provider_and_deprecated_alias(
+def test_registry_accepts_canonical_provider_and_compatibility_alias(
     provider: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -929,18 +929,31 @@ async def test_decoder_closes_sdk_stream_on_timeout() -> None:
 
 
 @pytest.mark.anyio
-async def test_decoder_close_failure_preserves_provider_error() -> None:
+async def test_decoder_close_failure_preserves_provider_error_without_logging_secrets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     provider_error = RuntimeError("provider stream failed")
+    secret = "Authorization: Bearer stream-close-secret"
     sdk_stream = _OwnedSDKStream(
         failure=provider_error,
-        close_failure=RuntimeError("stream close failed"),
+        close_failure=RuntimeError(secret),
     )
 
     with pytest.raises(RuntimeError, match="provider stream failed") as raised:
-        await _decode(sdk_stream)
+        _ = [
+            chunk
+            async for chunk in decode_stream(
+                sdk_stream,
+                default_model="test-model",
+                logger=logging.getLogger("openai-cleanup-test"),
+            )
+        ]
 
     assert raised.value is provider_error
     assert sdk_stream.close_calls == 1
+    assert secret not in caplog.text
+    assert "_OwnedSDKStream" in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 @pytest.mark.anyio

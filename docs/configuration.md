@@ -25,9 +25,13 @@ variables retain their existing flat `LLM_*` names. Sampling values such as
 `temperature` remain per-model settings in `models.yaml`; there is no global
 `settings.llm.temperature` override.
 
+Relative application paths resolve from the repository root, not the process
+working directory. This applies to MCP/models config, the orchestrator prompt,
+and trace output whether values come from `.env` or the process environment.
+
 | Variable                       | Default                       | Purpose                                            |
 |--------------------------------|-------------------------------|----------------------------------------------------|
-| `LLM_PROVIDER`                 | `gemini`                      | Any provider registered in `llm/client.py`'s `_PROVIDERS` (currently `gemini`, `openai_compatible`; deprecated `openai` alias accepted); validated at build time |
+| `LLM_PROVIDER`                 | `gemini`                      | Any provider registered in `llm/client.py`'s `_PROVIDERS` (currently `gemini`, `openai_compatible`; compatibility alias `openai` accepted); validated at build time |
 | `LLM_MODEL_NAME`                    | `gemini-3-flash-preview`      | Model identifier (legacy default; orchestrator overrides per request) |
 | `LLM_MAX_TOKENS`               | `4096`                        | Default max tokens per completion                  |
 | `ANTHROPIC_API_KEY`            | `""`                          | Anthropic key (if used by any model in `models.yaml`) |
@@ -47,7 +51,7 @@ variables retain their existing flat `LLM_*` names. Sampling values such as
 | `RUN_MAX_TOKENS`               | `0`                           | Hard ceiling on cumulative `total_tokens` for one run; ends the run `budget_exceeded` (`<= 0` disables). When a provider reports absent/all-zero usage, the local token estimator (`agent/context.py`) fills in, so the cap works against local OpenAI-compatible servers too |
 | `RUN_MAX_SECONDS`              | `0`                           | Hard wall-clock ceiling on one accepted turn, including routing, retries, LLM/tool calls, and backoff; ends the run `deadline_exceeded` (`<= 0` disables) |
 | `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` | `0`                   | Abort the run `no_progress` after this many tool-call failures in a row (a success resets the count); `<= 0` disables. Should exceed the fixed at-3 nudge so the model gets a chance to recover first |
-| `CONTEXT_STRATEGY`             | `naive`                       | How the agent loop shapes the outgoing message view per LLM call: `naive` (pass-through; over budget only logs a warning) or `compaction` (summarize the over-budget middle of the history, keep the task header + recent tail verbatim). Unknown values degrade to `naive` with a warning. The view is per-call only — session history is never rewritten |
+| `CONTEXT_STRATEGY`             | `naive`                       | How the agent loop shapes the outgoing message view per LLM call: `naive` (pass-through; over budget only logs a warning) or `compaction` (summarize the over-budget middle of the history, keep the task header + recent tail verbatim). Other values fail settings validation. The view is per-call only — session history is never rewritten |
 | `CONTEXT_DEFAULT_WINDOW_TOKENS` | `32768`                      | Assumed context window for models whose `models.yaml` entry has no `context_window`, and for legacy/no-orchestrator mode. Budget = window − max output tokens − safety margin |
 | `CONTEXT_SAFETY_MARGIN_TOKENS` | `1024`                        | Headroom subtracted when computing the input budget; absorbs token-estimator error |
 | `CONTEXT_RECENT_MESSAGES`      | `6`                           | Recent protocol-safe units (a user turn, a no-tool assistant turn, or an assistant tool call plus its results) kept verbatim under compaction; shrinks automatically if the tail alone overflows |
@@ -71,7 +75,7 @@ flush after 250 ms, and overflow warnings repeat at most once per 60 seconds.
 There are deliberately no queue-size, batch-size, flush-interval, warning-rate,
 or overflow-policy settings.
 
-Renamed settings retain deprecated input aliases so existing deployments can
+Renamed settings retain compatibility input aliases so existing deployments can
 migrate without an abrupt configuration break:
 
 | Canonical name | Deprecated input alias |
@@ -101,7 +105,7 @@ mcpServers:
     disabled_tools: []
 
   web-search:
-    transport: sse
+    transport: streamable-http
     url: ${OPEN_WEBSEARCH_URL}      # endpoint lives in .env
 
   # Example stdio server (supported but not currently used):
@@ -146,8 +150,8 @@ tool_policy:
   than producing empty strings.
 - Server names cannot contain `__` (reserved for tool namespacing) and
   must be alphanumeric (dashes/underscores allowed).
-- URLs are typed as `str`, not `HttpUrl`, so internal `.local` hostnames
-  validate.
+- HTTP/SSE URLs require an `http` or `https` scheme and a nonblank host;
+  internal names such as `mcp.internal` or `service.local` remain valid.
 
 ## Model Registry — `config/models.yaml`
 
@@ -195,7 +199,7 @@ Both models are **active** — the orchestrator routes between them (cheap
   validated against `supported_providers()` at load time, so an unknown
   provider is rejected up front rather than at first request. Implemented
   today: `gemini` (`llm/providers/gemini/`) and `openai_compatible`
-  (`llm/providers/openai_compatible/`). The deprecated `openai` provider ID
+  (`llm/providers/openai_compatible/`). The compatibility `openai` provider ID
   remains accepted for existing configuration. Set `OPENAI_COMPAT_BASE_URL`
   to point the adapter at a local Ollama (or any compatible server); an empty
   value targets real OpenAI. For Ollama, `model` must match an `ollama list`
@@ -232,7 +236,8 @@ Both models are **active** — the orchestrator routes between them (cheap
   `top_k`; a configured OpenAI-compatible endpoint receives `top_k` under
   `extra_body`; real OpenAI omits `top_k` because it is not a supported direct
   chat-completions parameter.
-- `default: true` on **exactly one** entry. The default model is used
+- `default: true` on **exactly one** entry when multiple models are configured.
+  A single entry remains its own implicit default for compatibility. The default is used
   by the orchestrator itself (unless `ORCHESTRATOR_MODEL_ID` overrides)
   and is the safe fallback when orchestration fails.
   The orchestrator control model must not be prompted-only: if the resolved

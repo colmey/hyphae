@@ -755,12 +755,12 @@ class ModelEntry(BaseModel):
     supports_native_tools: bool = True
     thinking: Literal["none","hint-param","think-tags"] = "none"
     sampling: SamplingParams | None = None
-    default: bool = False  # exactly one entry should be default
+    default: bool = False  # exactly one default when multiple entries exist
 
     def to_profile(self) -> ModelProfile: ...
 
 class ModelsConfig(BaseModel):
-    models: dict[str, ModelEntry]
+    models: Mapping[str, ModelEntry]  # immutable after loading
 
 class OrchestrationProposal(BaseModel):
     selected_model_id: str

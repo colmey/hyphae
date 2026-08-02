@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import re
 import time
 from collections.abc import AsyncIterator, Coroutine, Sequence
 from contextlib import asynccontextmanager
@@ -17,7 +16,7 @@ from typing import Any
 from config import MCPConfig
 from tooling import ToolRuntime
 
-from .catalog import CatalogSnapshot, ToolRoute, normalize_tools
+from .catalog import CatalogError, CatalogSnapshot, ToolRoute, normalize_tools
 from .client import ClientFactory, MCPClient, Tool
 from .lease import (
     LeaseCoordinator,
@@ -27,17 +26,9 @@ from .lease import (
 
 logger = logging.getLogger(__name__)
 
-_ERROR_MAX_CHARS = 300
 _BACKOFF_INITIAL_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 30.0
 _BACKOFF_MAX_EXPONENT = 5
-_URL_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s'\"]+", re.IGNORECASE)
-_BEARER_PATTERN = re.compile(r"\bBearer\s+[^\s,;]+", re.IGNORECASE)
-_SENSITIVE_VALUE_PATTERN = re.compile(
-    r"\b(authorization|cookie|api[-_ ]?key|token|password|secret|request[-_ ]?body|body)"
-    r"\b\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
-    re.IGNORECASE,
-)
 
 
 class MCPServerState(str, Enum):
@@ -87,29 +78,18 @@ class _DiscoveryTimeout(TimeoutError):
 
 def _sanitize_mcp_error(
     error: BaseException,
-    *,
-    timeout_seconds: float,
 ) -> str:
     """Return a useful health-safe summary without transport or secret detail."""
     if isinstance(error, _DiscoveryTimeout):
         return f"connection timed out after {error.timeout_seconds:g} seconds"
     if isinstance(error, TimeoutError):
-        return f"connection timed out after {timeout_seconds:g} seconds"
+        return "connection timed out"
     if isinstance(error, asyncio.CancelledError):
         return "connection was cancelled"
 
-    message = str(error).splitlines()[0].strip()
-    message = _URL_PATTERN.sub("[redacted-url]", message)
-    message = _BEARER_PATTERN.sub("Bearer [redacted]", message)
-    message = _SENSITIVE_VALUE_PATTERN.sub(
-        lambda match: f"{match.group(1)}=[redacted]",
-        message,
-    )
-    message = "".join(ch for ch in message if ch.isprintable())
-    if len(message) > _ERROR_MAX_CHARS:
-        message = f"{message[: _ERROR_MAX_CHARS - 3]}..."
-    error_type = type(error).__name__
-    return f"{error_type}: {message}" if message else f"{error_type}: connection failed"
+    if isinstance(error, CatalogError):
+        return "catalog validation failed"
+    return "connection failed"
 
 
 class MCPManager:
@@ -154,10 +134,7 @@ class MCPManager:
         )
 
     def _sanitize_error(self, error: BaseException) -> str:
-        return _sanitize_mcp_error(
-            error,
-            timeout_seconds=self._connect_timeout_seconds,
-        )
+        return _sanitize_mcp_error(error)
 
     def _create_task(
         self,
@@ -316,8 +293,8 @@ class MCPManager:
             if isinstance(result, Exception):
                 if initial_cancellations or interrupted:
                     logger.warning(
-                        "MCP cleanup task failed while cancellation was pending: %s",
-                        self._sanitize_error(result),
+                        "MCP cleanup task failed while cancellation was pending (%s)",
+                        type(result).__name__,
                     )
                     continue
                 raise result
@@ -515,16 +492,21 @@ class MCPManager:
             try:
                 try:
                     await runtime.aclose()
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as cleanup_error:
                     if primary_error is None:
                         raise
-                    logger.warning("MCP turn cleanup was cancelled")
+                    logger.warning(
+                        "MCP turn cleanup was cancelled for %s (%s)",
+                        type(runtime).__name__,
+                        type(cleanup_error).__name__,
+                    )
                 except Exception as cleanup_error:
                     if primary_error is None:
                         raise
                     logger.warning(
-                        "MCP turn cleanup failed: %s",
-                        self._sanitize_error(cleanup_error),
+                        "MCP turn cleanup failed for %s (%s)",
+                        type(runtime).__name__,
+                        type(cleanup_error).__name__,
                     )
             finally:
                 self._active_turns.discard(runtime)

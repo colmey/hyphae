@@ -2,10 +2,12 @@
 
 """The harness configuration layer: Settings and typed file configuration."""
 
+from .errors import ConfigLoadError, ConfigValidationError
 from .loaders import (
     load_mcp_config,
     load_mcp_config_from_settings,
     load_models_config,
+    load_models_config_from_settings,
     load_orchestrator_prompt,
 )
 from .schemas import (
@@ -24,6 +26,8 @@ from .settings import LLMSettings, Settings, get_settings, reset_settings
 __all__ = [
     "MCPConfig",
     "MCPServerConfig",
+    "ConfigLoadError",
+    "ConfigValidationError",
     "LLMSettings",
     "ModelEntry",
     "ModelsConfig",
@@ -37,6 +41,7 @@ __all__ = [
     "load_mcp_config",
     "load_mcp_config_from_settings",
     "load_models_config",
+    "load_models_config_from_settings",
     "load_orchestrator_prompt",
     "reset_settings",
 ]

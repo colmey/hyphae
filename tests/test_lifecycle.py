@@ -14,7 +14,8 @@ from openai import AsyncOpenAI, AsyncStream
 
 import main as main_module
 import orchestrator.registry as registry_module
-from config import MCPConfig, ModelEntry, ModelsConfig
+from config import ConfigLoadError, MCPConfig, ModelEntry, ModelsConfig
+from config.errors import CredentialUnavailableError
 from llm.client import GenerationRequest, LLMClient
 from llm.tool_prompt_protocol import PromptedToolLLMClient
 from llm.providers.gemini import GeminiLLMClient
@@ -315,7 +316,9 @@ async def test_application_cleanup_deduplicates_default_and_registry_alias() -> 
     assert tracer.close_calls == 1
 
 
-async def test_application_cleanup_supports_registry_without_unorchestrated_client() -> None:
+async def test_application_cleanup_supports_registry_without_unorchestrated_client() -> (
+    None
+):
     registry = _registry()
     cached = _ClosingClient()
     registry._clients["cached"] = cached
@@ -335,13 +338,23 @@ async def test_application_cleanup_supports_registry_without_unorchestrated_clie
     assert tracer.close_calls == 2
 
 
-async def test_application_cleanup_isolates_llm_mcp_and_tracer_failures() -> None:
-    default = _ClosingClient(failure=RuntimeError("LLM close failed"))
+async def test_application_cleanup_isolates_llm_mcp_and_tracer_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    default = _ClosingClient(
+        failure=RuntimeError("LLM close failed: Authorization Bearer llm-secret")
+    )
     sibling = _ClosingClient()
     registry = _registry()
     registry._clients["sibling"] = sibling
-    mcp = _MCP(failure=RuntimeError("MCP close failed"))
-    tracer = _Tracer(failure=RuntimeError("tracer close failed"))
+    mcp = _MCP(
+        failure=RuntimeError(
+            "MCP close failed at https://user:pass.invalid/mcp?token=hidden"
+        )
+    )
+    tracer = _Tracer(
+        failure=RuntimeError("tracer close failed: Authorization Bearer tracer-secret")
+    )
 
     await _close_application_resources(
         unorchestrated_llm=default,
@@ -354,6 +367,29 @@ async def test_application_cleanup_isolates_llm_mcp_and_tracer_failures() -> Non
     assert sibling.close_calls == 1
     assert mcp.shutdown_calls == 1
     assert tracer.close_calls == 1
+    assert "user:pass" not in caplog.text
+    assert "token=hidden" not in caplog.text
+    assert "tracer-secret" not in caplog.text
+    assert "llm-secret" not in caplog.text
+
+
+async def test_unorchestrated_llm_cleanup_does_not_log_raw_exception_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _ClosingClient(
+        failure=RuntimeError("Authorization: Bearer standalone-llm-secret")
+    )
+
+    await _close_application_resources(
+        unorchestrated_llm=client,
+        registry=None,
+        mcp=None,
+        tracer=None,
+    )
+
+    assert client.close_calls == 1
+    assert "standalone-llm-secret" not in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 async def test_repeated_application_cleanup_is_safe() -> None:
@@ -536,6 +572,159 @@ async def test_orchestration_setup_failure_builds_one_unorchestrated_client(
 
     assert build_calls == 1
     assert default.close_calls == 1
+
+
+def test_present_invalid_orchestration_config_is_fatal_before_provider_build(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models_path = tmp_path / "models.yaml"
+    models_path.write_text(
+        """\
+models:
+  one:
+    provider: gemini
+    model: first
+    model: second
+    description: invalid duplicate
+""",
+        encoding="utf-8",
+    )
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("route requests", encoding="utf-8")
+    settings = SimpleNamespace(
+        orchestration_enabled=True,
+        models_config_path=models_path,
+        orchestrator_prompt_path=prompt_path,
+        orchestrator_model_id="",
+        llm=SimpleNamespace(max_tokens=128),
+        context_default_window_tokens=4096,
+        context_safety_margin_tokens=128,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "build_llm_client",
+        lambda value: pytest.fail("invalid config must fail before provider build"),
+    )
+
+    with pytest.raises(ConfigLoadError, match="invalid models config"):
+        main_module._try_build_orchestration(settings)
+
+
+def _wire_failing_orchestrator_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> SimpleNamespace:
+    class _FailingRegistry:
+        model_ids = ["control"]
+
+        def __init__(self, models_config: Any, settings: Any) -> None:
+            pass
+
+        def default_id(self) -> str:
+            return "control"
+
+        def get_entry(self, model_id: str) -> SimpleNamespace:
+            return SimpleNamespace(supports_native_tools=True)
+
+        def get(self, model_id: str) -> None:
+            raise failure
+
+    monkeypatch.setattr(main_module, "LLMRegistry", _FailingRegistry)
+    monkeypatch.setattr(
+        main_module,
+        "load_models_config_from_settings",
+        lambda settings, known_providers: object(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_orchestrator_prompt",
+        lambda path: "route requests",
+    )
+    return SimpleNamespace(
+        orchestration_enabled=True,
+        models_config_path="models.yaml",
+        orchestrator_prompt_path="prompt.md",
+        orchestrator_model_id="",
+    )
+
+
+def test_missing_mandatory_provider_dependency_aborts_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _wire_failing_orchestrator_registry(
+        monkeypatch,
+        ModuleNotFoundError("No module named 'provider_sdk'"),
+    )
+
+    with pytest.raises(ModuleNotFoundError, match="provider_sdk"):
+        main_module._try_build_orchestration(settings)
+
+    assert "provider credential unavailable" not in caplog.text
+
+
+def test_missing_provider_credential_degrades_without_raw_error_logging(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "credential token=hidden"
+    settings = _wire_failing_orchestrator_registry(
+        monkeypatch,
+        CredentialUnavailableError(secret),
+    )
+
+    assert main_module._try_build_orchestration(settings) == (None, None)
+    assert "provider credential unavailable" in caplog.text
+    assert secret not in caplog.text
+
+
+async def test_tracer_startup_failure_does_not_log_raw_exception_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "Authorization: Bearer tracer-secret"
+
+    class _FailingTracer(_Tracer):
+        async def start(self) -> None:
+            raise RuntimeError(secret)
+
+    tracer = _FailingTracer()
+
+    assert await _start_optional_tracer(tracer) is None
+    assert "tracing startup failed" in caplog.text
+    assert secret not in caplog.text
+    assert "_FailingTracer" in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+def test_unexpected_provider_construction_failure_aborts_startup_without_logging(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "https://user:pass.invalid/mcp?token=hidden"
+    settings = _wire_failing_orchestrator_registry(
+        monkeypatch,
+        RuntimeError(secret),
+    )
+
+    with pytest.raises(RuntimeError, match="token=hidden"):
+        main_module._try_build_orchestration(settings)
+
+    assert secret not in caplog.text
+
+
+def test_single_implicit_default_is_marked_in_prompt_inventory() -> None:
+    config = ModelsConfig(
+        models={
+            "only": ModelEntry(
+                provider="gemini",
+                model="model",
+                description="Only model.",
+            )
+        }
+    )
+
+    assert "- only (default)" in LLMRegistry(config, _RegistrySettings()).describe_for_prompt()
 
 
 async def test_disabled_orchestration_builds_one_unorchestrated_client_and_injects_mcp_timeout(

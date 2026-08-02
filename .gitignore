@@ -13,6 +13,7 @@ __pycache__/
 .ruff_cache/
 
 FINDINGS_*
+audit/
 AGENTS.md
 docs/remediation
 docs/refactoring/

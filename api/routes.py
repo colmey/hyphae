@@ -80,6 +80,10 @@ async def health(
                 state=status.state,
                 last_error=status.last_error,
                 tool_count=status.tool_count,
+                catalog_revision=status.catalog_revision,
+                last_discovered_at=status.last_discovered_at,
+                next_refresh_at=status.next_refresh_at,
+                active_leases=status.active_leases,
             )
             for status in server_statuses
         ],

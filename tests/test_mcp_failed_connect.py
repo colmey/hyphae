@@ -1,47 +1,69 @@
-"""Failed MCP connections must unwind transport tasks instead of spinning."""
+"""Failed MCP transport entry must leave no owned resource or worker task."""
 
 from __future__ import annotations
 
 import asyncio
-import os
-import time
+from typing import Any
 
 import pytest
 
+import mcp_layer.client as client_module
 from config import SSEServer, StreamableHTTPServer
 from mcp_layer.client import MCPClient
-
 
 pytestmark = pytest.mark.anyio
 
 
-def _cpu_seconds() -> float:
-    times = os.times()
-    return times.user + times.system + times.children_user + times.children_system
-
-
 @pytest.mark.parametrize(
-    ("name", "config"),
+    ("patch_name", "name", "config"),
     [
         (
+            "streamable_http_client",
             "streamable-http",
             StreamableHTTPServer(
-                transport="streamable-http", url="http://127.0.0.1:5999/mcp"
+                transport="streamable-http", url="http://example.invalid/mcp"
             ),
         ),
-        ("sse", SSEServer(transport="sse", url="http://127.0.0.1:5998/sse")),
+        (
+            "sse_client",
+            "sse",
+            SSEServer(transport="sse", url="http://example.invalid/sse"),
+        ),
     ],
 )
-async def test_failed_connection_cleans_up_without_spinning(name, config) -> None:
-    client = MCPClient(name, config)
-    try:
-        with pytest.raises(BaseException):
-            await client.connect()
+async def test_failed_connection_cleans_owned_worker_and_context(
+    patch_name: str,
+    name: str,
+    config: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workers: list[asyncio.Task[None]] = []
+    active_contexts = 0
 
-        cpu_before = _cpu_seconds()
-        wall_before = time.monotonic()
-        await asyncio.sleep(2.0)
-        busy_fraction = (_cpu_seconds() - cpu_before) / (time.monotonic() - wall_before)
-        assert busy_fraction < 0.25
-    finally:
-        await client.aclose()
+    class _FailingTransport:
+        async def __aenter__(self) -> Any:
+            nonlocal active_contexts
+            active_contexts += 1
+            worker = asyncio.create_task(asyncio.Event().wait())
+            workers.append(worker)
+            try:
+                raise OSError("transport unavailable")
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+                active_contexts -= 1
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            raise AssertionError("failed __aenter__ must not invoke __aexit__")
+
+    monkeypatch.setattr(client_module, patch_name, lambda *args: _FailingTransport())
+    client = MCPClient(name, config)
+
+    with pytest.raises(OSError, match="transport unavailable"):
+        async with client.open():
+            raise AssertionError("failed transport must not yield a connection")
+
+    assert active_contexts == 0
+    assert len(workers) == 1
+    assert workers[0].done()
+    assert workers[0].cancelled()

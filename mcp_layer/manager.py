@@ -1,23 +1,35 @@
-"""Aggregate MCP clients and expose namespaced tools."""
+"""MCP catalog discovery, refresh, health, and turn-runtime orchestration."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
-from collections.abc import Callable, Coroutine, Sequence
-from dataclasses import dataclass, field
+import time
+from collections.abc import AsyncIterator, Coroutine, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any
 
-from config import MCPConfig, MCPServerConfig
+from config import MCPConfig
 
-from .client import MCPClient, MCPTransportError, Tool, ToolCallResult
-from .contracts import NAMESPACE_SEP, ToolSpec
+from .catalog import CatalogSnapshot, ToolRoute, normalize_tools
+from .client import ClientFactory, MCPClient, Tool
+from .lease import (
+    LeaseCoordinator,
+    LeaseServer,
+    TurnToolRuntime,
+)
 
 logger = logging.getLogger(__name__)
 
 _ERROR_MAX_CHARS = 300
+_BACKOFF_INITIAL_SECONDS = 1.0
+_BACKOFF_MAX_SECONDS = 30.0
+_BACKOFF_MAX_EXPONENT = 5
 _URL_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s'\"]+", re.IGNORECASE)
 _BEARER_PATTERN = re.compile(r"\bBearer\s+[^\s,;]+", re.IGNORECASE)
 _SENSITIVE_VALUE_PATTERN = re.compile(
@@ -28,7 +40,7 @@ _SENSITIVE_VALUE_PATTERN = re.compile(
 
 
 class MCPServerState(str, Enum):
-    """Lifecycle state for one configured, enabled MCP server."""
+    """Catalog lifecycle state for one configured, enabled MCP server."""
 
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
@@ -37,7 +49,7 @@ class MCPServerState(str, Enum):
     CLOSED = "closed"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MCPServerStatus:
     """Sanitized immutable status rendered by the health endpoint."""
 
@@ -45,46 +57,31 @@ class MCPServerStatus:
     state: MCPServerState
     last_error: str | None
     tool_count: int
+    catalog_revision: int
+    last_discovered_at: datetime | None
+    next_refresh_at: datetime | None
+    active_leases: int
 
 
 @dataclass
 class _ServerRecord:
-    name: str
-    config: MCPServerConfig
-    client: "_ManagedClient"
+    server: LeaseServer
     state: MCPServerState = MCPServerState.DISCONNECTED
     last_error: str | None = None
-    advertised_tool_count: int = 0
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    reconnect_task: asyncio.Task[bool] | None = None
-    connection_generation: int = 0
-    shutdown_cleanup_complete: bool = False
+    catalog: CatalogSnapshot = field(default_factory=CatalogSnapshot)
+    next_refresh_at: datetime | None = None
+    next_refresh_monotonic: float | None = None
+    refresh_failures: int = 0
+    active_leases: int = 0
+    next_attempt: int = 0
+    latest_started_attempt: int = 0
+    refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-@dataclass(frozen=True)
-class _ToolRoute:
-    server_name: str
-    local_name: str
-    tool: Tool
-    spec: ToolSpec
-
-
-class _ManagedClient(Protocol):
-    """Narrow manager/client seam used by production clients and test fakes."""
-
-    @property
-    def tools(self) -> list[Tool]: ...
-
-    async def connect(self) -> None: ...
-
-    async def aclose(self) -> None: ...
-
-    async def call_tool(
-        self, tool_name: str, arguments: dict[str, Any]
-    ) -> ToolCallResult: ...
-
-
-_ClientFactory = Callable[[str, MCPServerConfig], _ManagedClient]
+class _DiscoveryTimeout(TimeoutError):
+    def __init__(self, timeout_seconds: float) -> None:
+        super().__init__(f"discovery exceeded {timeout_seconds:g} seconds")
+        self.timeout_seconds = timeout_seconds
 
 
 def _sanitize_mcp_error(
@@ -93,18 +90,19 @@ def _sanitize_mcp_error(
     timeout_seconds: float,
 ) -> str:
     """Return a useful health-safe summary without transport or secret detail."""
+    if isinstance(error, _DiscoveryTimeout):
+        return f"connection timed out after {error.timeout_seconds:g} seconds"
     if isinstance(error, TimeoutError):
         return f"connection timed out after {timeout_seconds:g} seconds"
     if isinstance(error, asyncio.CancelledError):
         return "connection was cancelled"
 
-    # Only the first line is retained: SDK exceptions often append request bodies,
-    # transport representations, or trace-like detail on following lines.
     message = str(error).splitlines()[0].strip()
     message = _URL_PATTERN.sub("[redacted-url]", message)
     message = _BEARER_PATTERN.sub("Bearer [redacted]", message)
     message = _SENSITIVE_VALUE_PATTERN.sub(
-        lambda match: f"{match.group(1)}=[redacted]", message
+        lambda match: f"{match.group(1)}=[redacted]",
+        message,
     )
     message = "".join(ch for ch in message if ch.isprintable())
     if len(message) > _ERROR_MAX_CHARS:
@@ -114,411 +112,489 @@ def _sanitize_mcp_error(
 
 
 class MCPManager:
-    """Aggregates MCPClient instances and presents a unified tool registry."""
+    """Own immutable catalogs and create isolated turn-local tool runtimes."""
 
     def __init__(
         self,
         mcp_config: MCPConfig,
         *,
         connect_timeout_seconds: float = 30,
-        client_factory: _ClientFactory | None = None,
+        catalog_ttl_seconds: float = 300,
+        client_factory: ClientFactory | None = None,
     ) -> None:
         self._connect_timeout_seconds = connect_timeout_seconds
+        self._catalog_ttl_seconds = catalog_ttl_seconds
         build_client = client_factory or MCPClient
-        self._records: dict[str, _ServerRecord] = {
-            name: _ServerRecord(
+        self._servers = {
+            name: LeaseServer(
                 name=name,
                 config=server_config,
                 client=build_client(name, server_config),
             )
             for name, server_config in mcp_config.enabled_servers().items()
         }
-        self._tool_index: dict[str, _ToolRoute] = {}
-        self._last_known_routes: dict[str, _ToolRoute] = {}
+        self._records = {
+            name: _ServerRecord(server) for name, server in self._servers.items()
+        }
+        self._startup_started = False
         self._shutdown_started = False
-
-    async def _connect(self, record: _ServerRecord) -> None:
-        if self._connect_timeout_seconds <= 0:
-            await record.client.connect()
-            return
-        async with asyncio.timeout(self._connect_timeout_seconds):
-            await record.client.connect()
-
-    @staticmethod
-    async def _cancel_and_wait(tasks: Sequence[asyncio.Task[Any]]) -> None:
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _run_record_tasks(
-        self,
-        records: Sequence[_ServerRecord],
-        *,
-        operation: Callable[[_ServerRecord], Coroutine[Any, Any, None]],
-        context: str,
-    ) -> None:
-        if not records:
-            return
-        tasks: list[asyncio.Task[None]] = [
-            asyncio.create_task(operation(record)) for record in records
-        ]
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-        except asyncio.CancelledError:
-            await self._cancel_and_wait(tasks)
-            raise
-        for record, result in zip(records, results):
-            if isinstance(result, BaseException):
-                logger.warning(
-                    "%s for MCP server %r: %s",
-                    context,
-                    record.name,
-                    type(result).__name__,
-                )
-
-    async def _close_records(
-        self,
-        records: Sequence[_ServerRecord],
-        *,
-        context: str,
-    ) -> None:
-        await self._run_record_tasks(
-            records,
-            operation=lambda record: record.client.aclose(),
-            context=context,
+        self._active_turns: set[TurnToolRuntime] = set()
+        self._inflight_tasks: set[asyncio.Task[Any]] = set()
+        self._lease_coordinator = LeaseCoordinator(
+            connect_timeout_seconds=connect_timeout_seconds,
+            shutdown_started=lambda: self._shutdown_started,
+            start_attempt=self._start_attempt,
+            publish_success=self._publish_success,
+            publish_failure=self._publish_failure,
+            invalidate_revision=self._invalidate_revision,
+            lease_entered=self._lease_entered,
+            lease_exited=self._lease_exited,
+            sanitize_error=self._sanitize_error,
         )
 
-    async def _close_record_for_shutdown(self, record: _ServerRecord) -> None:
-        async with record.lock:
-            if record.shutdown_cleanup_complete:
-                return
-            try:
-                await record.client.aclose()
-            finally:
-                # Reaching aclose() counts as this shutdown's one best-effort
-                # attempt; MCPClient clears its owned session in its own finally.
-                # Cancellation before lock acquisition never reaches this block,
-                # so a later shutdown can still make the first real attempt.
-                record.shutdown_cleanup_complete = True
+    def _sanitize_error(self, error: BaseException) -> str:
+        return _sanitize_mcp_error(
+            error,
+            timeout_seconds=self._connect_timeout_seconds,
+        )
 
-    def _clear_advertised_inventory(self) -> None:
-        self._tool_index.clear()
-        for record in self._records.values():
-            record.advertised_tool_count = 0
+    def _create_task(
+        self,
+        operation: Coroutine[Any, Any, Any],
+        *,
+        name: str,
+    ) -> asyncio.Task[Any]:
+        task = asyncio.create_task(operation, name=name)
+        self._inflight_tasks.add(task)
+        task.add_done_callback(self._inflight_tasks.discard)
+        return task
 
-    def _clear_all_inventory(self) -> None:
-        self._clear_advertised_inventory()
-        self._last_known_routes.clear()
+    def _start_attempt(self, server_name: str) -> int:
+        record = self._records[server_name]
+        record.next_attempt += 1
+        record.latest_started_attempt = record.next_attempt
+        return record.next_attempt
 
-    @staticmethod
-    def _remove_server_routes(
-        index: dict[str, _ToolRoute], server_name: str
+    def _publish_success(
+        self,
+        server_name: str,
+        attempt: int,
+        routes: tuple[ToolRoute, ...],
+    ) -> int | None:
+        record = self._records[server_name]
+        if (
+            self._shutdown_started
+            or record.state is MCPServerState.CLOSED
+            or attempt != record.latest_started_attempt
+        ):
+            return None
+        now = datetime.now(UTC)
+        record.catalog = CatalogSnapshot(
+            routes=routes,
+            revision=record.catalog.revision + 1,
+            discovered_at=now,
+            discovered_monotonic=time.monotonic(),
+        )
+        record.state = MCPServerState.HEALTHY
+        record.last_error = None
+        record.next_refresh_at = None
+        record.next_refresh_monotonic = None
+        record.refresh_failures = 0
+        return record.catalog.revision
+
+    def _publish_failure(
+        self,
+        server_name: str,
+        attempt: int,
+        error: BaseException,
     ) -> None:
-        for namespaced in [
-            name for name, route in index.items() if route.server_name == server_name
-        ]:
-            del index[namespaced]
-
-    def _remove_advertised_inventory(self, record: _ServerRecord) -> None:
-        self._remove_server_routes(self._tool_index, record.name)
-        record.advertised_tool_count = 0
-
-    def _mark_unhealthy(self, record: _ServerRecord, last_error: str) -> None:
+        record = self._records[server_name]
+        if (
+            self._shutdown_started
+            or record.state is MCPServerState.CLOSED
+            or attempt != record.latest_started_attempt
+        ):
+            return
+        record.catalog = replace(record.catalog, routes=())
         record.state = MCPServerState.UNHEALTHY
-        record.last_error = last_error
-        self._remove_advertised_inventory(record)
+        record.last_error = self._sanitize_error(error)
+        record.refresh_failures += 1
+        exponent = min(record.refresh_failures - 1, _BACKOFF_MAX_EXPONENT)
+        base = min(
+            _BACKOFF_INITIAL_SECONDS * (2**exponent),
+            _BACKOFF_MAX_SECONDS,
+        )
+        delay = base * random.uniform(0.8, 1.2)
+        record.next_refresh_monotonic = time.monotonic() + delay
+        record.next_refresh_at = datetime.now(UTC) + timedelta(seconds=delay)
 
-    @staticmethod
-    def _build_inventory(record: _ServerRecord) -> dict[str, _ToolRoute]:
-        routes: dict[str, _ToolRoute] = {}
-        for tool in record.client.tools:
-            namespaced = f"{record.name}{NAMESPACE_SEP}{tool.name}"
-            spec = ToolSpec.from_mapping(
-                {
-                    "name": namespaced,
-                    "description": tool.description,
-                    "input_schema": tool.input_schema,
-                }
-            )
-            routes[namespaced] = _ToolRoute(
-                server_name=record.name,
-                local_name=tool.name,
-                tool=tool,
-                spec=spec,
-            )
-        return routes
+    def _invalidate_revision(
+        self,
+        server_name: str,
+        revision: int | None,
+        error: BaseException,
+    ) -> None:
+        record = self._records[server_name]
+        if revision is None or revision != record.catalog.revision:
+            return
+        attempt = self._start_attempt(server_name)
+        self._publish_failure(server_name, attempt, error)
 
-    def _replace_inventory(
+    def _lease_entered(self, server_name: str) -> None:
+        self._records[server_name].active_leases += 1
+
+    def _lease_exited(self, server_name: str) -> None:
+        record = self._records[server_name]
+        if record.active_leases <= 0:
+            raise RuntimeError(f"MCP lease count underflow for {server_name!r}")
+        record.active_leases -= 1
+
+    async def _discover_once(
         self,
         record: _ServerRecord,
-        routes: dict[str, _ToolRoute],
-    ) -> None:
-        """Atomically replace one server's advertised and last-known routes."""
-        self._remove_server_routes(self._tool_index, record.name)
-        self._remove_server_routes(self._last_known_routes, record.name)
-        self._tool_index.update(routes)
-        self._last_known_routes.update(routes)
-        record.advertised_tool_count = len(routes)
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[ToolRoute, ...]:
+        server = record.server
 
-    async def _cancel_startup(
+        async def operation() -> tuple[ToolRoute, ...]:
+            async with server.client.open() as connection:
+                tools = await connection.list_tools()
+            return normalize_tools(
+                server.name,
+                server.config.disabled_tools,
+                tools,
+            )
+
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise _DiscoveryTimeout(timeout_seconds)
+        enabled_timeouts = [
+            value
+            for value in (self._connect_timeout_seconds, timeout_seconds)
+            if value is not None and value > 0
+        ]
+        if not enabled_timeouts:
+            return await operation()
+        timeout = min(enabled_timeouts)
+        try:
+            async with asyncio.timeout(timeout):
+                return await operation()
+        except TimeoutError as exc:
+            raise _DiscoveryTimeout(timeout) from exc
+
+    async def _wait_for_tasks(
         self,
-        tasks: list[asyncio.Task[None]],
-    ) -> None:
-        await self._cancel_and_wait(tasks)
+        tasks: Sequence[asyncio.Task[Any]],
+        *,
+        cancel: bool,
+    ) -> bool:
+        if cancel:
+            for task in tasks:
+                if not task.done() and task.cancelling() == 0:
+                    task.cancel()
+        if not tasks:
+            return False
+        join = asyncio.gather(*tasks, return_exceptions=True)
+        current = asyncio.current_task()
+        initial_cancellations = current.cancelling() if current is not None else 0
+        interrupted = False
+        while not join.done():
+            try:
+                await asyncio.shield(join)
+            except asyncio.CancelledError:
+                if join.done():
+                    break
+                if current is None or current.cancelling() <= initial_cancellations:
+                    continue
+                current.uncancel()
+                interrupted = True
+        results = join.result()
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                continue
+            if isinstance(result, Exception):
+                if initial_cancellations or interrupted:
+                    logger.warning(
+                        "MCP cleanup task failed while cancellation was pending: %s",
+                        self._sanitize_error(result),
+                    )
+                    continue
+                raise result
+            if isinstance(result, BaseException):
+                raise result
+        return interrupted
 
-        self._clear_all_inventory()
-        records = list(self._records.values())
-        for record in records:
-            self._mark_unhealthy(record, "application startup was cancelled")
-
-        await self._close_records(
-            records,
-            context="cleanup after cancelled MCP startup failed",
-        )
+    async def _cancel_and_wait(
+        self,
+        tasks: Sequence[asyncio.Task[Any]],
+    ) -> bool:
+        return await self._wait_for_tasks(tasks, cancel=True)
 
     async def startup(self) -> None:
-        """Connect enabled servers concurrently while retaining every outcome."""
+        """Discover every enabled server without retaining any connection."""
+        if self._startup_started:
+            raise RuntimeError("MCPManager.startup() may only be called once")
+        self._startup_started = True
         if not self._records:
             logger.warning("no enabled MCP servers in config")
             return
-        if any(
-            record.state is not MCPServerState.DISCONNECTED
-            for record in self._records.values()
-        ):
-            raise RuntimeError("MCPManager.startup() may only be called once")
 
-        records = list(self._records.values())
+        records = tuple(self._records.values())
+        attempts: dict[str, int] = {}
         for record in records:
+            server_name = record.server.name
             record.state = MCPServerState.CONNECTING
             record.last_error = None
-            record.advertised_tool_count = 0
+            attempts[server_name] = self._start_attempt(server_name)
 
-        tasks = [asyncio.create_task(self._connect(record)) for record in records]
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-        except asyncio.CancelledError:
-            await self._cancel_startup(tasks)
-            raise
+        async def discover(record: _ServerRecord) -> tuple[ToolRoute, ...]:
+            return await self._discover_once(record)
 
-        failed: list[_ServerRecord] = []
-        for record, result in zip(records, results):
-            if isinstance(result, BaseException):
-                self._mark_unhealthy(
-                    record,
-                    _sanitize_mcp_error(
-                        result,
-                        timeout_seconds=self._connect_timeout_seconds,
-                    ),
-                )
-                failed.append(record)
-                logger.error("failed to connect to %r: %s", record.name, record.last_error)
-                continue
-
-            record.state = MCPServerState.HEALTHY
-            record.last_error = None
-            record.connection_generation += 1
-            self._replace_inventory(record, self._build_inventory(record))
-
-        try:
-            await self._close_records(
-                failed,
-                context="cleanup after failed MCP startup failed",
+        tasks = [
+            self._create_task(
+                discover(record),
+                name=f"mcp-discovery-{record.server.name}",
             )
+            for record in records
+        ]
+        discovery = asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            results = await asyncio.shield(discovery)
         except asyncio.CancelledError:
-            await self._cancel_startup(tasks)
+            await self._cancel_and_wait(tasks)
+            for record in records:
+                server_name = record.server.name
+                attempt = self._start_attempt(server_name)
+                self._publish_failure(
+                    server_name,
+                    attempt,
+                    asyncio.CancelledError("application startup was cancelled"),
+                )
+                record.last_error = "application startup was cancelled"
             raise
+
+        for record, result in zip(records, results):
+            server_name = record.server.name
+            attempt = attempts[server_name]
+            if isinstance(result, asyncio.CancelledError):
+                self._publish_failure(server_name, attempt, result)
+                logger.error(
+                    "failed to discover %r: %s",
+                    server_name,
+                    record.last_error,
+                )
+            elif isinstance(result, Exception):
+                self._publish_failure(server_name, attempt, result)
+                logger.error(
+                    "failed to discover %r: %s",
+                    server_name,
+                    record.last_error,
+                )
+            elif isinstance(result, BaseException):
+                raise result
+            else:
+                self._publish_success(server_name, attempt, result)
 
         logger.info(
-            "MCP startup complete: %d/%d servers healthy, %d tools available",
+            "MCP discovery complete: %d/%d catalogs ready, %d tools available",
             len(self.connected_servers),
             len(records),
-            len(self._tool_index),
+            len(self.list_tools()),
         )
 
-    async def _run_reconnect(self, record: _ServerRecord) -> bool:
-        current_task = asyncio.current_task()
-        try:
+    def _refresh_due(self, record: _ServerRecord) -> bool:
+        now = time.monotonic()
+        if record.state is MCPServerState.CONNECTING:
+            return record.refresh_lock.locked()
+        if record.state is MCPServerState.UNHEALTHY:
+            return (
+                record.next_refresh_monotonic is None
+                or now >= record.next_refresh_monotonic
+            )
+        return bool(
+            record.state is MCPServerState.HEALTHY
+            and self._catalog_ttl_seconds > 0
+            and record.catalog.discovered_monotonic is not None
+            and now - record.catalog.discovered_monotonic >= self._catalog_ttl_seconds
+        )
+
+    async def _refresh_record_if_due(
+        self,
+        record: _ServerRecord,
+        *,
+        timeout_seconds: float | None,
+    ) -> None:
+        async with record.refresh_lock:
+            if self._shutdown_started or not self._refresh_due(record):
+                return
+            record.state = MCPServerState.CONNECTING
+            server_name = record.server.name
+            attempt = self._start_attempt(server_name)
             try:
-                await self._connect(record)
-                routes = self._build_inventory(record)
-            except asyncio.CancelledError:
-                async with record.lock:
-                    if (
-                        not self._shutdown_started
-                        and record.state is not MCPServerState.CLOSED
-                    ):
-                        self._mark_unhealthy(record, "connection was cancelled")
+                routes = await self._discover_once(
+                    record,
+                    timeout_seconds=timeout_seconds,
+                )
+            except asyncio.CancelledError as exc:
+                self._publish_failure(server_name, attempt, exc)
                 raise
-            except BaseException as error:
-                last_error = _sanitize_mcp_error(
-                    error,
-                    timeout_seconds=self._connect_timeout_seconds,
+            except Exception as exc:
+                self._publish_failure(server_name, attempt, exc)
+                logger.warning(
+                    "request-driven MCP refresh failed for %r: %s",
+                    record.server.name,
+                    record.last_error,
                 )
-                async with record.lock:
-                    if (
-                        self._shutdown_started
-                        or record.state is MCPServerState.CLOSED
-                    ):
-                        return False
-                    self._mark_unhealthy(record, last_error)
-                await self._close_records(
-                    (record,),
-                    context="cleanup after failed MCP reconnect failed",
-                )
-                logger.error("failed to reconnect to %r: %s", record.name, last_error)
-                return False
+            else:
+                self._publish_success(server_name, attempt, routes)
 
-            async with record.lock:
-                if self._shutdown_started or record.state is MCPServerState.CLOSED:
-                    return False
-                self._replace_inventory(record, routes)
-                record.connection_generation += 1
-                record.state = MCPServerState.HEALTHY
-                record.last_error = None
-                return True
-        finally:
-            async with record.lock:
-                if record.reconnect_task is current_task:
-                    record.reconnect_task = None
-
-    async def _ensure_connected(self, record: _ServerRecord) -> bool:
-        """Join or start the sole post-startup recovery path for one server."""
-        async with record.lock:
-            if record.state is MCPServerState.HEALTHY:
-                return True
-            if self._shutdown_started or record.state is MCPServerState.CLOSED:
-                return False
-            reconnect = record.reconnect_task
-            if reconnect is None:
-                self._remove_advertised_inventory(record)
-                record.state = MCPServerState.CONNECTING
-                record.last_error = None
-                reconnect = asyncio.create_task(self._run_reconnect(record))
-                record.reconnect_task = reconnect
-
+    async def _refresh_due_catalogs(
+        self,
+        *,
+        timeout_seconds: float | None,
+    ) -> None:
+        records = tuple(
+            record for record in self._records.values() if self._refresh_due(record)
+        )
+        tasks = [
+            self._create_task(
+                self._refresh_record_if_due(
+                    record,
+                    timeout_seconds=timeout_seconds,
+                ),
+                name=f"mcp-refresh-{record.server.name}",
+            )
+            for record in records
+        ]
+        refresh = asyncio.gather(*tasks) if tasks else None
         try:
-            return await asyncio.shield(reconnect)
+            if refresh is not None:
+                await asyncio.shield(refresh)
         except asyncio.CancelledError:
-            task = asyncio.current_task()
-            if task is not None and task.cancelling():
-                raise
-            return False
+            await self._cancel_and_wait(tasks)
+            if refresh is not None and refresh.done():
+                try:
+                    refresh.exception()
+                except asyncio.CancelledError:
+                    pass
+            raise
+
+    @asynccontextmanager
+    async def open_turn(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> AsyncIterator[TurnToolRuntime]:
+        """Capture a catalog and own every lazy server lease for one turn."""
+        if not self._startup_started:
+            raise RuntimeError("MCPManager.startup() must run before open_turn()")
+        if self._shutdown_started:
+            raise RuntimeError("MCPManager is closed")
+        await self._refresh_due_catalogs(timeout_seconds=timeout_seconds)
+        if self._shutdown_started:
+            raise RuntimeError("MCPManager is closed")
+        routes = tuple(
+            route
+            for record in self._records.values()
+            for route in record.catalog.routes
+        )
+        runtime = TurnToolRuntime(
+            self._lease_coordinator,
+            routes,
+            self._servers,
+        )
+        self._active_turns.add(runtime)
+        primary_error: BaseException | None = None
+        try:
+            yield runtime
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            try:
+                try:
+                    await runtime.aclose()
+                except asyncio.CancelledError:
+                    if primary_error is None:
+                        raise
+                    logger.warning("MCP turn cleanup was cancelled")
+                except Exception as cleanup_error:
+                    if primary_error is None:
+                        raise
+                    logger.warning(
+                        "MCP turn cleanup failed: %s",
+                        self._sanitize_error(cleanup_error),
+                    )
+            finally:
+                self._active_turns.discard(runtime)
 
     async def shutdown(self) -> None:
-        """Close every retained client and clear inventory; safe to repeat."""
+        """Close active turn workers and clear the in-memory catalog."""
         self._shutdown_started = True
-        self._clear_all_inventory()
+        refreshes = tuple(self._inflight_tasks)
+        interrupted = await self._cancel_and_wait(refreshes)
+        turns = tuple(self._active_turns)
+        if turns:
+            turn_cleanup = [
+                asyncio.create_task(
+                    runtime._abort(),
+                    name="mcp-turn-shutdown",
+                )
+                for runtime in turns
+            ]
+            interrupted = (
+                await self._wait_for_tasks(turn_cleanup, cancel=False) or interrupted
+            )
+        self._active_turns.clear()
         for record in self._records.values():
+            record.catalog = replace(record.catalog, routes=())
             record.state = MCPServerState.CLOSED
-
-        reconnects = [
-            record.reconnect_task
-            for record in self._records.values()
-            if record.reconnect_task is not None
-        ]
-        await self._cancel_and_wait(reconnects)
-
-        records = [
-            record
-            for record in self._records.values()
-            if not record.shutdown_cleanup_complete
-        ]
-        await self._run_record_tasks(
-            records,
-            operation=self._close_record_for_shutdown,
-            context="MCP shutdown cleanup failed",
-        )
+            record.next_refresh_at = None
+            record.next_refresh_monotonic = None
+        if interrupted:
+            raise asyncio.CancelledError
 
     @property
     def connected_servers(self) -> list[str]:
-        """Compatibility view containing healthy server names only."""
+        """Compatibility view of catalog-ready server names."""
         return [
-            record.name
+            record.server.name
             for record in self._records.values()
             if record.state is MCPServerState.HEALTHY
         ]
 
     def status_snapshot(self) -> tuple[MCPServerStatus, ...]:
-        """Return configuration-ordered, health-safe server status values."""
         return tuple(
             MCPServerStatus(
-                name=record.name,
+                name=record.server.name,
                 state=record.state,
                 last_error=record.last_error,
-                tool_count=record.advertised_tool_count,
+                tool_count=len(record.catalog.routes),
+                catalog_revision=record.catalog.revision,
+                last_discovered_at=record.catalog.discovered_at,
+                next_refresh_at=record.next_refresh_at,
+                active_leases=record.active_leases,
             )
             for record in self._records.values()
         )
 
     def list_tools(self) -> list[tuple[str, Tool]]:
-        """Return the existing namespaced-name/Tool compatibility shape."""
-        return [(namespaced, route.tool) for namespaced, route in self._tool_index.items()]
+        return [
+            (
+                route.spec.name,
+                Tool(
+                    route.local_name,
+                    route.spec.description,
+                    route.spec.input_schema,
+                ),
+            )
+            for record in self._records.values()
+            for route in record.catalog.routes
+        ]
 
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
-        """Return only healthy advertised tools in provider-neutral shape."""
-        return [route.spec.as_llm_dict() for route in self._tool_index.values()]
-
-    async def call_tool(
-        self, namespaced_name: str, arguments: dict[str, Any]
-    ) -> ToolCallResult:
-        """Route a call, lazily recovering only a formerly known owner."""
-        route = self._tool_index.get(namespaced_name)
-        if route is None:
-            route = self._last_known_routes.get(namespaced_name)
-            if route is None:
-                return ToolCallResult(
-                    content=f"unknown tool: {namespaced_name!r}",
-                    is_error=True,
-                )
-
-        record = self._records[route.server_name]
-        if record.state is not MCPServerState.HEALTHY:
-            if not await self._ensure_connected(record):
-                if record.state is MCPServerState.CLOSED:
-                    content = f"server {route.server_name!r} is closed"
-                else:
-                    content = (
-                        f"server {route.server_name!r} is unavailable; reconnect failed"
-                    )
-                return ToolCallResult(
-                    content=content,
-                    is_error=True,
-                )
-            route = self._tool_index.get(namespaced_name)
-            if route is None:
-                return ToolCallResult(
-                    content=(
-                        f"tool {namespaced_name!r} is no longer available after reconnect"
-                    ),
-                    is_error=True,
-                )
-
-        generation = record.connection_generation
-        try:
-            return await record.client.call_tool(route.local_name, arguments)
-        except MCPTransportError as error:
-            async with record.lock:
-                if (
-                    not self._shutdown_started
-                    and record.state is MCPServerState.HEALTHY
-                    and record.connection_generation == generation
-                ):
-                    self._mark_unhealthy(
-                        record,
-                        _sanitize_mcp_error(
-                            error.cause,
-                            timeout_seconds=self._connect_timeout_seconds,
-                        ),
-                    )
-                    await self._close_records(
-                        (record,),
-                        context="cleanup after MCP transport failure failed",
-                    )
-            return ToolCallResult(
-                content=(
-                    "tool call outcome is unknown after a transport/protocol "
-                    "failure; the call was not replayed"
-                ),
-                is_error=True,
-            )
+        return [
+            route.spec.as_llm_dict()
+            for record in self._records.values()
+            for route in record.catalog.routes
+        ]

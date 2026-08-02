@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any
+from typing import Any, AsyncContextManager, Protocol
 
 from fastapi import HTTPException
 
@@ -107,6 +107,16 @@ class OrchestratedRouting:
 type RoutingRuntime = UnorchestratedRouting | OrchestratedRouting
 
 
+class _TurnToolProvider(Protocol):
+    """Accepted-turn tool-runtime factory; Session 10 relocates this contract."""
+
+    def open_turn(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> AsyncContextManager[ToolRuntime]: ...
+
+
 @dataclass(frozen=True)
 class _ResolvedRouting:
     llm: LLMClient
@@ -142,7 +152,7 @@ class TurnRunner:
 
     routing: RoutingRuntime
     limits: RunLimits
-    mcp: ToolRuntime
+    mcp: _TurnToolProvider
     store: SessionStore
     guard: SessionGuard
     policy: ToolPolicy | None
@@ -186,9 +196,7 @@ class TurnRunner:
         if isinstance(self.routing, UnorchestratedRouting):
             if self.routing.llm is None:
                 raise RuntimeError("unorchestrated LLM client is unavailable")
-            context.logger.info(
-                "chat: unorchestrated mode, tools=%d", len(tools.tools)
-            )
+            context.logger.info("chat: unorchestrated mode, tools=%d", len(tools.tools))
             return _ResolvedRouting(
                 llm=self.routing.llm,
                 tools=tools.as_llm_tools(),
@@ -262,6 +270,7 @@ class TurnRunner:
         routing: _ResolvedRouting,
         limits: RunLimits,
         context: RunContext,
+        tool_runtime: ToolRuntime,
     ) -> AsyncGenerator[Event, None]:
         request.session.append_user(request.prompt)
 
@@ -288,7 +297,7 @@ class TurnRunner:
         agent_events = run_agent(
             session=request.session,
             llm=routing.llm,
-            mcp=self.mcp,
+            mcp=tool_runtime,
             store=store,
             system=routing.system_prompt,
             tools=routing.tools,
@@ -331,32 +340,36 @@ class TurnRunner:
                     raise ValueError(
                         f"unsupported persistence policy: {request.persistence!r}"
                     )
-                tool_snapshot = ToolSnapshot.from_llm_tools(
-                    self.mcp.get_tools_for_llm()
-                )
-                staged_request = replace(
-                    request,
-                    session=source_session.staged_copy(),
-                )
-                routing = await self._resolve_routing(
-                    staged_request, tool_snapshot, context
-                )
-                limits = self.limits.for_model(routing.model_entry)
-                metadata = TurnMetadata(
-                    run_id=context.run_id,
-                    model_id=routing.model_id,
-                    orchestration=routing.orchestration,
-                )
-                events = self._events(
-                    request=staged_request,
-                    routing=routing,
-                    limits=limits,
-                    context=context,
-                )
-                try:
-                    yield TurnExecution(metadata=metadata, events=events)
-                finally:
-                    await events.aclose()
+                async with self.mcp.open_turn(
+                    timeout_seconds=context.remaining_seconds()
+                ) as tool_runtime:
+                    tool_snapshot = ToolSnapshot.from_llm_tools(
+                        tool_runtime.get_tools_for_llm()
+                    )
+                    staged_request = replace(
+                        request,
+                        session=source_session.staged_copy(),
+                    )
+                    routing = await self._resolve_routing(
+                        staged_request, tool_snapshot, context
+                    )
+                    limits = self.limits.for_model(routing.model_entry)
+                    metadata = TurnMetadata(
+                        run_id=context.run_id,
+                        model_id=routing.model_id,
+                        orchestration=routing.orchestration,
+                    )
+                    events = self._events(
+                        request=staged_request,
+                        routing=routing,
+                        limits=limits,
+                        context=context,
+                        tool_runtime=tool_runtime,
+                    )
+                    try:
+                        yield TurnExecution(metadata=metadata, events=events)
+                    finally:
+                        await events.aclose()
         except SessionBusyError:
             raise HTTPException(
                 status_code=409,

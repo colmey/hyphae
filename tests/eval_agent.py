@@ -15,6 +15,7 @@ dataset.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import os
 from dataclasses import dataclass, field
@@ -104,6 +105,10 @@ class ScriptedMCP:
 
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
         return list(self._tools)
+
+    @asynccontextmanager
+    async def open_turn(self, *, timeout_seconds: float | None = None):
+        yield self
 
     def list_tools(self) -> list[tuple[str, dict[str, Any]]]:
         return [(t["name"], t) for t in self._tools]

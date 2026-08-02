@@ -37,7 +37,7 @@ from agent import (
 )
 from config import get_settings, load_mcp_config_from_settings, reset_settings
 from llm import build_llm_client
-from mcp_layer import MCPManager
+from mcp_layer import MCPManager, TurnToolRuntime
 
 
 logging.basicConfig(
@@ -58,7 +58,7 @@ async def run_scenario(
     label: str,
     user_message: str,
     llm: Any,
-    mcp: MCPManager,
+    mcp: TurnToolRuntime,
     store: InMemorySessionStore,
     max_iterations: int = 10,
 ) -> None:
@@ -145,37 +145,40 @@ async def test_configured_agent_scenarios() -> None:
     await mcp.startup()
     try:
         # 1. No tools needed.
-        await run_scenario(
-            label="trivial prompt, no tool calls expected",
-            user_message="What is 2 + 2? Just give the number.",
-            llm=llm,
-            mcp=mcp,
-            store=store,
-        )
+        async with mcp.open_turn() as runtime:
+            await run_scenario(
+                label="trivial prompt, no tool calls expected",
+                user_message="What is 2 + 2? Just give the number.",
+                llm=llm,
+                mcp=runtime,
+                store=store,
+            )
 
         # 2. Exactly one tool call expected.
-        await run_scenario(
-            label="single tool call",
-            user_message="List the tables in the customer database.",
-            llm=llm,
-            mcp=mcp,
-            store=store,
-        )
+        async with mcp.open_turn() as runtime:
+            await run_scenario(
+                label="single tool call",
+                user_message="List the tables in the customer database.",
+                llm=llm,
+                mcp=runtime,
+                store=store,
+            )
 
         # 3. Multi-step: list tables, then describe one. Should be at least
         #    two tool calls across two iterations.
-        await run_scenario(
-            label="multi-step tool chaining",
-            user_message=(
-                "First, list the tables in the customer database. "
-                "Then pick one that looks like it stores customer data "
-                "and describe its columns."
-            ),
-            llm=llm,
-            mcp=mcp,
-            store=store,
-            max_iterations=8,
-        )
+        async with mcp.open_turn() as runtime:
+            await run_scenario(
+                label="multi-step tool chaining",
+                user_message=(
+                    "First, list the tables in the customer database. "
+                    "Then pick one that looks like it stores customer data "
+                    "and describe its columns."
+                ),
+                llm=llm,
+                mcp=runtime,
+                store=store,
+                max_iterations=8,
+            )
 
         print(f"store holds {len(store)} session(s); step 5 smoke test complete.")
     finally:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 import pytest
@@ -76,6 +77,10 @@ class ToolMCP:
             {"name": f"srv__tool_{i}", "description": "test", "input_schema": {}}
             for i in range(3)
         ]
+
+    @asynccontextmanager
+    async def open_turn(self, *, timeout_seconds: float | None = None):
+        yield self
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
         index = int(name.rsplit("_", 1)[1])

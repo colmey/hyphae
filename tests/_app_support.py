@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Iterator
 
 from agent import InMemorySessionStore, SessionGuard
@@ -22,10 +22,28 @@ class EmptyMCP:
     def list_tools(self) -> list[Any]:
         return []
 
+    @asynccontextmanager
+    async def open_turn(self, *, timeout_seconds: float | None = None):
+        yield self
+
     async def call_tool(
         self, name: str, arguments: dict[str, Any]
     ) -> ToolCallResult:
         raise AssertionError(f"unexpected tool dispatch: {name} {arguments!r}")
+
+
+class _StaticTurnOwner:
+    """Give an agent-level ToolRuntime the accepted-turn owner used by ASGI tests."""
+
+    def __init__(self, runtime: Any) -> None:
+        self._runtime = runtime
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._runtime, name)
+
+    @asynccontextmanager
+    async def open_turn(self, *, timeout_seconds: float | None = None):
+        yield self._runtime
 
 
 @contextmanager
@@ -42,7 +60,10 @@ def wired_app(
     settings = Settings(_env_file=None, orchestration_enabled=False)
     app.state.settings = settings
     app.state.unorchestrated_llm = llm
-    app.state.mcp = mcp if mcp is not None else EmptyMCP()
+    runtime = mcp if mcp is not None else EmptyMCP()
+    app.state.mcp = (
+        runtime if hasattr(runtime, "open_turn") else _StaticTurnOwner(runtime)
+    )
     app.state.store = InMemorySessionStore(
         ttl_seconds=settings.session_ttl_seconds,
         max_count=settings.session_capacity,

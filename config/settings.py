@@ -133,6 +133,14 @@ class Settings(BaseSettings):
             "transport, initialization, and tool discovery. <=0 disables."
         ),
     )
+    mcp_catalog_ttl_seconds: float = Field(
+        default=300,
+        description=(
+            "Age after which an accepted request refreshes an MCP catalog before "
+            "routing. <=0 disables age-driven refresh; startup and lease discovery "
+            "still run."
+        ),
+    )
     tool_result_max_chars: int = Field(
         default=20000,
         description=(

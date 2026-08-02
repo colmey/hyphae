@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
@@ -39,8 +40,10 @@ from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     StreamChunk,
+    StreamEnd,
     TextBlock,
     TextDelta,
+    ToolUseBlock,
     CompletionUsage,
 )
 from mcp_layer import ToolCallResult
@@ -65,6 +68,10 @@ class CountingMCP:
         ]
         self.inventory_reads = 0
         self.fail_next_inventory = False
+        self.turn_entries = 0
+        self.turn_exits = 0
+        self.active_turns = 0
+        self.turn_timeouts: list[float | None] = []
 
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
         self.inventory_reads += 1
@@ -76,9 +83,18 @@ class CountingMCP:
     def list_tools(self) -> list[Any]:
         raise AssertionError("routing must use the turn snapshot, not live inventory")
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> ToolCallResult:
+    @asynccontextmanager
+    async def open_turn(self, *, timeout_seconds: float | None = None):
+        self.turn_timeouts.append(timeout_seconds)
+        self.turn_entries += 1
+        self.active_turns += 1
+        try:
+            yield self
+        finally:
+            self.active_turns -= 1
+            self.turn_exits += 1
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
         raise AssertionError(f"unexpected tool dispatch: {name} {arguments!r}")
 
 
@@ -152,9 +168,7 @@ class FakeOrchestrator:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def decide(
-        self, prompt, tools, history=None, timeout=None, log=None
-    ):
+    async def decide(self, prompt, tools, history=None, timeout=None, log=None):
         self.calls += 1
         return OrchestrationDecision(
             result=OrchestrationProposal(
@@ -389,9 +403,7 @@ async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> 
     assert result.metadata.model_id == "agent"
     assert result.metadata.orchestration is not None
     assert result.metadata.orchestration.tools == ["srv__one"]
-    assert [tool["name"] for tool in agent.requests_seen[0].tools or []] == [
-        "srv__one"
-    ]
+    assert [tool["name"] for tool in agent.requests_seen[0].tools or []] == ["srv__one"]
     assert agent.requests_seen[0].max_tokens == 256
     model_limits = runner.limits.for_model(registry.get_entry("agent"))
     assert model_limits.max_tokens == 256
@@ -408,11 +420,14 @@ async def test_guard_releases_after_normal_completion_and_exception() -> None:
 
     await runner.run(TurnRequest("normal", session, PersistencePolicy.PERSISTENT))
     assert runner.guard.in_flight() == set()
+    assert mcp.turn_entries == mcp.turn_exits == 1
+    assert mcp.active_turns == 0
 
     mcp.fail_next_inventory = True
     with pytest.raises(RuntimeError, match="inventory unavailable"):
         await runner.run(TurnRequest("raises", session, PersistencePolicy.PERSISTENT))
     assert runner.guard.in_flight() == set()
+    assert mcp.active_turns == 0
 
     await runner.run(
         TurnRequest("after exception", session, PersistencePolicy.PERSISTENT)
@@ -449,6 +464,99 @@ async def test_guard_releases_when_stream_is_closed_early() -> None:
 
     assert runner.guard.in_flight() == set()
     assert agent.closed is True
+    assert runner.mcp.active_turns == 0  # type: ignore[attr-defined]
+    assert runner.mcp.turn_entries == runner.mcp.turn_exits == 1  # type: ignore[attr-defined]
+
+
+async def test_early_generator_close_after_tool_dispatch_closes_turn_lease() -> None:
+    class LeaseMCP(CountingMCP):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lease_active = False
+            self.calls = 0
+
+        @asynccontextmanager
+        async def open_turn(self, *, timeout_seconds: float | None = None):
+            self.turn_entries += 1
+            self.active_turns += 1
+            try:
+                yield self
+            finally:
+                self.lease_active = False
+                self.active_turns -= 1
+                self.turn_exits += 1
+
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any]
+        ) -> ToolCallResult:
+            self.calls += 1
+            self.lease_active = True
+            return ToolCallResult("tool result", False)
+
+    class ToolThenBlockingStream(AnswerLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stream_calls = 0
+            self.closed = False
+
+        async def stream(
+            self, request: GenerationRequest
+        ) -> AsyncIterator[StreamChunk]:
+            self.stream_calls += 1
+            if self.stream_calls == 1:
+                yield StreamEnd(
+                    AssistantMessage(
+                        content=[ToolUseBlock("call-1", "srv__one", {"value": 1})],
+                        stop_reason="tool_use",
+                        usage=CompletionUsage(total_tokens=1),
+                    )
+                )
+                return
+            try:
+                yield TextDelta("partial")
+                await asyncio.Event().wait()
+            finally:
+                self.closed = True
+
+    agent = ToolThenBlockingStream()
+    mcp = LeaseMCP()
+    runner = _runner(
+        agent=agent,
+        mcp=mcp,
+        settings=_settings(orchestration_enabled=False),
+    )
+    session = await runner.store.create()
+
+    async with runner.open(
+        TurnRequest("stream", session, PersistencePolicy.PERSISTENT, stream=True)
+    ) as execution:
+        async for event in execution.events:
+            if event.type == "text":
+                break
+        assert mcp.lease_active is True
+
+    assert mcp.calls == 1
+    assert mcp.lease_active is False
+    assert mcp.active_turns == 0
+    assert mcp.turn_entries == mcp.turn_exits == 1
+    assert agent.closed is True
+
+
+async def test_turn_passes_remaining_deadline_to_catalog_refresh() -> None:
+    mcp = CountingMCP()
+    runner = _runner(
+        agent=AnswerLLM(),
+        mcp=mcp,
+        settings=_settings(orchestration_enabled=False, run_max_seconds=1),
+    )
+    session = await runner.store.create()
+
+    await runner.run(TurnRequest("go", session, PersistencePolicy.PERSISTENT))
+
+    assert len(mcp.turn_timeouts) == 1
+    timeout = mcp.turn_timeouts[0]
+    assert timeout is not None
+    assert 0 < timeout <= 1
 
 
 async def test_active_task_cancellation_releases_guard() -> None:
@@ -457,9 +565,7 @@ async def test_active_task_cancellation_releases_guard() -> None:
             super().__init__()
             self.started = asyncio.Event()
 
-        async def decide(
-            self, prompt, tools, history=None, timeout=None, log=None
-        ):
+        async def decide(self, prompt, tools, history=None, timeout=None, log=None):
             self.calls += 1
             self.started.set()
             await asyncio.Event().wait()
@@ -484,6 +590,7 @@ async def test_active_task_cancellation_releases_guard() -> None:
         await task
 
     assert runner.guard.in_flight() == set()
+    assert runner.mcp.active_turns == 0  # type: ignore[attr-defined]
 
 
 async def test_native_sse_trace_and_logs_share_one_run_id(
@@ -511,7 +618,9 @@ async def test_native_sse_trace_and_logs_share_one_run_id(
     assert any(f"[run {run_id}]" in record.getMessage() for record in caplog.records)
 
 
-async def test_unorchestrated_metadata_reports_executing_model_without_decision() -> None:
+async def test_unorchestrated_metadata_reports_executing_model_without_decision() -> (
+    None
+):
     agent = AnswerLLM()
     runner = _runner(
         agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False)
@@ -555,9 +664,7 @@ async def test_model_inventory_uses_registry_or_unorchestrated_setting() -> None
         registry=RegistryStub(agent),
     )
 
-    assert unorchestrated.available_model_ids() == [
-        "unorchestrated-executing-model"
-    ]
+    assert unorchestrated.available_model_ids() == ["unorchestrated-executing-model"]
     assert orchestrated.available_model_ids() == ["agent", "router"]
 
 
@@ -629,7 +736,9 @@ def test_route_facing_turn_contract_has_no_preference_plumbing() -> None:
         assert "preferences" not in inspect.signature(method).parameters
 
 
-def test_runtime_wiring_names_optional_unorchestrated_client_and_removes_dead_helpers() -> None:
+def test_runtime_wiring_names_optional_unorchestrated_client_and_removes_dead_helpers() -> (
+    None
+):
     assert list(inspect.signature(TurnRunner).parameters) == [
         "routing",
         "limits",

@@ -2,6 +2,7 @@
 
 from .client import MCPClient, Tool, ToolCallResult
 from .contracts import NAMESPACE_SEP, ToolSnapshot, ToolSpec
+from .lease import TurnToolRuntime
 from .manager import MCPManager, MCPServerState, MCPServerStatus
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "ToolCallResult",
     "ToolSnapshot",
     "ToolSpec",
+    "TurnToolRuntime",
 ]

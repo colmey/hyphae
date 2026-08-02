@@ -1,8 +1,10 @@
-"""Plan 06 regression coverage for bounded MCP startup and truthful health."""
+"""Bounded MCP discovery, same-task cleanup, and idle-ready health."""
 
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,7 +12,7 @@ import pytest
 
 import mcp_layer.client as client_module
 from config import MCPConfig
-from mcp_layer import MCPManager, MCPServerState, Tool, ToolSpec
+from mcp_layer import MCPManager, MCPServerState, Tool
 from tests._app_support import wired_app
 
 pytestmark = pytest.mark.anyio
@@ -31,66 +33,6 @@ def _config(*names: str, disabled: tuple[str, ...] = ()) -> MCPConfig:
     )
 
 
-class _FakeClient:
-    def __init__(
-        self,
-        name: str,
-        *,
-        tools: list[Tool] | None = None,
-        connect_error: BaseException | None = None,
-        blocker: asyncio.Event | None = None,
-        close_error: BaseException | None = None,
-        close_blocker: asyncio.Event | None = None,
-    ) -> None:
-        self.name = name
-        self.tools = tools or []
-        self.connect_error = connect_error
-        self.blocker = blocker
-        self.close_error = close_error
-        self.close_blocker = close_blocker
-        self.connect_started = asyncio.Event()
-        self.connect_cancelled = False
-        self.close_started = asyncio.Event()
-        self.close_cancelled = False
-        self.close_calls = 0
-
-    async def connect(self) -> None:
-        self.connect_started.set()
-        try:
-            if self.blocker is not None:
-                await self.blocker.wait()
-            if self.connect_error is not None:
-                raise self.connect_error
-        except asyncio.CancelledError:
-            self.connect_cancelled = True
-            raise
-
-    async def aclose(self) -> None:
-        self.close_calls += 1
-        self.close_started.set()
-        try:
-            if self.close_blocker is not None:
-                await self.close_blocker.wait()
-            if self.close_error is not None:
-                raise self.close_error
-        except asyncio.CancelledError:
-            self.close_cancelled = True
-            raise
-
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        raise AssertionError("tool execution is outside Plan 06 startup tests")
-
-
-def _manager(
-    config: MCPConfig,
-    clients: dict[str, _FakeClient],
-) -> MCPManager:
-    return MCPManager(
-        config,
-        client_factory=lambda name, server_config: clients[name],
-    )
-
-
 def _tool(name: str) -> Tool:
     return Tool(
         name=name,
@@ -99,333 +41,408 @@ def _tool(name: str) -> Tool:
     )
 
 
+@dataclass
+class _OpenStep:
+    tools: list[Tool] = field(default_factory=list)
+    enter_error: BaseException | None = None
+    list_error: BaseException | None = None
+    enter_blocker: asyncio.Event | None = None
+    list_blocker: asyncio.Event | None = None
+    cleanup_error: BaseException | None = None
+    cleanup_blocker: asyncio.Event | None = None
+    enter_started: asyncio.Event = field(default_factory=asyncio.Event)
+    list_started: asyncio.Event = field(default_factory=asyncio.Event)
+    cleanup_started: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+class _FakeProvider:
+    def __init__(self, name: str, steps: list[_OpenStep]) -> None:
+        self.name = name
+        self.steps = deque(steps)
+        self.open_calls = 0
+        self.exit_calls = 0
+        self.active_contexts = 0
+        self.enter_tasks: list[asyncio.Task[Any]] = []
+        self.exit_tasks: list[asyncio.Task[Any]] = []
+
+    def open(self):
+        provider = self
+        if not self.steps:
+            raise AssertionError(f"unexpected open for {self.name}")
+        step = self.steps.popleft()
+
+        class _Connection:
+            async def list_tools(self) -> list[Tool]:
+                step.list_started.set()
+                if step.list_blocker is not None:
+                    await step.list_blocker.wait()
+                if step.list_error is not None:
+                    raise step.list_error
+                return step.tools
+
+            async def call_tool(self, name: str, arguments: dict[str, Any]):
+                raise AssertionError("startup discovery must not dispatch tools")
+
+        class _Context:
+            async def __aenter__(self) -> _Connection:
+                provider.open_calls += 1
+                task = asyncio.current_task()
+                assert task is not None
+                provider.enter_tasks.append(task)
+                step.enter_started.set()
+                if step.enter_blocker is not None:
+                    await step.enter_blocker.wait()
+                if step.enter_error is not None:
+                    raise step.enter_error
+                provider.active_contexts += 1
+                return _Connection()
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                provider.exit_calls += 1
+                task = asyncio.current_task()
+                assert task is not None
+                provider.exit_tasks.append(task)
+                step.cleanup_started.set()
+                if step.cleanup_blocker is not None:
+                    await step.cleanup_blocker.wait()
+                provider.active_contexts -= 1
+                if step.cleanup_error is not None:
+                    raise step.cleanup_error
+
+        return _Context()
+
+
+def _manager(
+    config: MCPConfig,
+    clients: dict[str, _FakeProvider],
+    *,
+    timeout: float = 30,
+) -> MCPManager:
+    return MCPManager(
+        config,
+        connect_timeout_seconds=timeout,
+        client_factory=lambda name, server_config: clients[name],
+    )
+
+
 @pytest.mark.parametrize(
-    ("phase", "cleanup_raises"),
+    ("transport", "server"),
     [
-        ("transport", False),
-        ("initialize", False),
-        ("list_tools", False),
-        ("initialize", True),
+        (
+            "streamable_http_client",
+            {"transport": "streamable-http", "url": "http://example.invalid/mcp"},
+        ),
+        ("sse_client", {"transport": "sse", "url": "http://example.invalid/sse"}),
+        ("stdio_client", {"transport": "stdio", "command": "example"}),
     ],
-    ids=["transport", "initialize", "list-tools", "cleanup-failure"],
 )
-async def test_one_timeout_bounds_every_real_client_startup_phase(
-    phase: str,
-    cleanup_raises: bool,
+async def test_startup_discovery_enters_and_exits_resources_in_the_same_task(
+    transport: str,
+    server: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    entered = asyncio.Event()
-    blocker = asyncio.Event()
-    cleanup = {"transport": False, "session": False}
+    active_resources: set[str] = set()
+    affinity_errors: list[str] = []
+    enter_tasks: dict[str, asyncio.Task[Any]] = {}
 
-    class _TransportContext:
+    class _TaskAffineContext:
+        def __init__(self, label: str, value: Any) -> None:
+            self.label = label
+            self.value = value
+
+        async def __aenter__(self) -> Any:
+            task = asyncio.current_task()
+            assert task is not None
+            enter_tasks[self.label] = task
+            active_resources.add(self.label)
+            return self.value
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            if task is not enter_tasks[self.label]:
+                affinity_errors.append(self.label)
+                raise RuntimeError(f"{self.label} exited from the wrong task")
+            active_resources.remove(self.label)
+
+    class _Session:
+        def __init__(self, read: Any, write: Any) -> None:
+            self._context = _TaskAffineContext("session", self)
+
+        async def __aenter__(self) -> Any:
+            return await self._context.__aenter__()
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            await self._context.__aexit__(exc_type, exc, tb)
+
+        async def initialize(self) -> None:
+            pass
+
+        async def list_tools(self) -> Any:
+            return SimpleNamespace(tools=[])
+
+    streams = (
+        (object(), object(), lambda: None)
+        if transport == "streamable_http_client"
+        else (object(), object())
+    )
+    monkeypatch.setattr(
+        client_module,
+        transport,
+        lambda *args: _TaskAffineContext("transport", streams),
+    )
+    monkeypatch.setattr(client_module, "ClientSession", _Session)
+    config = MCPConfig.model_validate({"mcpServers": {"task-affine": server}})
+
+    manager = MCPManager(config)
+    await manager.startup()
+    await manager.shutdown()
+
+    assert affinity_errors == []
+    assert active_resources == set()
+    assert enter_tasks["transport"] is enter_tasks["session"]
+
+
+@pytest.mark.parametrize("phase", ["transport", "initialize", "list_tools"])
+async def test_one_timeout_bounds_every_discovery_phase_and_cleans(
+    phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blocker = asyncio.Event()
+    active = {"transport": 0, "session": 0}
+
+    class _Transport:
         async def __aenter__(self):
             if phase == "transport":
-                entered.set()
-                try:
-                    await blocker.wait()
-                finally:
-                    cleanup["transport"] = True
-            return object(), object(), None
+                await blocker.wait()
+            active["transport"] += 1
+            return object(), object(), lambda: None
 
         async def __aexit__(self, exc_type, exc, tb):
-            cleanup["transport"] = True
+            active["transport"] -= 1
 
     class _Session:
         def __init__(self, read: Any, write: Any) -> None:
             pass
 
         async def __aenter__(self):
+            active["session"] += 1
             return self
 
         async def __aexit__(self, exc_type, exc, tb):
-            cleanup["session"] = True
-            if cleanup_raises:
-                raise RuntimeError("session cleanup failed")
+            active["session"] -= 1
 
-        async def initialize(self) -> None:
+        async def initialize(self):
             if phase == "initialize":
-                entered.set()
                 await blocker.wait()
 
         async def list_tools(self):
             if phase == "list_tools":
-                entered.set()
                 await blocker.wait()
             return SimpleNamespace(tools=[])
 
-    monkeypatch.setattr(client_module, "streamablehttp_client", lambda url: _TransportContext())
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda url: _Transport()
+    )
     monkeypatch.setattr(client_module, "ClientSession", _Session)
+    manager = MCPManager(_config("phase"), connect_timeout_seconds=0.02)
 
-    manager = MCPManager(_config("phase-test"), connect_timeout_seconds=0.05)
     await manager.startup()
 
-    assert entered.is_set()
-    assert manager.connected_servers == []
-    assert manager.list_tools() == []
     status = manager.status_snapshot()[0]
     assert status.state is MCPServerState.UNHEALTHY
-    assert status.last_error == "connection timed out after 0.05 seconds"
-    assert status.tool_count == 0
-    assert cleanup["transport"] is True
-    assert cleanup["session"] is (phase != "transport")
+    assert status.last_error == "connection timed out after 0.02 seconds"
+    assert manager.list_tools() == []
+    assert active == {"transport": 0, "session": 0}
 
 
-async def test_partial_startup_retains_truthful_order_and_sanitizes_errors(
-) -> None:
+async def test_partial_startup_is_ordered_sanitized_and_resource_free() -> None:
     secret_error = RuntimeError(
-        "connect failed Authorization: Bearer topsecret "
-        "password=hunter2 at https://user:pass@example.invalid/mcp?token=hidden\n"
-        "request_body={'private': 'payload'}"
+        "connect failed Authorization: Bearer topsecret password=hunter2 "
+        "at https://user:pass@example.invalid/mcp?token=hidden"
     )
-    clients = {
-        "healthy": _FakeClient("healthy", tools=[_tool("one"), _tool("two")]),
-        "broken": _FakeClient(
-            "broken",
-            connect_error=secret_error,
-            close_error=RuntimeError("cleanup also failed"),
-        ),
-    }
-    manager = _manager(_config("healthy", "broken"), clients)
+    healthy = _FakeProvider("healthy", [_OpenStep([_tool("one"), _tool("two")])])
+    broken = _FakeProvider("broken", [_OpenStep(enter_error=secret_error)])
+    manager = _manager(
+        _config("healthy", "broken"),
+        {"healthy": healthy, "broken": broken},
+    )
 
-    assert [status.state for status in manager.status_snapshot()] == [
-        MCPServerState.DISCONNECTED,
-        MCPServerState.DISCONNECTED,
-    ]
     await manager.startup()
 
     assert manager.connected_servers == ["healthy"]
-    assert [name for name, _tool_value in manager.list_tools()] == [
+    assert [name for name, _ in manager.list_tools()] == [
         "healthy__one",
         "healthy__two",
     ]
-    assert all(isinstance(route.spec, ToolSpec) for route in manager._tool_index.values())
     statuses = manager.status_snapshot()
-    assert [status.name for status in statuses] == ["healthy", "broken"]
-    assert statuses[0].state is MCPServerState.HEALTHY
-    assert statuses[0].tool_count == 2
-    assert statuses[1].state is MCPServerState.UNHEALTHY
-    assert statuses[1].tool_count == 0
+    assert [status.state for status in statuses] == [
+        MCPServerState.HEALTHY,
+        MCPServerState.UNHEALTHY,
+    ]
+    assert statuses[0].catalog_revision == 1
+    assert statuses[0].last_discovered_at is not None
+    assert statuses[0].active_leases == 0
+    assert statuses[1].next_refresh_at is not None
     assert statuses[1].last_error is not None
-    assert "RuntimeError: connect failed" in statuses[1].last_error
-    for secret in ("topsecret", "hunter2", "user:pass", "hidden", "payload"):
+    for secret in ("topsecret", "hunter2", "user:pass", "hidden"):
         assert secret not in statuses[1].last_error
-    assert clients["broken"].close_calls == 1
+    assert healthy.active_contexts == broken.active_contexts == 0
+    assert healthy.enter_tasks == healthy.exit_tasks
 
 
-async def test_independent_child_cancellation_is_unhealthy_not_registered(
-) -> None:
-    clients = {
-        "healthy": _FakeClient("healthy", tools=[_tool("available")]),
-        "cancelled": _FakeClient(
-            "cancelled",
-            tools=[_tool("must-not-leak")],
-            connect_error=asyncio.CancelledError("child only"),
-        ),
-    }
-    manager = _manager(_config("healthy", "cancelled"), clients)
+async def test_cleanup_failure_prevents_catalog_publication() -> None:
+    provider = _FakeProvider(
+        "server",
+        [
+            _OpenStep(
+                [_tool("must-not-publish")],
+                cleanup_error=RuntimeError("cleanup failed"),
+            )
+        ],
+    )
+    manager = _manager(_config("server"), {"server": provider})
+
+    await manager.startup()
+
+    assert manager.get_tools_for_llm() == []
+    assert provider.active_contexts == 0
+    status = manager.status_snapshot()[0]
+    assert status.state is MCPServerState.UNHEALTHY
+    assert status.last_error == "RuntimeError: cleanup failed"
+
+
+async def test_child_cancellation_degrades_only_that_server() -> None:
+    healthy = _FakeProvider("healthy", [_OpenStep([_tool("available")])])
+    cancelled = _FakeProvider(
+        "cancelled",
+        [_OpenStep(enter_error=asyncio.CancelledError("child only"))],
+    )
+    manager = _manager(
+        _config("healthy", "cancelled"),
+        {"healthy": healthy, "cancelled": cancelled},
+    )
 
     await manager.startup()
 
     assert manager.connected_servers == ["healthy"]
     assert [name for name, _ in manager.list_tools()] == ["healthy__available"]
-    cancelled = manager.status_snapshot()[1]
-    assert cancelled.state is MCPServerState.UNHEALTHY
-    assert cancelled.last_error == "connection was cancelled"
-    assert cancelled.tool_count == 0
+    assert manager.status_snapshot()[1].last_error == "connection was cancelled"
 
 
-async def test_application_cancellation_propagates_and_cleans_every_sibling(
-) -> None:
+async def test_application_cancellation_cleans_every_discovery_task() -> None:
     blocker = asyncio.Event()
-    clients = {
-        "completed": _FakeClient("completed", tools=[_tool("not-published")]),
-        "blocked": _FakeClient("blocked", blocker=blocker),
-    }
-    manager = _manager(_config("completed", "blocked"), clients)
+    completed = _FakeProvider("completed", [_OpenStep([_tool("hidden")])])
+    blocked_step = _OpenStep(enter_blocker=blocker)
+    blocked = _FakeProvider("blocked", [blocked_step])
+    manager = _manager(
+        _config("completed", "blocked"),
+        {"completed": completed, "blocked": blocked},
+    )
     startup = asyncio.create_task(manager.startup())
-    await clients["blocked"].connect_started.wait()
+    await blocked_step.enter_started.wait()
 
     startup.cancel()
     with pytest.raises(asyncio.CancelledError):
         await startup
 
-    assert clients["blocked"].connect_cancelled is True
-    assert clients["completed"].close_calls == 1
-    assert clients["blocked"].close_calls == 1
-    assert manager.connected_servers == []
+    assert completed.active_contexts == blocked.active_contexts == 0
     assert manager.list_tools() == []
     assert all(
         status.state is MCPServerState.UNHEALTHY
         and status.last_error == "application startup was cancelled"
-        and status.tool_count == 0
         for status in manager.status_snapshot()
     )
+
+
+async def test_repeated_application_cancellation_waits_for_discovery_cleanup() -> None:
+    list_blocker = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    step = _OpenStep(
+        [_tool("hidden")],
+        list_blocker=list_blocker,
+        cleanup_blocker=cleanup_release,
+    )
+    provider = _FakeProvider("server", [step])
+    manager = _manager(_config("server"), {"server": provider})
+    startup = asyncio.create_task(manager.startup())
+    await step.list_started.wait()
+
+    startup.cancel()
+    await step.cleanup_started.wait()
+    startup.cancel()
+    await asyncio.sleep(0)
+    assert not startup.done()
+    assert provider.active_contexts == 1
+
+    cleanup_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await startup
+
+    assert provider.active_contexts == 0
+    assert provider.enter_tasks[0] is provider.exit_tasks[0]
 
 
 @pytest.mark.parametrize("timeout", [0, -1])
-async def test_nonpositive_timeout_is_disabled(
-    timeout: float,
-) -> None:
+async def test_nonpositive_timeout_is_disabled(timeout: float) -> None:
     blocker = asyncio.Event()
-    client = _FakeClient("waiting", blocker=blocker)
-    manager = MCPManager(
-        _config("waiting"),
-        connect_timeout_seconds=timeout,
-        client_factory=lambda name, server_config: client,
-    )
+    step = _OpenStep(list_blocker=blocker)
+    provider = _FakeProvider("waiting", [step])
+    manager = _manager(_config("waiting"), {"waiting": provider}, timeout=timeout)
     startup = asyncio.create_task(manager.startup())
-    await client.connect_started.wait()
-    await asyncio.sleep(0.02)
-
+    await step.list_started.wait()
+    await asyncio.sleep(0)
     assert not startup.done()
+
     startup.cancel()
     with pytest.raises(asyncio.CancelledError):
         await startup
-    assert client.close_calls == 1
+    assert provider.active_contexts == 0
 
 
-async def test_shutdown_attempts_all_clients_clears_inventory_and_is_idempotent(
-) -> None:
-    clients = {
-        "close-fails": _FakeClient(
-            "close-fails",
-            tools=[_tool("one")],
-            close_error=RuntimeError("close failed"),
-        ),
-        "closes": _FakeClient("closes", tools=[_tool("two")]),
-    }
-    manager = _manager(_config("close-fails", "closes"), clients)
+async def test_shutdown_is_idempotent_and_opens_no_cleanup_connection() -> None:
+    provider = _FakeProvider("server", [_OpenStep([_tool("one")])])
+    manager = _manager(_config("server"), {"server": provider})
     await manager.startup()
+    assert provider.open_calls == provider.exit_calls == 1
 
     await manager.shutdown()
     await manager.shutdown()
 
-    assert clients["close-fails"].close_calls == 1
-    assert clients["closes"].close_calls == 1
-    assert manager.connected_servers == []
+    assert provider.open_calls == provider.exit_calls == 1
     assert manager.list_tools() == []
-    assert all(
-        status.state is MCPServerState.CLOSED and status.tool_count == 0
-        for status in manager.status_snapshot()
-    )
-
-
-async def test_shutdown_cancellation_propagates_after_cancelling_close_siblings() -> None:
-    blocker = asyncio.Event()
-    clients = {
-        "first": _FakeClient("first", tools=[_tool("one")], close_blocker=blocker),
-        "second": _FakeClient("second", tools=[_tool("two")], close_blocker=blocker),
-    }
-    manager = _manager(_config("first", "second"), clients)
-    await manager.startup()
-    shutdown = asyncio.create_task(manager.shutdown())
-    await asyncio.gather(*(client.close_started.wait() for client in clients.values()))
-
-    shutdown.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await shutdown
-
-    assert all(client.close_calls == 1 for client in clients.values())
-    assert all(client.close_cancelled for client in clients.values())
-    assert manager.connected_servers == []
-    assert manager.list_tools() == []
-    assert all(
-        status.state is MCPServerState.CLOSED and status.tool_count == 0
-        for status in manager.status_snapshot()
-    )
-
-
-async def test_repeated_shutdown_retries_cleanup_not_started_before_cancellation(
-) -> None:
-    client = _FakeClient("server", tools=[_tool("one")])
-    manager = _manager(_config("server"), {"server": client})
-    await manager.startup()
-    record = manager._records["server"]
-    await record.lock.acquire()
-    try:
-        shutdown = asyncio.create_task(manager.shutdown())
-        await asyncio.sleep(0)
-        assert manager.status_snapshot()[0].state is MCPServerState.CLOSED
-        assert client.close_started.is_set() is False
-
-        shutdown.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await shutdown
-    finally:
-        record.lock.release()
-
-    await manager.shutdown()
-
-    assert client.close_calls == 1
-    assert client.close_started.is_set() is True
     assert manager.status_snapshot()[0].state is MCPServerState.CLOSED
 
 
-async def test_no_enabled_servers_has_empty_ok_health(
-    asgi_client,
-) -> None:
+async def test_no_enabled_servers_has_empty_ok_health(asgi_client) -> None:
     manager = MCPManager(_config("disabled", disabled=("disabled",)))
     await manager.startup()
-
     with wired_app(SimpleNamespace(), mcp=manager) as (app, _settings):
         response = await asgi_client(app).get("/health")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "ok"
-    assert body["mcp_servers"] == []
-    assert body["connected_servers"] == []
-    assert body["tool_count"] == 0
-
-
-async def test_health_reports_mixed_startup_and_preserves_compatibility_fields(
-    asgi_client,
-) -> None:
-    clients = {
-        "healthy": _FakeClient("healthy", tools=[_tool("one")]),
-        "broken": _FakeClient("broken", connect_error=RuntimeError("offline")),
-    }
-    manager = _manager(_config("healthy", "broken"), clients)
-    await manager.startup()
-
-    with wired_app(SimpleNamespace(), mcp=manager) as (app, settings):
-        response = await asgi_client(app).get("/health")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "degraded"
-    assert body["provider"] == settings.llm.provider
-    assert body["model"] == settings.llm.model_name
-    assert body["connected_servers"] == ["healthy"]
-    assert body["tool_count"] == 1
-    assert body["orchestration_enabled"] is False
-    assert body["available_model_ids"] == []
-    assert body["mcp_servers"] == [
-        {
-            "name": "healthy",
-            "state": "healthy",
-            "last_error": None,
-            "tool_count": 1,
-        },
-        {
-            "name": "broken",
-            "state": "unhealthy",
-            "last_error": "RuntimeError: offline",
-            "tool_count": 0,
-        },
-    ]
-
-
-async def test_health_is_ok_when_every_enabled_server_is_healthy(
-    asgi_client,
-) -> None:
-    client = _FakeClient("healthy", tools=[_tool("one")])
-    manager = _manager(_config("healthy"), {"healthy": client})
-    await manager.startup()
-
-    with wired_app(SimpleNamespace(), mcp=manager) as (app, _settings):
-        response = await asgi_client(app).get("/health")
-
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert response.json()["mcp_servers"] == []
+
+
+async def test_health_distinguishes_idle_ready_and_degraded(asgi_client) -> None:
+    healthy = _FakeProvider("healthy", [_OpenStep([_tool("one")])])
+    broken = _FakeProvider("broken", [_OpenStep(enter_error=RuntimeError("offline"))])
+    manager = _manager(
+        _config("healthy", "broken"),
+        {"healthy": healthy, "broken": broken},
+    )
+    await manager.startup()
+
+    with wired_app(SimpleNamespace(), mcp=manager) as (app, _settings):
+        body = (await asgi_client(app).get("/health")).json()
+
+    assert body["status"] == "degraded"
+    assert body["connected_servers"] == ["healthy"]
+    assert body["tool_count"] == 1
+    assert body["mcp_servers"][0]["state"] == "healthy"
+    assert body["mcp_servers"][0]["active_leases"] == 0
+    assert body["mcp_servers"][0]["catalog_revision"] == 1
+    assert body["mcp_servers"][0]["last_discovered_at"] is not None
+    assert body["mcp_servers"][0]["next_refresh_at"] is None
+    assert body["mcp_servers"][1]["state"] == "unhealthy"
+    assert body["mcp_servers"][1]["next_refresh_at"] is not None

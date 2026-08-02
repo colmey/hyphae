@@ -110,8 +110,15 @@ class _AppMCPManager:
     connected_servers: list[str] = []
     instances: list[_AppMCPManager] = []
 
-    def __init__(self, config: MCPConfig, *, connect_timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        config: MCPConfig,
+        *,
+        connect_timeout_seconds: float,
+        catalog_ttl_seconds: float,
+    ) -> None:
         self.connect_timeout_seconds = connect_timeout_seconds
+        self.catalog_ttl_seconds = catalog_ttl_seconds
         self.shutdown_calls = 0
         self.instances.append(self)
 
@@ -152,6 +159,7 @@ def _wire_lifespan_dependencies(
         ),
         mcp_config_path="mcp.yaml",
         mcp_connect_timeout_seconds=17.5,
+        mcp_catalog_ttl_seconds=123.0,
         orchestration_enabled=orchestration_enabled,
         session_ttl_seconds=0,
         session_capacity=0,
@@ -549,6 +557,7 @@ async def test_disabled_orchestration_builds_one_unorchestrated_client_and_injec
         pass
 
     assert _AppMCPManager.instances[0].connect_timeout_seconds == 17.5
+    assert _AppMCPManager.instances[0].catalog_ttl_seconds == 123.0
     assert build_calls == 1
     assert default.close_calls == 1
 

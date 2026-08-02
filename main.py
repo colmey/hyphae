@@ -235,6 +235,7 @@ async def lifespan(app: FastAPI):
         mcp = MCPManager(
             mcp_config,
             connect_timeout_seconds=settings.mcp_connect_timeout_seconds,
+            catalog_ttl_seconds=settings.mcp_catalog_ttl_seconds,
         )
         await mcp.startup()
 

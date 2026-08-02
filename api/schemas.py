@@ -12,6 +12,7 @@ harness still uses:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import BaseModel, Field
@@ -48,6 +49,10 @@ class MCPServerHealth(BaseModel):
     state: MCPServerState
     last_error: str | None
     tool_count: int
+    catalog_revision: int
+    last_discovered_at: datetime | None
+    next_refresh_at: datetime | None
+    active_leases: int
 
 
 class HealthResponse(BaseModel):

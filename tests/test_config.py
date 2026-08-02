@@ -105,6 +105,7 @@ def test_settings_load_without_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.llm.max_tokens > 0
     assert settings.loop_max_iterations > 0
     assert settings.mcp_connect_timeout_seconds == 30
+    assert settings.mcp_catalog_ttl_seconds == 300
     assert settings.openai_compat_tool_activity_mode == "reasoning"
     assert settings.openai_compat_tool_activity_max_chars == 2000
 
@@ -234,6 +235,13 @@ def test_mcp_connect_timeout_accepts_disabled_and_positive_values(value: float) 
     settings = Settings(_env_file=None, mcp_connect_timeout_seconds=value)
 
     assert settings.mcp_connect_timeout_seconds == value
+
+
+@pytest.mark.parametrize("value", [0, -1, 45.5])
+def test_mcp_catalog_ttl_accepts_disabled_and_positive_values(value: float) -> None:
+    settings = Settings(_env_file=None, mcp_catalog_ttl_seconds=value)
+
+    assert settings.mcp_catalog_ttl_seconds == value
 
 
 def test_load_mcp_config_and_filter_disabled_servers(tmp_path) -> None:

@@ -1,37 +1,41 @@
-# mcp_layer/client.py
-
-"""Per-server MCP client wrapper; MCPManager handles aggregation/namespacing."""
+"""Task-local MCP connections; :mod:`mcp_layer.manager` owns catalogs and leases."""
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, AsyncContextManager, Protocol
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
-from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamable_http_client
 
 from config import MCPServerConfig, SSEServer, StdioServer, StreamableHTTPServer
 
 logger = logging.getLogger(__name__)
 
+_NON_TEXT_MAX_CHARS = 2_000
+_NON_TEXT_RESULT_MAX_CHARS = 20_000
+_OMITTED = "[omitted]"
+_ADDITIONAL_NON_TEXT_OMITTED = "[additional non-text content omitted]"
 
-@dataclass
+
+@dataclass(frozen=True, slots=True)
 class Tool:
     """A tool exposed by an MCP server (un-namespaced)."""
 
     name: str
     description: str
-    input_schema: dict[str, Any]
+    input_schema: Mapping[str, Any]
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ToolCallResult:
-    """Result of a tool call. `content` is the concatenated text output."""
+    """Result of a tool call. ``content`` is flattened text output."""
 
     content: str
     is_error: bool
@@ -45,149 +49,180 @@ class MCPTransportError(RuntimeError):
         self.cause = cause
 
 
+def _bounded(value: str, limit: int = _NON_TEXT_MAX_CHARS) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 14]}...[truncated]"
+
+
+def _render_non_text(block: Any) -> str:
+    """Render metadata only; never copy binary/blob resource payloads."""
+    block_type = getattr(block, "type", None) or type(block).__name__
+    metadata: dict[str, Any] = {"type": str(block_type)}
+    for source, target in (
+        ("name", "name"),
+        ("title", "title"),
+        ("uri", "uri"),
+        ("mimeType", "mime_type"),
+        ("mime_type", "mime_type"),
+        ("size", "size"),
+    ):
+        value = getattr(block, source, None)
+        if value is not None and target not in metadata:
+            metadata[target] = _bounded(str(value), 512)
+    for payload_name in ("data", "blob", "resource"):
+        if getattr(block, payload_name, None) is not None:
+            metadata[payload_name] = _OMITTED
+    try:
+        rendered = json.dumps(
+            metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError):  # pragma: no cover - values are normalized above.
+        rendered = json.dumps({"type": type(block).__name__}, sort_keys=True)
+    return _bounded(rendered)
+
+
+class MCPConnection:
+    """One initialized task-local SDK session."""
+
+    def __init__(
+        self,
+        name: str,
+        config: MCPServerConfig,
+        session: ClientSession,
+    ) -> None:
+        self._name = name
+        self._config = config
+        self._session = session
+
+    async def list_tools(self) -> list[Tool]:
+        """Fetch the raw live tool list for manager-owned validation."""
+        response = await self._session.list_tools()
+        return [
+            Tool(
+                name=tool.name,
+                description=(tool.description if tool.description is not None else ""),
+                input_schema=(
+                    tool.inputSchema
+                    if tool.inputSchema is not None
+                    else {"type": "object", "properties": {}}
+                ),
+            )
+            for tool in response.tools
+        ]
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolCallResult:
+        """Call one live, un-namespaced tool without replay."""
+        if tool_name in self._config.disabled_tools:
+            return ToolCallResult(
+                content=(f"tool {tool_name!r} is disabled on server {self._name!r}"),
+                is_error=True,
+            )
+        try:
+            result = await self._session.call_tool(tool_name, arguments)
+        except Exception as exc:
+            logger.warning(
+                "tool call %s.%s failed (%s)",
+                self._name,
+                tool_name,
+                type(exc).__name__,
+            )
+            raise MCPTransportError(exc) from exc
+
+        try:
+            parts: list[str] = []
+            non_text_chars = 0
+            for block in result.content:
+                text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    parts.append(text)
+                    continue
+                rendered = _render_non_text(block)
+                separator_chars = 1 if parts else 0
+                if (
+                    non_text_chars + separator_chars + len(rendered)
+                    > _NON_TEXT_RESULT_MAX_CHARS
+                ):
+                    parts.append(_ADDITIONAL_NON_TEXT_OMITTED)
+                    break
+                parts.append(rendered)
+                non_text_chars += separator_chars + len(rendered)
+            return ToolCallResult(
+                content="\n".join(parts) if parts else "",
+                is_error=bool(result.isError),
+            )
+        except Exception as exc:
+            logger.warning(
+                "tool result %s.%s could not be decoded (%s)",
+                self._name,
+                tool_name,
+                type(exc).__name__,
+            )
+            raise MCPTransportError(exc) from exc
+
+
+class ManagedConnection(Protocol):
+    """Connection operations consumed by discovery and turn leases."""
+
+    async def list_tools(self) -> list[Tool]: ...
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolCallResult: ...
+
+
+class ManagedClient(Protocol):
+    """Factory for independently owned task-local MCP connections."""
+
+    def open(self) -> AsyncContextManager[ManagedConnection]: ...
+
+
+ClientFactory = Callable[[str, MCPServerConfig], ManagedClient]
+
+
 class MCPClient:
-    """Manages the connection and session for one MCP server."""
+    """Create independent task-local connections for one configured server."""
 
     def __init__(self, name: str, server_config: MCPServerConfig) -> None:
         self.name = name
         self.config = server_config
-        self._session: ClientSession | None = None
-        self._exit_stack: AsyncExitStack | None = None
-        self._tools: list[Tool] = []
 
-    @property
-    def tools(self) -> list[Tool]:
-        """Tools advertised by this server (filtered by disabled_tools)."""
-        return self._tools
-
-    @property
-    def is_connected(self) -> bool:
-        return self._session is not None
-
-    async def connect(self) -> None:
-        """Open transport, initialize the session, and fetch tools."""
-        if self._session is not None:
-            raise RuntimeError(f"MCPClient {self.name!r} is already connected")
-
-        stack = AsyncExitStack()
-        connected = False
-        primary_error: BaseException | None = None
-        try:
+    @asynccontextmanager
+    async def open(self) -> AsyncIterator[MCPConnection]:
+        """Enter transport and session contexts, and exit them in this task."""
+        async with AsyncExitStack() as stack:
             if isinstance(self.config, StreamableHTTPServer):
-                logger.info(
-                    "connecting to %r via streamable-http: %s",
-                    self.name,
-                    self.config.url,
-                )
+                logger.info("connecting to %r via streamable-http", self.name)
                 read, write, _ = await stack.enter_async_context(
-                    streamablehttp_client(self.config.url)
+                    streamable_http_client(self.config.url)
                 )
             elif isinstance(self.config, SSEServer):
-                logger.info("connecting to %r via sse: %s", self.name, self.config.url)
+                logger.info("connecting to %r via sse", self.name)
                 read, write = await stack.enter_async_context(
                     sse_client(self.config.url)
                 )
             elif isinstance(self.config, StdioServer):
-                logger.info(
-                    "connecting to %r via stdio: %s", self.name, self.config.command
-                )
+                logger.info("connecting to %r via stdio", self.name)
                 params = StdioServerParameters(
                     command=self.config.command,
                     args=self.config.args,
                     env=self.config.env or None,
                 )
                 read, write = await stack.enter_async_context(stdio_client(params))
-            else:  # pragma: no cover -- exhaustive over the discriminated union
+            else:  # pragma: no cover - exhaustive discriminated union.
                 raise TypeError(f"unknown transport: {type(self.config).__name__}")
 
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-
-            tool_response = await session.list_tools()
-            disabled = set(self.config.disabled_tools)
-            self._tools = [
-                Tool(
-                    name=t.name,
-                    description=t.description or "",
-                    input_schema=t.inputSchema or {"type": "object", "properties": {}},
-                )
-                for t in tool_response.tools
-                if t.name not in disabled
-            ]
-
-            self._session = session
-            self._exit_stack = stack
-            connected = True
-            logger.info(
-                "connected to %r: %d tool(s) available", self.name, len(self._tools)
-            )
-        except BaseException as exc:
-            primary_error = exc
-            raise
-        finally:
-            # CancelledError from failed transports is BaseException, so cleanup
-            # must live in finally rather than `except Exception`.
-            if not connected:
-                try:
-                    await stack.aclose()
-                except asyncio.CancelledError:
-                    # A new application cancellation takes precedence over an
-                    # ordinary connection error. If cancellation was already the
-                    # primary outcome, preserve that original cancellation.
-                    if not isinstance(primary_error, asyncio.CancelledError):
-                        raise
-                    logger.warning(
-                        "cleanup after cancelled connection to %r was cancelled",
-                        self.name,
-                    )
-                except BaseException:
-                    if primary_error is None:
-                        raise
-                    # Cleanup failure must not replace a timeout, connection
-                    # exception, or application cancellation already in flight.
-                    logger.warning(
-                        "cleanup after failed connection to %r failed",
-                        self.name,
-                        exc_info=True,
-                    )
-
-    async def call_tool(
-        self, tool_name: str, arguments: dict[str, Any]
-    ) -> ToolCallResult:
-        """Call a tool by its un-namespaced name."""
-        if self._session is None:
-            raise RuntimeError(f"MCPClient {self.name!r} is not connected")
-
-        if tool_name in self.config.disabled_tools:
-            return ToolCallResult(
-                content=f"tool {tool_name!r} is disabled on server {self.name!r}",
-                is_error=True,
-            )
-
-        try:
-            result = await self._session.call_tool(tool_name, arguments)
-        except Exception as exc:
-            logger.exception("tool call %s.%s failed", self.name, tool_name)
-            raise MCPTransportError(exc) from exc
-
-        parts: list[str] = []
-        for block in result.content:
-            text = getattr(block, "text", None)
-            parts.append(text if text is not None else repr(block))
-
-        return ToolCallResult(
-            content="\n".join(parts) if parts else "",
-            is_error=bool(result.isError),
-        )
-
-    async def aclose(self) -> None:
-        """Tear down the session and transport."""
-        if self._exit_stack is None:
-            return
-        try:
-            await self._exit_stack.aclose()
-        finally:
-            self._session = None
-            self._exit_stack = None
-            self._tools = []
-            logger.info("closed connection to %r", self.name)
+            logger.info("initialized connection to %r", self.name)
+            yield MCPConnection(self.name, self.config, session)
+        logger.info("closed connection to %r", self.name)

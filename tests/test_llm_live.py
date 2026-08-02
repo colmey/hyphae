@@ -29,7 +29,7 @@ from llm import (
     build_llm_client,
 )
 from llm.schemas import TextBlock
-from mcp_layer import MCPManager
+from mcp_layer import MCPManager, TurnToolRuntime
 
 
 logging.basicConfig(
@@ -68,7 +68,7 @@ async def scenario_1_no_tools(llm: LLMClient) -> None:
     _print_response_summary("response", response)
 
 
-async def scenario_2_with_tools(llm: LLMClient, mcp: MCPManager) -> None:
+async def scenario_2_with_tools(llm: LLMClient, mcp: TurnToolRuntime) -> None:
     print("=" * 70)
     print("Scenario 2: completion with MCP tools attached")
     print("=" * 70)
@@ -97,7 +97,7 @@ async def scenario_2_with_tools(llm: LLMClient, mcp: MCPManager) -> None:
     return response
 
 
-async def scenario_3_full_roundtrip(llm: LLMClient, mcp: MCPManager) -> None:
+async def scenario_3_full_roundtrip(llm: LLMClient, mcp: TurnToolRuntime) -> None:
     print("=" * 70)
     print("Scenario 3: manual tool-result round-trip")
     print("=" * 70)
@@ -170,8 +170,10 @@ async def test_configured_llm_scenarios() -> None:
 
     try:
         await scenario_1_no_tools(llm)
-        await scenario_2_with_tools(llm, mcp)
-        await scenario_3_full_roundtrip(llm, mcp)
+        async with mcp.open_turn() as runtime:
+            await scenario_2_with_tools(llm, runtime)
+        async with mcp.open_turn() as runtime:
+            await scenario_3_full_roundtrip(llm, runtime)
     finally:
         await mcp.shutdown()
         print("shutdown complete")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 from agent import InMemorySessionStore, RunLimits, run_agent
@@ -74,6 +75,10 @@ class ScriptedMCP:
 
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
         return self._tools
+
+    @asynccontextmanager
+    async def open_turn(self, *, timeout_seconds: float | None = None):
+        yield self
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
         self.calls.append((name, arguments))

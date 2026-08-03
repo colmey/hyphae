@@ -33,6 +33,7 @@ from llm.schemas import (
     CompletionUsage,
     Message,
     ModelProfile,
+    ReasoningDelta,
     Role,
     StreamEnd,
     TextBlock,
@@ -74,9 +75,15 @@ def _response(
     return SimpleNamespace(candidates=candidate_items, usage_metadata=usage)
 
 
-def _text_part(text: str = "answer", signature: bytes | None = None) -> Any:
+def _text_part(
+    text: str = "answer",
+    signature: bytes | None = None,
+    *,
+    thought: bool = False,
+) -> Any:
     return SimpleNamespace(
         text=text,
+        thought=thought,
         thought_signature=signature,
         function_call=None,
     )
@@ -331,10 +338,11 @@ def test_function_call_is_authoritative_and_generated_id_has_exact_shape(
     assert tool_use.provider_metadata == {"thought_signature": signature}
 
 
-def test_response_text_signature_and_empty_parts() -> None:
+def test_response_text_drops_noncontinuation_signature_and_empty_parts() -> None:
     signature = b"text-signature"
     ignored = SimpleNamespace(
         text="",
+        thought=False,
         thought_signature=None,
         function_call=None,
     )
@@ -344,14 +352,93 @@ def test_response_text_signature_and_empty_parts() -> None:
         default_model="gemini-test",
     )
 
-    assert message.content == [
-        TextBlock(
-            text="answer",
-            provider_metadata={"thought_signature": signature},
-        )
-    ]
+    assert message.content == [TextBlock(text="answer")]
     assert message.stop_reason == "end_turn"
     assert message.reasoning is None
+
+
+def test_thought_only_response_is_reasoning_without_visible_or_replayed_text() -> None:
+    signature = b"thought-signature"
+
+    message = response_to_message(
+        _response(
+            parts=[
+                genai_types.Part(
+                    text="  private reasoning  ",
+                    thought=True,
+                    thought_signature=signature,
+                )
+            ]
+        ),
+        default_model="gemini-test",
+    )
+
+    assert message.reasoning == "private reasoning"
+    assert message.content == []
+    assert message.stop_reason == "empty"
+    assert message.to_message() == Message.assistant([])
+    assert messages_to_contents([message.to_message()]) == []
+
+
+def test_thought_and_answer_are_separated_and_only_answer_is_replayed() -> None:
+    message = response_to_message(
+        _response(
+            parts=[
+                _text_part(" first ", thought=True),
+                _text_part("second", thought=True),
+                _text_part("answer", b"answer-signature"),
+            ]
+        ),
+        default_model="gemini-test",
+    )
+
+    assert message.reasoning == "first second"
+    assert message.content == [TextBlock("answer")]
+    assert message.stop_reason == "end_turn"
+    replay = messages_to_contents([message.to_message()])
+    assert [part.text for part in replay[0].parts] == ["answer"]
+    assert replay[0].parts[0].thought_signature is None
+
+
+def test_thought_and_tool_preserve_only_function_call_continuation_metadata() -> None:
+    thought_signature = b"thought-signature"
+    call_signature = b"call-signature"
+    function_call = SimpleNamespace(name="srv__tool", args={"q": "x"})
+
+    message = response_to_message(
+        _response(
+            parts=[
+                _text_part(
+                    "private reasoning",
+                    thought_signature,
+                    thought=True,
+                ),
+                SimpleNamespace(
+                    text=None,
+                    thought=False,
+                    thought_signature=call_signature,
+                    function_call=function_call,
+                ),
+            ]
+        ),
+        default_model="gemini-test",
+    )
+
+    assert message.reasoning == "private reasoning"
+    assert message.stop_reason == "tool_use"
+    assert message.content == [
+        ToolUseBlock(
+            id=message.tool_uses()[0].id,
+            name="srv__tool",
+            input={"q": "x"},
+            provider_metadata={"thought_signature": call_signature},
+        )
+    ]
+    replay = messages_to_contents([message.to_message()])
+    assert len(replay[0].parts) == 1
+    assert replay[0].parts[0].function_call.name == function_call.name
+    assert replay[0].parts[0].function_call.args == function_call.args
+    assert replay[0].parts[0].thought_signature == call_signature
 
 
 def test_usage_coercion_preserves_valid_counts_and_zeros_malformed() -> None:
@@ -371,7 +458,7 @@ def test_usage_coercion_preserves_valid_counts_and_zeros_malformed() -> None:
     assert usage_from_response(SimpleNamespace()) == CompletionUsage()
 
 
-def test_messages_preserve_roles_blocks_errors_and_thought_signatures() -> None:
+def test_messages_preserve_roles_blocks_errors_and_tool_thought_signatures() -> None:
     signature = b"opaque-signature"
     messages = [
         Message.user("hello"),
@@ -411,7 +498,7 @@ def test_messages_preserve_roles_blocks_errors_and_thought_signatures() -> None:
 
     assert [content.role for content in contents] == ["user", "model", "user"]
     assert contents[0].parts[0].text == "hello"
-    assert contents[1].parts[0].thought_signature == signature
+    assert contents[1].parts[0].thought_signature is None
     assert contents[1].parts[1].thought_signature == signature
     assert contents[1].parts[1].function_call.name == "srv__tool"
     assert contents[1].parts[1].function_call.args == {"q": "x"}
@@ -600,7 +687,15 @@ async def test_client_invokes_sdk_and_logs_call_metadata(
 async def test_client_inherits_coarse_streaming(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, _ = _constructed_client(monkeypatch)
+    capture = _CaptureGenerate(
+        _response(
+            parts=[
+                _text_part("private reasoning", thought=True),
+                _text_part("answer"),
+            ]
+        )
+    )
+    client, _ = _constructed_client(monkeypatch, capture=capture)
 
     chunks = [
         chunk
@@ -609,9 +704,13 @@ async def test_client_inherits_coarse_streaming(
         )
     ]
 
-    assert chunks[0] == TextDelta("answer")
-    assert isinstance(chunks[1], StreamEnd)
-    assert chunks[1].message.text_blocks() == [TextBlock("answer")]
+    assert chunks[0] == ReasoningDelta("private reasoning")
+    assert chunks[1] == TextDelta("answer")
+    assert isinstance(chunks[2], StreamEnd)
+    assert chunks[2].message.text_blocks() == [TextBlock("answer")]
+    assert chunks[2].message.to_message() == Message.assistant(
+        [TextBlock("answer")]
+    )
 
 
 def test_transient_error_classification(

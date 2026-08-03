@@ -85,11 +85,7 @@ def messages_to_contents(
         for block in message.content:
             if isinstance(block, TextBlock):
                 if block.text:
-                    part_kwargs: dict[str, Any] = {"text": block.text}
-                    signature = block.provider_metadata.get("thought_signature")
-                    if signature is not None:
-                        part_kwargs["thought_signature"] = signature
-                    parts.append(genai_types.Part(**part_kwargs))
+                    parts.append(genai_types.Part(text=block.text))
             elif isinstance(block, ToolUseBlock):
                 tool_part_kwargs: dict[str, Any] = {
                     "function_call": genai_types.FunctionCall(
@@ -206,6 +202,7 @@ def response_to_message(
     """Convert a Gemini generation response into a canonical assistant message."""
     active_logger = logger or _LOGGER
     blocks: list[ContentBlock] = []
+    reasoning_parts: list[str] = []
 
     candidates = getattr(response, "candidates", None) or []
     if not candidates:
@@ -224,18 +221,25 @@ def response_to_message(
     parts = getattr(content, "parts", None) if content else None
 
     for part in parts or []:
-        signature = getattr(part, "thought_signature", None)
-        metadata: dict[str, Any] = {}
-        if signature is not None:
-            metadata["thought_signature"] = signature
-
         text = getattr(part, "text", None)
+        if getattr(part, "thought", False):
+            if text:
+                reasoning_parts.append(text)
+            continue
+
+        signature = getattr(part, "thought_signature", None)
+
         if text:
-            blocks.append(TextBlock(text=text, provider_metadata=metadata))
+            blocks.append(TextBlock(text=text))
             continue
 
         function_call = getattr(part, "function_call", None)
         if function_call is not None:
+            metadata = (
+                {"thought_signature": signature}
+                if signature is not None
+                else {}
+            )
             blocks.append(
                 ToolUseBlock(
                     id=f"call_{uuid.uuid4().hex[:12]}",
@@ -263,6 +267,7 @@ def response_to_message(
         raw_stop_reason=raw_stop_reason(finish_reason),
         model=default_model,
         usage=usage_from_response(response),
+        reasoning="".join(reasoning_parts).strip() or None,
     )
 
 

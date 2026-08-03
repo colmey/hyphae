@@ -106,7 +106,7 @@ class OrchestratedRouting:
 type RoutingRuntime = UnorchestratedRouting | OrchestratedRouting
 
 
-class _TurnToolProvider(Protocol):
+class TurnToolProvider(Protocol):
     """Accepted-turn factory for a neutral, turn-local tool runtime."""
 
     def open_turn(
@@ -151,7 +151,7 @@ class TurnRunner:
 
     routing: RoutingRuntime
     limits: RunLimits
-    mcp: _TurnToolProvider
+    mcp: TurnToolProvider
     store: SessionStore
     guard: SessionGuard
     policy: ToolPolicy | None

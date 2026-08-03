@@ -173,7 +173,7 @@ class _CompiledArgumentValidator:
 
     name: str
     concrete: _ConcreteSchemaValidator
-    log: logging.Logger | logging.LoggerAdapter
+    log: logging.Logger | logging.LoggerAdapter[logging.Logger]
     _disabled: bool = field(default=False, init=False)
 
     def validate(self, args: dict[str, Any]) -> str | None:
@@ -200,7 +200,7 @@ class _CompiledArgumentValidator:
 def _compile_tool_validators(
     tools: Sequence[Mapping[str, Any]],
     *,
-    log: logging.Logger | logging.LoggerAdapter = logger,
+    log: logging.Logger | logging.LoggerAdapter[logging.Logger] = logger,
 ) -> dict[str, _ArgumentValidator]:
     """Compile each advertised tool schema once for this run."""
     schemas = {str(tool["name"]): tool.get("input_schema") or {} for tool in tools}
@@ -235,7 +235,7 @@ class ToolDispatcher:
         tools: Sequence[Mapping[str, Any]],
         limits: RunLimits,
         context: RunContext,
-        log: logging.Logger | logging.LoggerAdapter,
+        log: logging.Logger | logging.LoggerAdapter[logging.Logger],
     ) -> None:
         self._runtime = runtime
         self._policy = policy

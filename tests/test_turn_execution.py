@@ -9,23 +9,26 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
 import api.schemas as api_schemas
 import api.dependencies as api_dependencies
 import main as main_module
 from agent import (
     DoneEvent,
+    InMemorySessionStore,
     OrchestrationDecisionEvent,
     RunLimits,
     Session,
     SessionGuard,
     Tracer,
 )
+from api.dependencies import get_application_runtime
 from agent.runtime import ModelLimits
 from api.schemas import TokenUsage
 from api.turn import (
@@ -50,7 +53,7 @@ from tooling import ToolCallResult
 from orchestrator import Orchestrator
 from orchestrator.contracts import ModelRegistry, RoutingService
 from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
-from tests._app_support import wired_app
+from tests._app_support import runtime_of, wired_app
 
 pytestmark = pytest.mark.anyio
 
@@ -603,9 +606,13 @@ async def test_native_sse_trace_and_logs_share_one_run_id(
     tracer = RecordingTracer()
 
     caplog.set_level(logging.INFO)
-    with wired_app(agent, mcp=mcp, registry=registry) as (app, _settings_obj):
-        app.state.orchestrator = orchestrator
-        app.state.tracer = tracer
+    with wired_app(
+        agent,
+        mcp=mcp,
+        registry=registry,
+        orchestrator=orchestrator,
+        tracer=tracer,
+    ) as (app, _settings_obj):
         response = await asgi_client(app).post("/chat/stream", content="hello")
 
     events = parse_sse(response.text)
@@ -616,6 +623,36 @@ async def test_native_sse_trace_and_logs_share_one_run_id(
     assert tracer.records[0]["type"] == "orchestration"
     assert {record["run_id"] for record in tracer.records} == {run_id}
     assert any(f"[run {run_id}]" in record.getMessage() for record in caplog.records)
+
+
+async def test_native_runtime_override_uses_one_store_for_resolution_and_execution(
+    asgi_client,
+) -> None:
+    agent = AnswerLLM()
+    alternate_store = InMemorySessionStore()
+    with wired_app(agent) as (app, _settings_obj):
+        original_runtime = runtime_of(app)
+        overridden_runtime = replace(original_runtime, store=alternate_store)
+        app.dependency_overrides[get_application_runtime] = lambda: overridden_runtime
+        try:
+            response = await asgi_client(app).post("/chat", content="hello")
+        finally:
+            app.dependency_overrides.pop(get_application_runtime, None)
+
+        response.raise_for_status()
+        session_id = response.headers["X-Session-Id"]
+        assert original_runtime.store.ids() == []
+        assert alternate_store.ids() == [session_id]
+        assert len((await alternate_store.get(session_id)).messages) == 2
+
+
+async def test_application_runtime_accessor_rejects_untyped_state() -> None:
+    app = FastAPI()
+    app.state.runtime = object()
+    request = Request({"type": "http", "app": app})
+
+    with pytest.raises(RuntimeError, match="application runtime is unavailable"):
+        await get_application_runtime(request)
 
 
 async def test_unorchestrated_metadata_reports_executing_model_without_decision() -> (

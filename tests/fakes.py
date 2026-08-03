@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from agent import InMemorySessionStore, RunLimits, run_agent
+from agent import Event, InMemorySessionStore, RunLimits, run_agent
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage
-from tooling import ToolCallResult
+from tooling import ToolCallResult, ToolRuntime
 
 
 class ScriptedLLM(LLMClient):
@@ -77,7 +77,9 @@ class ScriptedMCP:
         return self._tools
 
     @asynccontextmanager
-    async def open_turn(self, *, timeout_seconds: float | None = None):
+    async def open_turn(
+        self, *, timeout_seconds: float | None = None
+    ) -> AsyncIterator[ToolRuntime]:
         yield self
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
@@ -95,15 +97,29 @@ class ScriptedMCP:
 async def collect_agent_events(
     *,
     llm: LLMClient,
-    mcp: Any,
+    mcp: ToolRuntime,
     prompt: str = "go",
-    **run_options: Any,
-) -> list[Any]:
+    stream: bool = False,
+    max_iterations: int = 10,
+    max_tokens: int | None = None,
+    llm_timeout_seconds: float | None = None,
+    tool_timeout_seconds: float | None = None,
+    max_retries: int = 0,
+    retry_base_delay: float = 0.5,
+    tool_result_max_chars: int | None = None,
+    max_run_tokens: int | None = None,
+    max_run_seconds: float | None = None,
+    abort_after_consecutive_tool_failures: int | None = None,
+    context_strategy: str = "naive",
+    context_window: int | None = None,
+    context_safety_margin_tokens: int = 1024,
+    context_recent_messages: int = 6,
+    context_summary_max_tokens: int = 512,
+) -> list[Event]:
     """Create an isolated session and collect one complete agent event stream."""
     store = InMemorySessionStore()
     session = await store.create()
     session.append_user(prompt)
-    stream = bool(run_options.pop("stream", False))
     return [
         event
         async for event in run_agent(
@@ -111,7 +127,25 @@ async def collect_agent_events(
             llm=llm,
             mcp=mcp,
             store=store,
-            limits=RunLimits(**run_options),
+            limits=RunLimits(
+                max_iterations=max_iterations,
+                max_tokens=max_tokens,
+                llm_timeout_seconds=llm_timeout_seconds,
+                tool_timeout_seconds=tool_timeout_seconds,
+                max_retries=max_retries,
+                retry_base_delay=retry_base_delay,
+                tool_result_max_chars=tool_result_max_chars,
+                max_run_tokens=max_run_tokens,
+                max_run_seconds=max_run_seconds,
+                abort_after_consecutive_tool_failures=(
+                    abort_after_consecutive_tool_failures
+                ),
+                context_strategy=context_strategy,
+                context_window=context_window,
+                context_safety_margin_tokens=context_safety_margin_tokens,
+                context_recent_messages=context_recent_messages,
+                context_summary_max_tokens=context_summary_max_tokens,
+            ),
             stream=stream,
         )
     ]

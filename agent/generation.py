@@ -45,7 +45,7 @@ class _AttemptController:
 
     limits: RunLimits
     context: RunContext
-    log: logging.Logger | logging.LoggerAdapter
+    log: logging.Logger | logging.LoggerAdapter[logging.Logger]
 
     @property
     def total_attempts(self) -> int:
@@ -185,7 +185,7 @@ async def _read_stream_chunk(
 async def _close_stream(
     stream: Any,
     *,
-    log: logging.Logger | logging.LoggerAdapter = logger,
+    log: logging.Logger | logging.LoggerAdapter[logging.Logger] = logger,
 ) -> None:
     """Best-effort close one provider iterator without hiding its outcome."""
     close = getattr(stream, "aclose", None)
@@ -212,7 +212,8 @@ async def _close_stream(
 
 def _backoff_delay_seconds(base_delay: float, attempt: int) -> float:
     """Return capped exponential backoff plus the existing jitter range."""
-    return min(_RETRY_BACKOFF_CAP_SECONDS, base_delay * (2**attempt)) + random.uniform(
+    exponential: int | float = 2**attempt
+    return min(_RETRY_BACKOFF_CAP_SECONDS, base_delay * exponential) + random.uniform(
         0, base_delay
     )
 
@@ -224,7 +225,7 @@ async def generate_with_retry(
     limits: RunLimits,
     context: RunContext,
     stream: bool,
-    log: logging.Logger | logging.LoggerAdapter,
+    log: logging.Logger | logging.LoggerAdapter[logging.Logger],
 ) -> AsyncGenerator[StreamChunk, None]:
     """Normalize buffered or streaming attempts into canonical stream chunks."""
     attempts = _AttemptController(limits=limits, context=context, log=log)

@@ -8,7 +8,7 @@ Typed file-config (ModelEntry/ModelsConfig) lives in the config package.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -78,7 +78,7 @@ class ToolPreferences:
         return bool(self.preferred_tools)
 
     @classmethod
-    def from_request(cls, prefs: Iterable) -> "ToolPreferences":
+    def from_request(cls, prefs: Iterable[Any]) -> "ToolPreferences":
         """Normalize direct-caller server preferences into namespaced tools."""
         preferred: list[str] = []
         arg_hints: dict[str, list[str]] = {}

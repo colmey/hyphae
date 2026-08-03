@@ -6,24 +6,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from agent import (
     InMemorySessionStore,
+    RunLimits,
     SessionGuard,
     Tracer,
     build_tool_policy,
     build_tracer,
 )
 from api import router
+from api.dependencies import ApplicationRuntime
 from api.openai_compatible import openai_auth_exception_handler
+from api.turn import OrchestratedRouting, RoutingRuntime, UnorchestratedRouting
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from llm import LLMClient, build_llm_client
 from mcp_runtime import MCPManager
 from config import (
+    Settings,
     get_settings,
     load_mcp_config_from_settings,
     load_models_config_from_settings,
@@ -125,7 +129,7 @@ async def _start_optional_tracer(tracer: Tracer | None) -> Tracer | None:
 
 
 def _try_build_orchestration(
-    settings,
+    settings: Settings,
 ) -> tuple[LLMRegistry | None, Orchestrator | None]:
     """Build optional orchestration, degrading only on optional absence.
 
@@ -196,7 +200,7 @@ def _try_build_orchestration(
 
 def _log_ready_summary(
     *,
-    settings,
+    settings: Settings,
     mcp: MCPManager,
     registry: LLMRegistry | None,
 ) -> None:
@@ -219,7 +223,7 @@ def _log_ready_summary(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup/shutdown lifecycle."""
     # Settings fail loud if env/config is broken. The unorchestrated LLM is
     # constructed only when orchestration is disabled or unavailable.
@@ -265,15 +269,27 @@ async def lifespan(app: FastAPI):
             build_tracer(enabled=settings.trace_enabled, path=settings.trace_jsonl_path)
         )
 
-        app.state.settings = settings
-        app.state.unorchestrated_llm = unorchestrated_llm
-        app.state.mcp = mcp
-        app.state.store = store
-        app.state.guard = guard
-        app.state.registry = registry
-        app.state.orchestrator = orchestrator
-        app.state.policy = policy
-        app.state.tracer = tracer
+        routing: RoutingRuntime
+        if registry is not None and orchestrator is not None:
+            routing = OrchestratedRouting(
+                orchestrator=orchestrator,
+                registry=registry,
+            )
+        else:
+            routing = UnorchestratedRouting(
+                llm=unorchestrated_llm,
+                model_id=settings.llm.model,
+            )
+        app.state.runtime = ApplicationRuntime(
+            settings=settings,
+            routing=routing,
+            limits=RunLimits.from_settings(settings),
+            mcp=mcp,
+            store=store,
+            guard=guard,
+            policy=policy,
+            tracer=tracer,
+        )
 
         _log_ready_summary(
             settings=settings,

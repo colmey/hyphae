@@ -85,7 +85,7 @@ async def test_configured_request_concurrency() -> None:
             for session_id, response in zip(session_ids, responses):
                 # 2 == user + assistant. Anything larger would mean another
                 # request's turns bled into this session.
-                session = await app.state.store.get(session_id)
+                session = await app.state.runtime.store.get(session_id)
                 assert len(session.messages) == 2, (
                     f"session {session_id} has {len(session.messages)} messages; "
                     "expected 2 (history bled across concurrent requests?)"

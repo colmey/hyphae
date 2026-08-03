@@ -9,6 +9,7 @@ import pytest
 
 from agent import InMemorySessionStore, Session
 from api import openai_compatible
+from api.turn import UnorchestratedRouting
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
@@ -22,7 +23,7 @@ from llm.schemas import (
 from config import load_models_config
 from orchestrator import LLMRegistry
 from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
-from tests._app_support import wired_app
+from tests._app_support import replace_routing, runtime_of, wired_app
 
 
 pytestmark = pytest.mark.anyio
@@ -145,7 +146,14 @@ async def test_models_returns_registry_in_openai_list_shape(asgi_client) -> None
     llm = FakeLLM()
     with wired_app(llm) as (app, settings):
         registry = _registry(settings)
-        app.state.registry = registry
+        replace_routing(
+            app,
+            UnorchestratedRouting(
+                llm=llm,
+                model_id=settings.llm.model,
+                inventory=registry,
+            ),
+        )
         response = await asgi_client(app).get("/v1/models")
 
     response.raise_for_status()
@@ -323,7 +331,8 @@ async def test_repeated_v1_calls_never_publish_sessions(
 ) -> None:
     llm = FakeLLM()
     with wired_app(llm) as (app, _settings):
-        initial_ids = app.state.store.ids()
+        store = runtime_of(app).store
+        initial_ids = store.ids()
         client = asgi_client(app)
         for _ in range(4):
             payload = {
@@ -343,14 +352,14 @@ async def test_repeated_v1_calls_never_publish_sessions(
                 response = await client.post("/v1/chat/completions", json=payload)
                 response.raise_for_status()
 
-        assert len(app.state.store) == len(initial_ids)
-        assert app.state.store.ids() == initial_ids
+        assert len(store) == len(initial_ids)
+        assert store.ids() == initial_ids
 
 
 async def test_v1_traffic_cannot_evict_native_session_at_capacity(asgi_client) -> None:
     llm = FakeLLM()
-    with wired_app(llm) as (app, _settings):
-        app.state.store = InMemorySessionStore(max_count=1)
+    store = InMemorySessionStore(max_count=1)
+    with wired_app(llm, store=store) as (app, _settings):
         client = asgi_client(app)
         native = await client.post("/chat", content="native first turn")
         native.raise_for_status()
@@ -363,7 +372,7 @@ async def test_v1_traffic_cannot_evict_native_session_at_capacity(asgi_client) -
             )
             response.raise_for_status()
 
-        assert app.state.store.ids() == [session_id]
+        assert store.ids() == [session_id]
         continued = await client.post(
             "/chat",
             content="native follow-up",
@@ -371,7 +380,7 @@ async def test_v1_traffic_cannot_evict_native_session_at_capacity(asgi_client) -
         )
         continued.raise_for_status()
         assert continued.headers["X-Session-Id"] == session_id
-        assert len((await app.state.store.get(session_id)).messages) == 4
+        assert len((await store.get(session_id)).messages) == 4
 
 
 @pytest.mark.parametrize(
@@ -390,8 +399,11 @@ async def test_reports_the_model_that_orchestration_actually_executes(
     requested = FakeLLM()
     registry = RegistryStub({"selected": selected, "requested": requested})
     orchestrator = SelectingOrchestrator()
-    with wired_app(selected, registry=registry) as (app, _settings):
-        app.state.orchestrator = orchestrator
+    with wired_app(
+        selected,
+        registry=registry,
+        orchestrator=orchestrator,
+    ) as (app, _settings):
         payload: dict[str, Any] = {
             "messages": [{"role": "user", "content": "route me"}],
             "stream": stream,
@@ -437,9 +449,13 @@ async def test_unknown_model_is_rejected_before_session_inventory_or_execution(
         RegistryStub({"selected": llm, "requested": llm}) if orchestrated else None
     )
     orchestrator = SelectingOrchestrator() if orchestrated else None
-    with wired_app(llm, mcp=mcp, registry=registry) as (app, settings):
-        app.state.orchestrator = orchestrator
-        store = app.state.store
+    with wired_app(
+        llm,
+        mcp=mcp,
+        registry=registry,
+        orchestrator=orchestrator,
+    ) as (app, settings):
+        store = runtime_of(app).store
         initial_ids = store.ids()
         response = await asgi_client(app).post(
             "/v1/chat/completions",
@@ -503,7 +519,7 @@ async def test_ordered_history_replays_without_altering_user_content(
 async def test_trailing_assistant_is_rejected_instead_of_reordered(asgi_client) -> None:
     llm = FakeLLM()
     with wired_app(llm) as (app, _settings):
-        store = app.state.store
+        store = runtime_of(app).store
         response = await asgi_client(app).post(
             "/v1/chat/completions",
             json={

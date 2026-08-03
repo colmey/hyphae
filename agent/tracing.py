@@ -35,12 +35,12 @@ import base64
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from time import monotonic
-from typing import Protocol
+from typing import Any, Protocol
 
 from .events import (
     DoneEvent,
@@ -87,6 +87,7 @@ class _Stop:
 
 _STOP = _Stop()
 _QueueItem = str | _Stop
+type TraceRecord = dict[str, object]
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +105,7 @@ class Tracer(ABC):
         ...
 
     @abstractmethod
-    def emit(self, record: dict) -> None:
+    def emit(self, record: TraceRecord) -> None:
         """Submit one record without awaiting or performing file I/O."""
         ...
 
@@ -141,7 +142,7 @@ class NoOpTracer(Tracer):
     async def start(self) -> None:
         pass
 
-    def emit(self, record: dict) -> None:  # noqa: D401 - intentional no-op
+    def emit(self, record: TraceRecord) -> None:  # noqa: D401 - intentional no-op
         pass
 
     async def aclose(self) -> None:
@@ -250,7 +251,7 @@ class JSONLTracer(Tracer):
         self._accepting = True
         logger.info("tracing enabled: JSONL trace -> %s", _safe_path_display(self._path))
 
-    def emit(self, record: dict) -> None:
+    def emit(self, record: TraceRecord) -> None:
         if not self._accepting or self._queue is None:
             self._dropped += 1
             return
@@ -447,17 +448,21 @@ def build_tracer(*, enabled: bool, path: Path | str) -> Tracer | None:
 # ---------------------------------------------------------------------------
 
 
-class _RunLogAdapter(logging.LoggerAdapter):
+class _RunLogAdapter(logging.LoggerAdapter[logging.Logger]):
     """Prefixes every message with the run_id so per-request log lines correlate
     with their trace, regardless of the root formatter's layout."""
 
-    def process(self, msg, kwargs):
+    def process(
+        self, msg: Any, kwargs: MutableMapping[str, Any]
+    ) -> tuple[Any, MutableMapping[str, Any]]:
         extra = self.extra
         assert extra is not None
         return f"[run {extra['run_id']}] {msg}", kwargs
 
 
-def run_logger(base: logging.Logger, run_id: str) -> logging.LoggerAdapter:
+def run_logger(
+    base: logging.Logger, run_id: str
+) -> logging.LoggerAdapter[logging.Logger]:
     """A logger whose lines are tagged with `run_id`."""
     return _RunLogAdapter(base, {"run_id": run_id})
 
@@ -471,7 +476,7 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-def _json_default(obj):
+def _json_default(obj: object) -> str:
     """Last-resort JSON encoder for values that aren't natively serializable.
 
     Tool args/results originate from the model and are normally plain JSON, but
@@ -484,7 +489,7 @@ def _json_default(obj):
     return str(obj)
 
 
-def event_record(event: Event, *, run_id: str | None, step: int) -> dict:
+def event_record(event: Event, *, run_id: str | None, step: int) -> TraceRecord:
     """Map one loop event to a JSON-serializable trace record.
 
     Explicit per-type mapping (never `dataclasses.asdict`, which would walk into
@@ -493,7 +498,7 @@ def event_record(event: Event, *, run_id: str | None, step: int) -> dict:
     and per-step latency. provider_metadata itself is intentionally omitted — it
     is opaque round-trip state, not trace signal.
     """
-    rec: dict = {
+    rec: TraceRecord = {
         "run_id": run_id,
         "step": step,
         "ts": _now_iso(),

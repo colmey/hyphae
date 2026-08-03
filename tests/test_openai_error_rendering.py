@@ -66,6 +66,17 @@ class _RunRunner:
         )
 
 
+def _runtime(runner):
+    return SimpleNamespace(
+        settings=SimpleNamespace(
+            llm=SimpleNamespace(model="test-model"),
+            openai_compat_tool_activity_mode="hidden",
+            openai_compat_tool_activity_max_chars=2000,
+        ),
+        turn_runner=lambda: runner,
+    )
+
+
 class _HTTPErrorRunner(_RunRunner):
     async def run(self, _turn):
         raise HTTPException(status_code=409, detail="turn is busy")
@@ -232,10 +243,7 @@ def test_nonstream_invalid_done_reason_returns_openai_500(reason: str) -> None:
     response = asyncio.run(
         chat_completions(
             _Request(),
-            settings=SimpleNamespace(
-                llm=SimpleNamespace(model="test-model")
-            ),
-            runner=_RunRunner(reason),
+            runtime=_runtime(_RunRunner(reason)),
         )
     )
 
@@ -250,10 +258,7 @@ def test_nonstream_http_exception_preserves_status_and_openai_envelope() -> None
     response = asyncio.run(
         chat_completions(
             _Request(),
-            settings=SimpleNamespace(
-                llm=SimpleNamespace(model="test-model")
-            ),
-            runner=_HTTPErrorRunner("end_turn"),
+            runtime=_runtime(_HTTPErrorRunner("end_turn")),
         )
     )
 

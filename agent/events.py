@@ -16,7 +16,7 @@ boundary, not here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Union
+from typing import Any, Literal, Union
 
 
 @dataclass
@@ -42,7 +42,7 @@ class ToolCallEvent:
 
     id: str
     name: str
-    input: dict
+    input: dict[str, Any]
     type: Literal["tool_call"] = "tool_call"
 
 

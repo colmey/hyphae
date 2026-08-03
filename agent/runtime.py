@@ -19,27 +19,57 @@ class RunDeadlineExceeded(TimeoutError):
 class LLMRunSettings(Protocol):
     """Nested LLM execution values used to construct immutable run limits."""
 
-    max_tokens: int
-    timeout_seconds: float
-    max_retries: int
-    retry_base_delay: float
+    @property
+    def max_tokens(self) -> int: ...
+
+    @property
+    def timeout_seconds(self) -> float: ...
+
+    @property
+    def max_retries(self) -> int: ...
+
+    @property
+    def retry_base_delay(self) -> float: ...
 
 
 class RunSettings(Protocol):
     """Settings values used to construct immutable run limits."""
 
-    loop_max_iterations: int
-    llm: LLMRunSettings
-    tool_timeout_seconds: float
-    tool_result_max_chars: int
-    run_max_tokens: int
-    run_max_seconds: float
-    abort_after_consecutive_tool_failures: int
-    context_strategy: str
-    context_default_window_tokens: int
-    context_safety_margin_tokens: int
-    context_recent_messages: int
-    context_summary_max_tokens: int
+    @property
+    def loop_max_iterations(self) -> int: ...
+
+    @property
+    def llm(self) -> LLMRunSettings: ...
+
+    @property
+    def tool_timeout_seconds(self) -> float: ...
+
+    @property
+    def tool_result_max_chars(self) -> int: ...
+
+    @property
+    def run_max_tokens(self) -> int: ...
+
+    @property
+    def run_max_seconds(self) -> float: ...
+
+    @property
+    def abort_after_consecutive_tool_failures(self) -> int: ...
+
+    @property
+    def context_strategy(self) -> str: ...
+
+    @property
+    def context_default_window_tokens(self) -> int: ...
+
+    @property
+    def context_safety_margin_tokens(self) -> int: ...
+
+    @property
+    def context_recent_messages(self) -> int: ...
+
+    @property
+    def context_summary_max_tokens(self) -> int: ...
 
 
 class ModelLimits(Protocol):
@@ -109,7 +139,7 @@ class RunContext:
     started_at: float
     deadline: float | None
     run_id: str
-    logger: logging.LoggerAdapter
+    logger: logging.LoggerAdapter[logging.Logger]
     tracer: Tracer | None = None
     trace_step: int = 0
 

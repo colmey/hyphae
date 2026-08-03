@@ -464,7 +464,7 @@ async def test_shutdown_is_idempotent_and_opens_no_cleanup_connection() -> None:
 async def test_no_enabled_servers_has_empty_ok_health(asgi_client) -> None:
     manager = MCPManager(_config("disabled", disabled=("disabled",)))
     await manager.startup()
-    with wired_app(SimpleNamespace(), mcp=manager) as (app, _settings):
+    with wired_app(None, mcp=manager) as (app, _settings):
         response = await asgi_client(app).get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
@@ -480,7 +480,7 @@ async def test_health_distinguishes_idle_ready_and_degraded(asgi_client) -> None
     )
     await manager.startup()
 
-    with wired_app(SimpleNamespace(), mcp=manager) as (app, _settings):
+    with wired_app(None, mcp=manager) as (app, _settings):
         body = (await asgi_client(app).get("/health")).json()
 
     assert body["status"] == "degraded"

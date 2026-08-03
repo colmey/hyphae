@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
@@ -14,26 +14,23 @@ from sse_starlette.sse import EventSourceResponse
 
 from agent import (
     ReasoningEvent,
+    Session,
     SessionNotFoundError,
-    SessionStore,
 )
 from agent.tracing import event_record
-from mcp_runtime import MCPManager, MCPServerState
-from orchestrator import LLMRegistry
+from mcp_runtime import MCPServerState
 
 from .dependencies import (
-    get_mcp,
-    get_registry,
-    get_app_settings,
-    get_store,
-    get_turn_runner,
+    ApplicationRuntime,
+    get_application_runtime,
     require_api_key,
 )
 from .schemas import HealthResponse, MCPServerHealth
-from .turn import PersistencePolicy, TurnRequest, TurnRunner
+from .turn import OrchestratedRouting, PersistencePolicy, TurnRequest, TurnRunner
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+type _SSEFrame = dict[str, str]
 
 
 async def _prompt_from_body(request: Request) -> str:
@@ -46,23 +43,28 @@ async def _prompt_from_body(request: Request) -> str:
     return prompt
 
 
-async def _session_from_header(request: Request, store: SessionStore):
+async def _session_from_header(request: Request, runner: TurnRunner) -> Session:
     """Resolve or create the native session named by X-Session-Id."""
     session_id = request.headers.get("X-Session-Id")
     if not session_id:
-        return await store.create()
+        return await runner.store.create()
     try:
-        return await store.get(session_id)
+        return await runner.store.get(session_id)
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health(
-    mcp: MCPManager = Depends(get_mcp),
-    settings=Depends(get_app_settings),
-    registry: Optional[LLMRegistry] = Depends(get_registry),
+    runtime: ApplicationRuntime = Depends(get_application_runtime),
 ) -> HealthResponse:
+    mcp = runtime.mcp
+    settings = runtime.settings
+    registry = (
+        runtime.routing.registry
+        if isinstance(runtime.routing, OrchestratedRouting)
+        else runtime.routing.inventory
+    )
     server_statuses = mcp.status_snapshot()
     return HealthResponse(
         status=(
@@ -97,12 +99,12 @@ async def health(
 )
 async def chat(
     request: Request,
-    store: SessionStore = Depends(get_store),
-    runner: TurnRunner = Depends(get_turn_runner),
+    runtime: ApplicationRuntime = Depends(get_application_runtime),
 ) -> PlainTextResponse:
     # Resolve before routing so follow-up turns include conversation history.
     prompt = await _prompt_from_body(request)
-    session = await _session_from_header(request, store)
+    runner = runtime.turn_runner()
+    session = await _session_from_header(request, runner)
 
     result = await runner.run(
         TurnRequest(
@@ -123,8 +125,7 @@ async def chat(
 @router.post("/chat/stream", dependencies=[Depends(require_api_key)])
 async def chat_stream(
     request: Request,
-    store: SessionStore = Depends(get_store),
-    runner: TurnRunner = Depends(get_turn_runner),
+    runtime: ApplicationRuntime = Depends(get_application_runtime),
 ) -> EventSourceResponse:
     """Native live event stream for one turn — the activity feed.
 
@@ -133,9 +134,10 @@ async def chat_stream(
     """
     # Resolve up front so X-Session-Id is known before the stream opens.
     prompt = await _prompt_from_body(request)
-    session = await _session_from_header(request, store)
+    runner = runtime.turn_runner()
+    session = await _session_from_header(request, runner)
 
-    async def _events() -> AsyncIterator[dict]:
+    async def _events() -> AsyncIterator[_SSEFrame]:
         step = 0
         try:
             turn = TurnRequest(

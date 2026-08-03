@@ -50,7 +50,7 @@ class Orchestrator:
         preferences: ToolPreferences | None = None,
         history: list[Message] | None = None,
         timeout: float | None = None,
-        log: logging.Logger | logging.LoggerAdapter | None = None,
+        log: logging.Logger | logging.LoggerAdapter[logging.Logger] | None = None,
     ) -> OrchestrationDecision:
         """Run one orchestration call. Always returns a valid decision.
 
@@ -212,7 +212,7 @@ class Orchestrator:
         tools: ToolSnapshot,
         preferences: ToolPreferences | None = None,
         *,
-        log: logging.Logger | logging.LoggerAdapter = logger,
+        log: logging.Logger | logging.LoggerAdapter[logging.Logger] = logger,
     ) -> OrchestrationProposal:
         """Coerce the orchestrator's decision to known-valid values.
 

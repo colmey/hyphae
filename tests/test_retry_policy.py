@@ -529,6 +529,8 @@ async def test_backoff_cap_clamp_and_deadline_during_sleep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(generation_module.random, "uniform", lambda low, high: 0.25)
+    assert generation_module._backoff_delay_seconds(2.0, 0) == 2.25
+    assert generation_module._backoff_delay_seconds(2.0, 3) == 16.25
     assert generation_module._backoff_delay_seconds(2.0, 10) == 30.25
 
     clock = FakeClockContext(0.2)

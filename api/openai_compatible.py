@@ -29,16 +29,18 @@ from agent import (
     ToolCallEvent,
     ToolResultEvent,
 )
-
 from .dependencies import (
-    get_app_settings,
-    get_turn_runner,
+    ApplicationRuntime,
+    get_application_runtime,
     require_api_key,
 )
+from .schemas import TokenUsage
 from .turn import PersistencePolicy, TurnRequest, TurnRunner
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+type _OpenAIPayload = dict[str, Any]
+type _SSEFrame = dict[str, str]
 
 
 class _InvalidChatRequest(ValueError):
@@ -299,7 +301,9 @@ async def openai_auth_exception_handler(
     return await http_exception_handler(request, exc)
 
 
-def _completion_body(answer: str, model: str, usage, done_reason: str) -> dict:
+def _completion_body(
+    answer: str, model: str, usage: TokenUsage, done_reason: str
+) -> _OpenAIPayload:
     return {
         "id": _completion_id(),
         "object": "chat.completion",
@@ -321,8 +325,12 @@ def _completion_body(answer: str, model: str, usage, done_reason: str) -> dict:
 
 
 def _chat_completion_chunk(
-    cid: str, created: int, model: str, delta: dict, finish_reason: str | None
-) -> dict:
+    cid: str,
+    created: int,
+    model: str,
+    delta: _OpenAIPayload,
+    finish_reason: str | None,
+) -> _OpenAIPayload:
     return {
         "id": cid,
         "object": "chat.completion.chunk",
@@ -337,7 +345,7 @@ async def _stream_chat_completion(
     turn: TurnRequest,
     tool_activity_mode: Literal["reasoning", "reasoning_full", "hidden"],
     tool_activity_max_chars: int,
-) -> AsyncIterator[dict]:
+) -> AsyncIterator[_SSEFrame]:
     """Render core events as OpenAI SSE frames.
 
     Successful streams end with a finish-reason chunk. Failed streams instead
@@ -484,9 +492,10 @@ async def _stream_chat_completion(
 @router.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_completions(
     request: Request,
-    settings=Depends(get_app_settings),
-    runner: TurnRunner = Depends(get_turn_runner),
-):
+    runtime: ApplicationRuntime = Depends(get_application_runtime),
+) -> Response:
+    settings = runtime.settings
+    runner = runtime.turn_runner()
     try:
         payload = await request.json()
     except Exception:
@@ -567,8 +576,9 @@ async def chat_completions(
 
 @router.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models(
-    runner: TurnRunner = Depends(get_turn_runner),
+    runtime: ApplicationRuntime = Depends(get_application_runtime),
 ) -> JSONResponse:
+    runner = runtime.turn_runner()
     try:
         ids = runner.available_model_ids()
     except StarletteHTTPException as exc:

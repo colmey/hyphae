@@ -40,5 +40,5 @@ class RoutingService(Protocol):
         *,
         history: list[Message] | None = None,
         timeout: float | None = None,
-        log: logging.Logger | logging.LoggerAdapter | None = None,
+        log: logging.Logger | logging.LoggerAdapter[logging.Logger] | None = None,
     ) -> OrchestrationDecision: ...

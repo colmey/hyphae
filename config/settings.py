@@ -16,6 +16,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    ModelWrapValidatorHandler,
     ValidationError,
     field_validator,
     model_validator,
@@ -123,7 +124,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="wrap")
     @classmethod
-    def _capture_interpolation_values(cls, values: Any, handler: Any) -> Self:
+    def _capture_interpolation_values(
+        cls, values: Any, handler: ModelWrapValidatorHandler[Self]
+    ) -> Self:
         settings = handler(values)
         if isinstance(values, Mapping):
             interpolation_values: dict[str, str] = {}
@@ -148,9 +151,12 @@ class Settings(BaseSettings):
             # Capture arbitrary interpolation-only process variables as well as
             # declared settings. Process variables preserve their source precedence.
             interpolation_values.update(os.environ)
-            # Assign through Pydantic's private store once, then prohibit replacement.
-            settings.__pydantic_private__["_interpolation_values"] = MappingProxyType(
-                interpolation_values
+            # Assign through Pydantic's private-attribute owner once, then prohibit
+            # replacement through this model's override.
+            BaseModel.__setattr__(
+                settings,
+                "_interpolation_values",
+                MappingProxyType(interpolation_values),
             )
         return settings
 

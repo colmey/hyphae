@@ -26,7 +26,7 @@ jobs:
         run: uv run ruff check .
 
       - name: Mypy
-        run: uv run mypy agent api config llm mcp_runtime orchestrator tooling main.py
+        run: uv run mypy
 
       - name: Compile
         run: >-

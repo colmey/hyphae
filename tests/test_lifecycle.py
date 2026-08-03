@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,7 +16,8 @@ from openai import AsyncOpenAI, AsyncStream
 
 import main as main_module
 import orchestrator.registry as registry_module
-from config import ConfigLoadError, MCPConfig, ModelEntry, ModelsConfig
+from api.turn import OrchestratedRouting
+from config import ConfigLoadError, MCPConfig, ModelEntry, ModelsConfig, Settings
 from config.errors import CredentialUnavailableError
 from llm.client import GenerationRequest, LLMClient
 from llm.tool_prompt_protocol import PromptedToolLLMClient
@@ -22,7 +25,9 @@ from llm.providers.gemini import GeminiLLMClient
 from llm.providers.openai_compatible import OpenAICompatibleLLMClient
 from llm.schemas import AssistantMessage
 from main import _close_application_resources, _start_optional_tracer, lifespan
+from mcp_runtime import MCPServerStatus, Tool
 from orchestrator import LLMRegistry
+from tooling import ToolCallResult, ToolRuntime
 
 pytestmark = pytest.mark.anyio
 
@@ -179,11 +184,25 @@ class _AppMCPManager:
     async def shutdown(self) -> None:
         self.shutdown_calls += 1
 
-    def list_tools(self) -> list[Any]:
+    def list_tools(self) -> list[tuple[str, Tool]]:
         return []
 
-    def status_snapshot(self) -> tuple[Any, ...]:
+    def status_snapshot(self) -> tuple[MCPServerStatus, ...]:
         return ()
+
+    def get_tools_for_llm(self) -> list[dict[str, Any]]:
+        return []
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> ToolCallResult:
+        raise AssertionError(f"unexpected tool dispatch: {name} {arguments!r}")
+
+    @asynccontextmanager
+    async def open_turn(
+        self, *, timeout_seconds: float | None = None
+    ) -> AsyncIterator[ToolRuntime]:
+        yield self
 
 
 class _RegistrySettings:
@@ -200,14 +219,11 @@ def _wire_lifespan_dependencies(
     *,
     orchestration_enabled: bool = False,
     trace_enabled: bool = False,
-) -> SimpleNamespace:
-    settings = SimpleNamespace(
+) -> Settings:
+    settings = Settings(
+        _env_file=None,
         log_level="INFO",
-        llm=SimpleNamespace(
-            provider="test",
-            model="test-model",
-            max_tokens=4096,
-        ),
+        llm={"provider": "test", "model": "test-model", "max_tokens": 4096},
         mcp_config_path="mcp.yaml",
         mcp_connect_timeout_seconds=17.5,
         mcp_catalog_ttl_seconds=123.0,
@@ -678,7 +694,8 @@ async def test_orchestrated_lifespan_skips_unorchestrated_client_and_closes_regi
     )
 
     async with lifespan(app):
-        assert app.state.unorchestrated_llm is None
+        runtime = app.state.runtime
+        assert isinstance(runtime.routing, OrchestratedRouting)
 
     assert control.close_calls == 1
     assert _AppMCPManager.instances[0].shutdown_calls == 1
@@ -908,7 +925,7 @@ async def test_lifespan_starts_tracer_before_publish_and_degrades_failure(
 
         async def start(self) -> None:
             self.start_calls += 1
-            assert not hasattr(app.state, "tracer")
+            assert not hasattr(app.state, "runtime")
             if fail_start:
                 raise OSError("trace open failed")
 
@@ -918,7 +935,7 @@ async def test_lifespan_starts_tracer_before_publish_and_degrades_failure(
     monkeypatch.setattr(main_module, "build_tracer", lambda **kwargs: tracer)
 
     async with lifespan(app):
-        assert app.state.tracer is (None if fail_start else tracer)
+        assert app.state.runtime.tracer is (None if fail_start else tracer)
 
     assert tracer.start_calls == 1
     assert tracer.close_calls == 1

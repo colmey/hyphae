@@ -82,6 +82,56 @@ class _SDKAioClose:
         self.close_calls += 1
 
 
+class _ControlledClose(LLMClient):
+    def __init__(self, outcomes: list[BaseException | None] | None = None) -> None:
+        self.close_calls = 0
+        self.successful_closes = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.release.set()
+        self.outcomes = list(outcomes or [])
+
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        raise AssertionError("completion is not part of lifecycle tests")
+
+    async def _close(self) -> None:
+        self.close_calls += 1
+        self.started.set()
+        await self.release.wait()
+        if self.outcomes:
+            outcome = self.outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+        self.successful_closes += 1
+
+    async def close(self) -> None:
+        await self._close()
+
+    async def aclose(self) -> None:
+        await self._close()
+
+
+def _owned_client(
+    owner: str,
+    resource: _ControlledClose,
+) -> LLMClient:
+    if owner == "openai":
+        client = object.__new__(OpenAICompatibleLLMClient)
+        client._client = resource
+        client._closed = False
+        client._close_task = None
+        return client
+    if owner == "gemini":
+        client = object.__new__(GeminiLLMClient)
+        client._client = SimpleNamespace(aio=resource)
+        client._closed = False
+        client._close_task = None
+        return client
+    if owner == "prompted":
+        return PromptedToolLLMClient(resource)
+    raise AssertionError(f"unknown lifecycle owner {owner}")
+
+
 class _MCP:
     def __init__(self, *, failure: Exception | None = None) -> None:
         self.shutdown_calls = 0
@@ -207,11 +257,13 @@ async def test_provider_and_prompted_clients_delegate_close_once() -> None:
     openai_client = object.__new__(OpenAICompatibleLLMClient)
     openai_client._client = openai_sdk
     openai_client._closed = False
+    openai_client._close_task = None
 
     gemini_aio = _SDKAioClose()
     gemini_client = object.__new__(GeminiLLMClient)
     gemini_client._client = SimpleNamespace(aio=gemini_aio)
     gemini_client._closed = False
+    gemini_client._close_task = None
 
     inner = _ClosingClient()
     prompted = PromptedToolLLMClient(inner)
@@ -223,6 +275,95 @@ async def test_provider_and_prompted_clients_delegate_close_once() -> None:
     assert openai_sdk.close_calls == 1
     assert gemini_aio.close_calls == 1
     assert inner.close_calls == 1
+
+
+@pytest.mark.parametrize("owner", ["openai", "gemini", "prompted"])
+async def test_owned_client_concurrent_close_joins_one_cleanup(owner: str) -> None:
+    resource = _ControlledClose()
+    resource.release.clear()
+    client = _owned_client(owner, resource)
+
+    first = asyncio.create_task(client.aclose())
+    await resource.started.wait()
+    second = asyncio.create_task(client.aclose())
+    await asyncio.sleep(0)
+
+    assert resource.close_calls == 1
+    assert not second.done()
+    resource.release.set()
+    await asyncio.gather(first, second)
+    await client.aclose()
+
+    assert resource.close_calls == 1
+    assert resource.successful_closes == 1
+
+
+@pytest.mark.parametrize("owner", ["openai", "gemini", "prompted"])
+async def test_owned_client_cancelled_waiter_can_join_later(owner: str) -> None:
+    resource = _ControlledClose()
+    resource.release.clear()
+    client = _owned_client(owner, resource)
+
+    cancelled_waiter = asyncio.create_task(client.aclose())
+    await resource.started.wait()
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+
+    assert resource.close_calls == 1
+    resource.release.set()
+    await client.aclose()
+    await client.aclose()
+
+    assert resource.close_calls == 1
+    assert resource.successful_closes == 1
+
+
+@pytest.mark.parametrize("owner", ["openai", "gemini", "prompted"])
+async def test_owned_client_detached_failure_remains_observed_and_retryable(
+    owner: str,
+) -> None:
+    resource = _ControlledClose([RuntimeError("close failed"), None])
+    resource.release.clear()
+    client = _owned_client(owner, resource)
+
+    cancelled_waiter = asyncio.create_task(client.aclose())
+    await resource.started.wait()
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+
+    resource.release.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+        if getattr(client, "_close_task") is None:
+            break
+
+    assert getattr(client, "_close_task") is None
+    await client.aclose()
+    assert resource.close_calls == 2
+    assert resource.successful_closes == 1
+
+
+@pytest.mark.parametrize("owner", ["openai", "gemini", "prompted"])
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("close failed"), asyncio.CancelledError()],
+    ids=["failure", "owned-cancellation"],
+)
+async def test_owned_client_failed_cleanup_can_retry(
+    owner: str,
+    failure: BaseException,
+) -> None:
+    resource = _ControlledClose([failure, None])
+    client = _owned_client(owner, resource)
+
+    with pytest.raises(type(failure)):
+        await client.aclose()
+    await client.aclose()
+    await client.aclose()
+
+    assert resource.close_calls == 2
 
 
 async def test_installed_sdk_close_surfaces_are_the_exercised_async_methods() -> None:

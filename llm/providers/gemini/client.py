@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import logging
 
@@ -47,13 +48,35 @@ class GeminiLLMClient(LLMClient):
             profile=profile or ModelProfile.default(),
         )
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     async def aclose(self) -> None:
-        """Close the async google-genai client once."""
+        """Join or retry closing the owned async google-genai client."""
         if self._closed:
             return
-        self._closed = True
+
+        task = self._close_task
+        if task is not None and task.done():
+            if task.cancelled() or task.exception() is not None:
+                self._close_task = None
+                task = None
+        if task is None:
+            task = asyncio.create_task(
+                self._finish_close(), name="gemini-client-close"
+            )
+            self._close_task = task
+            task.add_done_callback(self._close_finished)
+        await asyncio.shield(task)
+
+    async def _finish_close(self) -> None:
         await self._client.aio.aclose()
+        self._closed = True
+
+    def _close_finished(self, task: asyncio.Task[None]) -> None:
+        """Observe failed background cleanup and leave it retryable."""
+        failed = task.cancelled() or task.exception() is not None
+        if failed and self._close_task is task:
+            self._close_task = None
 
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         contents = messages_to_contents(request.messages, logger=logger)

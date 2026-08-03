@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -138,6 +139,7 @@ class PromptedToolLLMClient(LLMClient):
         self._model = model
         self._max_repairs = max_repairs
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     @property
     def inner(self) -> LLMClient:
@@ -148,11 +150,32 @@ class PromptedToolLLMClient(LLMClient):
         return self._inner.is_transient_error(exc)
 
     async def aclose(self) -> None:
-        """Close the wrapped client once; the decorator owns its lifecycle."""
+        """Join or retry closing the lifecycle-owned wrapped client."""
         if self._closed:
             return
-        self._closed = True
+
+        task = self._close_task
+        if task is not None and task.done():
+            if task.cancelled() or task.exception() is not None:
+                self._close_task = None
+                task = None
+        if task is None:
+            task = asyncio.create_task(
+                self._finish_close(), name="prompted-tool-client-close"
+            )
+            self._close_task = task
+            task.add_done_callback(self._close_finished)
+        await asyncio.shield(task)
+
+    async def _finish_close(self) -> None:
         await self._inner.aclose()
+        self._closed = True
+
+    def _close_finished(self, task: asyncio.Task[None]) -> None:
+        """Observe failed background cleanup and leave it retryable."""
+        failed = task.cancelled() or task.exception() is not None
+        if failed and self._close_task is task:
+            self._close_task = None
 
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         if not request.tools or request.response_schema is not None:

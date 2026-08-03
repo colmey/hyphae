@@ -6,7 +6,7 @@
 # runs Python with whatever arguments you pass.
 #
 # Examples:
-#   ./runscript.sh tests/smoke_test_config.py
+#   ./runscript.sh -m pytest tests/test_config.py
 #   ./runscript.sh -m uvicorn main:app --host 0.0.0.0 --port 8000
 set -euo pipefail
 

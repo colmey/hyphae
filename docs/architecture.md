@@ -79,7 +79,7 @@ finish. `TurnMetadata` carries the resolved model and optional sanitized
 
 ## Stack and Conventions
 
-- **Python** 3.11+
+- **Python** 3.12
 - **FastAPI** for the HTTP layer (async-native, fits MCP's async model).
 - **`mcp`** official Python SDK for MCP client functionality.
 - **`google-genai`** for the LLM (not the deprecated `google-generativeai`).
@@ -143,10 +143,12 @@ hyphae/
 │   ├── test_*_live.py             # Explicit configured-backend integrations
 │   └── eval_agent.py              # Separate YAML-driven evaluation runner
 │
-├── mcp_layer/                # NOT `mcp/` - shadow-free name for the SDK
+├── mcp_runtime/              # NOT `mcp/` - shadow-free name for the SDK
 │   ├── __init__.py
-│   ├── client.py             # MCPClient: one server, one ClientSession
-│   └── manager.py            # MCPManager: aggregate, namespace, route
+│   ├── catalog.py            # Catalog snapshots, routes, and schema validation
+│   ├── client.py             # MCPClient connection factory and SDK boundary
+│   ├── lease.py              # Turn-local lazy server leases
+│   └── manager.py            # MCPManager catalog discovery, refresh, and health
 │
 ├── llm/
 │   ├── __init__.py
@@ -221,30 +223,30 @@ Both return `MCPConfig`, whose discriminated server-transport union and
 
 ### MCP Layer
 
-`mcp_layer/` (not `mcp/`, to avoid shadowing the official SDK package).
+`mcp_runtime/` (not `mcp/`, to avoid shadowing the official SDK package).
 
 **`MCPClient`** wraps one server session and transport. It connects, lists tools,
 filters `disabled_tools`, calls raw tool names, and flattens MCP content blocks
 to text for v1. MCP-declared errors remain ordinary tool results; exceptions at
 the SDK call boundary become provider-neutral transport/protocol failures.
 
-**`MCPManager`** aggregates clients, connects enabled servers in parallel, and
+**`MCPManager`** discovers enabled-server catalogs in parallel at startup and
 indexes healthy tools as `{server}__{tool}` using provider-neutral `ToolSpec`
-records. It retains a typed state record for every enabled server, bounds each
-complete startup or recovery connection, and permits partial startup: failed
-servers become `unhealthy` while healthy servers and the HTTP application remain
+records. Startup discovery closes each connection after listing tools. It retains
+a typed state record and catalog for every enabled server, bounds each catalog
+discovery or turn-lease connection, and permits partial startup: failed servers
+become `unhealthy` while healthy servers and the HTTP application remain
 available.
 Its immutable status snapshot drives `/health`; `connected_servers` remains the
 healthy-only compatibility view.
 
-Current advertised inventory is separate from last-known route ownership.
-Transport/protocol failure removes all advertised tools for that server and
-marks it unhealthy, but retains formerly known names solely to route a later
-call into one lock-coordinated lazy reconnect. The ambiguous failed call is
-never replayed. Successful reconnect atomically replaces that server's current
-and last-known inventories; removed tools are not dispatched and newly added
-tools become visible to the next inventory snapshot. Never-seen names do not
-probe servers, and no periodic recovery task exists.
+Each accepted request refreshes catalogs that are due before routing, including
+unhealthy catalogs whose retry backoff has elapsed. The accepted turn captures
+an immutable tool snapshot. An actual call opens a server connection lazily as
+a turn-local lease, reused within that turn and closed with it. A transport or
+protocol failure removes the server's advertised tools and marks it unhealthy;
+the failed call is never replayed. A successful refresh or lease discovery
+replaces the current catalog. There is no periodic recovery task.
 
 ### LLM Layer
 
@@ -881,9 +883,10 @@ Startup order:
    disabled.
 3. `load_mcp_config_from_settings(settings)` using the precedence-resolved,
    raw Settings mapping.
-4. `MCPManager(mcp_config, connect_timeout_seconds=...).startup()` — connects
-   to all enabled servers in parallel. Each transport-open + initialize +
-   list operation, at startup or during lazy recovery, is bounded as one unit
+4. `MCPManager(mcp_config, connect_timeout_seconds=...).startup()` — discovers
+   all enabled-server catalogs in parallel without retaining connections. Each
+   transport-open + initialize + list operation, at startup, request-driven
+   refresh, or turn-lease discovery, is bounded as one unit
    unless the setting is `<= 0`; startup failures degrade MCP health without
    aborting application startup.
 5. `InMemorySessionStore()` and `SessionGuard()`.
@@ -1001,13 +1004,14 @@ resolve a problem we hit; don't change them without understanding why.
 2. **Settings are pulled lazily**, not snapshotted at import. Pydantic Settings
    is the sole production `.env` owner; imports remain credential-free and
    `Settings(_env_file=None)` keeps hermetic tests isolated.
-3. **`mcp_layer/` not `mcp/`** to avoid shadowing the SDK's `mcp` package.
+3. **`mcp_runtime/` not `mcp/`** to avoid shadowing the SDK's `mcp` package.
 4. **`__` is the tool-namespacing separator.** Config validation enforces
    that server names can't contain it.
 5. **Graceful, bounded MCP lifecycle**: one bad server doesn't kill the harness.
-   Every enabled server retains an explicit state, only healthy current tools
-   are advertised, and a formerly known tool may trigger one bounded reconnect
-   on a later call. An ambiguous failed call is never replayed.
+   Every enabled server retains an explicit state and catalog, only healthy
+   current tools are advertised, accepted requests refresh due catalogs before
+   routing, and actual tool calls use bounded turn-local lazy leases. A failed
+   call is never replayed.
 6. **`provider_metadata` round-trips opaque per-provider state.** Required
    for Gemini 3+'s `thought_signature`. Generic mechanism — other providers
    ignore it. Never strip this field anywhere in the pipeline.

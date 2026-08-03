@@ -39,8 +39,8 @@ Each file also cross-links to the others at the top.
 #    Configure routable models in config/models.yaml.
 #    Tune the orchestrator's behavior in config/orchestrator_prompt.md.
 
-# 3. Run a smoke test in-process (no server needed)
-./runscript.sh tests/smoke_test_http.py
+# 3. Run a focused in-process HTTP test (no server needed)
+./runscript.sh -m pytest tests/test_openai_api.py
 
 # 4. Or run a real server
 ./runscript.sh -m uvicorn main:app --host 0.0.0.0 --port 8000
@@ -48,8 +48,8 @@ Each file also cross-links to the others at the top.
 # 5. Hit it
 curl http://localhost:8000/health
 curl -X POST http://localhost:8000/chat \
-    -H 'Content-Type: application/json' \
-    -d '{"prompt": "What is 2+2?"}'
+    -H 'Content-Type: text/plain' \
+    -d 'What is 2+2?'
 ```
 
 For configuration details see [configuration.md](configuration.md); for

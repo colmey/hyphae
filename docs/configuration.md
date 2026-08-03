@@ -41,7 +41,8 @@ and trace output whether values come from `.env` or the process environment.
 | `OPENAI_COMPAT_TOOL_ACTIVITY_MODE` | `reasoning`               | OpenAI-compatible activity mode: `reasoning` emits model reasoning and compact tool status through optional `delta.reasoning_content`; `reasoning_full` also includes bounded arguments and results; `hidden` omits that channel |
 | `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS` | `2000`              | Presentation threshold for arguments or results in one `/v1` tool-activity payload in `reasoning_full` mode; distinct from `TOOL_RESULT_MAX_CHARS` |
 | `MCP_CONFIG_PATH`              | `config/mcp_config.yaml`      | Path to MCP server config                          |
-| `MCP_CONNECT_TIMEOUT_SECONDS`  | `30`                          | Cap on one complete MCP startup or lazy-recovery connection (transport open, initialize, and tool discovery); `<= 0` disables |
+| `MCP_CONNECT_TIMEOUT_SECONDS`  | `30`                          | Cap on one complete MCP catalog-discovery or turn-lease connection (transport open, initialize, and tool discovery); `<= 0` disables |
+| `MCP_CATALOG_TTL_SECONDS`      | `300`                         | Age after which an accepted request refreshes an MCP catalog before routing; `<= 0` disables age-driven refresh, while startup and turn-lease discovery still run |
 | `LOOP_MAX_ITERATIONS`          | `10`                          | Cap on agent loop iterations                       |
 | `LLM_TIMEOUT_SECONDS`          | `120`                         | Per-attempt cap on a single `llm.complete()` call (`<= 0` disables) |
 | `TOOL_TIMEOUT_SECONDS`         | `60`                          | Cap on a single `mcp.call_tool()`; on timeout the model gets an `is_error` tool result (`<= 0` disables) |
@@ -157,41 +158,21 @@ tool_policy:
 
 ```yaml
 models:
-  gemini-flash:
-    provider: gemini
-    model: gemini-3-flash-preview
-    description: >
-      Fast, cost-efficient. Best for straightforward queries, lookups,
-      single-tool calls, and short summaries.
-    default: true
-
-  gemini-pro:
-    provider: gemini
-    model: gemini-3.1-pro-preview
-    description: >
-      Heavyweight advanced reasoning. Use ONLY for complex logic, zero-shot
-      architectural design, advanced mathematics, deep analytical work, or
-      highly ambiguous workflows demanding deliberate planning.
-
-  qwen3-local:
+  gpt-oss-20b:
     provider: openai_compatible
-    model: qwen3.6-35b-a3b
+    model: gpt-oss-20b
     description: >
-      Local Qwen3.6 model served over an OpenAI-compatible endpoint.
-      Strong for agentic coding and deliberate tool-using workflows.
-    context_window: 65536
-    max_tokens: 16384
+      General-purpose model for reasoning, code generation, and tool calling.
     supports_native_tools: true
-    thinking: think-tags
-    sampling:
-      temperature: 0.6
-      top_p: 0.95
-      top_k: 20
+
+  # The checked-in sample also includes glm-4.7-flash, qwen3.6-35b-a3b,
+  # qwen3.5-9b, ornith-1.0-9b, and ornith-1.0-35b (the default).
 ```
 
-Both models are **active** — the orchestrator routes between them (cheap
-`gemini-flash` by default, `gemini-pro` for genuinely hard requests), so
-`selected_model_id` is a real decision, not a no-op.
+The checked-in sample has six active OpenAI-compatible entries:
+`gpt-oss-20b`, `glm-4.7-flash`, `qwen3.6-35b-a3b`, `qwen3.5-9b`,
+`ornith-1.0-9b`, and default `ornith-1.0-35b`. The orchestrator routes among
+them, so `selected_model_id` is a real decision, not a no-op.
 
 **Schema notes:**
 

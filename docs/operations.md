@@ -403,18 +403,18 @@ overlaps get 409.
 
 ### Graceful shutdown
 
-Uvicorn lifespan shutdown closes every constructed LLM SDK client, then every
-retained MCP client (healthy or failed), and the tracer. MCP inventory is
-cleared and records transition to `closed` before client cleanup. The default
-LLM and lazy registry cache are
-combined by object identity, so a client reachable through both paths is closed
-once. Prompted-tool wrappers forward lifecycle ownership to their inner
-provider. One cleanup failure is logged and does not skip the remaining LLMs or
-the MCP/tracer owners; an active task cancellation is preserved. Healthy tracer
-shutdown drains all accepted buffered records before closing and logs its final
-`accepted`, `written`, `dropped`, and `writer_failures` counters. A trace writer
-failure permanently disables further writes and discards its remaining backlog
-so shutdown does not retry-spin.
+Uvicorn lifespan shutdown closes every constructed LLM SDK client, active
+turn-local MCP leases, and the tracer. MCP catalogs are cleared and records
+transition to `closed`; startup discovery does not retain MCP connections.
+The default LLM and lazy registry cache are combined by object identity, so a
+client reachable through both paths is closed once. Prompted-tool wrappers
+forward lifecycle ownership to their inner provider. One cleanup failure is
+logged and does not skip the remaining LLMs or the MCP/tracer owners; an active
+task cancellation is preserved. Healthy tracer shutdown drains all accepted
+buffered records before closing and logs its final `accepted`, `written`,
+`dropped`, and `writer_failures` counters. A trace writer failure permanently
+disables further writes and discards its remaining backlog so shutdown does not
+retry-spin.
 
 For OpenAI streaming, the agent loop closes the normalized generation adapter,
 the generation layer closes the provider iterator, and the provider iterator
@@ -463,11 +463,11 @@ otherwise.
 
 This is a truthful passive snapshot, not an active reachability probe. A
 transport/protocol tool-call failure marks the server unhealthy and removes its
-advertised tools. A later call to a formerly known tool triggers one bounded,
-per-server reconnect and inventory refresh; the ambiguous failed call is never
-replayed. `/health` itself does not reconnect or poll and does not probe the
-orchestrator's LLM provider. Add a separate liveness/readiness policy if
-deployment requirements need active probes.
+advertised tools. An accepted request refreshes a due catalog before routing;
+an actual tool call opens a bounded turn-local lease lazily. The failed call is
+never replayed. `/health` itself does not refresh catalogs, open leases, or
+probe the orchestrator's LLM provider. Add a separate liveness/readiness policy
+if deployment requirements need active probes.
 
 ### Failure modes
 
@@ -635,15 +635,17 @@ extension path described above.
   guard is in-process; a multi-worker deployment would need a shared claim
   (see "Adding persistence") to cover the same id across workers.
 - **`/health` doesn't probe MCP.** It truthfully reports every enabled server's
-  current retained state and healthy advertised inventory, but does not
-  reconnect or poll. Lazy recovery occurs only on a later call to a formerly
-  known tool. It also doesn't probe the orchestrator's LLM provider.
+  current catalog state and healthy advertised inventory, but does not refresh
+  catalogs or open leases. Accepted requests refresh due catalogs before
+  routing; actual tool calls open turn-local leases lazily. It also doesn't
+  probe the orchestrator's LLM provider.
 - **Two LLM providers implemented: Gemini and OpenAI-compatible.** The OpenAI
   client also drives any OpenAI-compatible server (local Ollama/vLLM) via
-  `base_url`, and is the **default runtime** (a local Qwen, per
-  `config/models.yaml`). Anthropic keys are recognized but its client is still
-  stubbed (`build_llm_client` / `build_llm_client_from_entry` raise
-  `NotImplementedError`).
+  `base_url`. The checked-in orchestrated registry defaults to
+  `ornith-1.0-35b`; when orchestration is disabled, the separately configurable
+  `LLM_PROVIDER` and `LLM_MODEL` select the default client. Anthropic keys are
+  recognized but its client is still stubbed (`build_llm_client` /
+  `build_llm_client_from_entry` raise `NotImplementedError`).
 - **Per-worker session isolation.** Multi-worker uvicorn deployments
   have independent in-memory stores per worker.
 - **Orchestration adds an LLM call per request.** That's the cost of

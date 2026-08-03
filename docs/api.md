@@ -70,9 +70,9 @@ tools. The compatibility fields remain: `connected_servers` contains healthy
 servers only and `tool_count` is the aggregate healthy inventory. Top-level
 `status` is `ok` when every enabled server is healthy (or none are enabled), and
 `degraded` otherwise. This is a passive current-state snapshot, not an active
-reachability probe; `/health` never initiates recovery and remains HTTP 200 in
-either state. Recovery is attempted only when a later call names a tool formerly
-known to an unhealthy server.
+reachability probe; `/health` never initiates refresh or a turn lease and remains
+HTTP 200 in either state. An accepted request refreshes due catalogs before
+routing; an actual tool call then opens a turn-local lease lazily.
 
 ## `POST /chat`
 
@@ -210,7 +210,7 @@ POST /v1/chat/completions
 Content-Type: application/json
 
 {
-  "model": "gemini-pro",
+  "model": "gpt-oss-20b",
   "stream": false,
   "messages": [
     {"role": "system", "content": "You are terse."},
@@ -237,7 +237,7 @@ Content-Type: application/json
   "id": "chatcmpl-...",
   "object": "chat.completion",
   "created": 1718600000,
-  "model": "gemini-pro",
+  "model": "gpt-oss-20b",
   "choices": [
     {"index": 0, "message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}
   ],
@@ -316,7 +316,7 @@ An unknown explicit model is also a 400 and names both the invalid ID and the
 advertised inventory:
 
 ```json
-{"error": {"message": "invalid model 'bogus'; available model IDs: gemini-flash, gemini-pro", "type": "invalid_request_error", "param": null, "code": null}}
+{"error": {"message": "invalid model 'bogus'; available model IDs: gpt-oss-20b, glm-4.7-flash, ornith-1.0-35b, ornith-1.0-9b, qwen3.5-9b, qwen3.6-35b-a3b", "type": "invalid_request_error", "param": null, "code": null}}
 ```
 
 Bad input returns **400**; unexpected internal failure, including an
@@ -339,8 +339,12 @@ OpenAI list shape, sourced from the model registry:
 {
   "object": "list",
   "data": [
-    {"id": "gemini-flash", "object": "model", "created": 1718600000, "owned_by": "hyphae"},
-    {"id": "gemini-pro",   "object": "model", "created": 1718600000, "owned_by": "hyphae"}
+    {"id": "gpt-oss-20b", "object": "model", "created": 1718600000, "owned_by": "hyphae"},
+    {"id": "glm-4.7-flash", "object": "model", "created": 1718600000, "owned_by": "hyphae"},
+    {"id": "qwen3.6-35b-a3b", "object": "model", "created": 1718600000, "owned_by": "hyphae"},
+    {"id": "qwen3.5-9b", "object": "model", "created": 1718600000, "owned_by": "hyphae"},
+    {"id": "ornith-1.0-9b", "object": "model", "created": 1718600000, "owned_by": "hyphae"},
+    {"id": "ornith-1.0-35b", "object": "model", "created": 1718600000, "owned_by": "hyphae"}
   ]
 }
 ```

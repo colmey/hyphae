@@ -30,9 +30,9 @@ _RENAMED_SETTING_CASES = [
         "https://legacy.example/v1",
     ),
     (
-        "LLM_MODEL_NAME",
         "LLM_MODEL",
-        "llm.model_name",
+        "LLM_MODEL_NAME",
+        "llm.model",
         "canonical-model",
         "legacy-model",
     ),
@@ -103,7 +103,7 @@ def test_settings_load_without_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(_env_file=None)
 
     assert settings.llm.provider
-    assert settings.llm.model_name
+    assert settings.llm.model
     assert settings.llm.max_tokens > 0
     assert settings.loop_max_iterations > 0
     assert settings.mcp_connect_timeout_seconds == 30
@@ -161,7 +161,7 @@ def test_llm_settings_are_nested_without_flat_runtime_aliases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
-    monkeypatch.setenv("LLM_MODEL_NAME", "nested-model")
+    monkeypatch.setenv("LLM_MODEL", "nested-model")
     monkeypatch.setenv("LLM_MAX_TOKENS", "123")
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "4.5")
     monkeypatch.setenv("LLM_MAX_RETRIES", "2")
@@ -171,12 +171,14 @@ def test_llm_settings_are_nested_without_flat_runtime_aliases(
 
     assert settings.llm == LLMSettings(
         provider="openai_compatible",
-        model_name="nested-model",
+        model="nested-model",
         max_tokens=123,
         timeout_seconds=4.5,
         max_retries=2,
         retry_base_delay=0.25,
     )
+    assert settings.llm.model_dump()["model"] == "nested-model"
+    assert not hasattr(settings.llm, "model_name")
     assert not hasattr(settings, "llm_provider")
     assert not hasattr(settings, "llm_model_name")
 

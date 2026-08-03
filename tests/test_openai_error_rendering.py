@@ -233,7 +233,7 @@ def test_nonstream_invalid_done_reason_returns_openai_500(reason: str) -> None:
         chat_completions(
             _Request(),
             settings=SimpleNamespace(
-                llm=SimpleNamespace(model_name="test-model")
+                llm=SimpleNamespace(model="test-model")
             ),
             runner=_RunRunner(reason),
         )
@@ -251,7 +251,7 @@ def test_nonstream_http_exception_preserves_status_and_openai_envelope() -> None
         chat_completions(
             _Request(),
             settings=SimpleNamespace(
-                llm=SimpleNamespace(model_name="test-model")
+                llm=SimpleNamespace(model="test-model")
             ),
             runner=_HTTPErrorRunner("end_turn"),
         )

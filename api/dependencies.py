@@ -130,7 +130,7 @@ async def get_turn_runner(request: Request) -> TurnRunner:
     else:
         routing = UnorchestratedRouting(
             llm=request.app.state.unorchestrated_llm,
-            model_id=settings.llm.model_name,
+            model_id=settings.llm.model,
             inventory=registry,
         )
     return TurnRunner(

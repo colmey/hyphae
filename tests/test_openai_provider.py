@@ -143,7 +143,7 @@ def test_registry_accepts_canonical_provider_and_compatibility_alias(
     class FactorySettings:
         llm = SimpleNamespace(
             provider=provider,
-            model_name="test-model",
+            model="test-model",
             max_tokens=123,
         )
         openai_compat_base_url = "http://local.example/v1"

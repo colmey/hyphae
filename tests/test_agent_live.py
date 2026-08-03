@@ -133,7 +133,7 @@ async def test_configured_agent_scenarios() -> None:
     reset_settings()
     settings = get_settings()
     print(
-        f"using provider={settings.llm.provider} model={settings.llm.model_name}"
+        f"using provider={settings.llm.provider} model={settings.llm.model}"
     )
     print()
 

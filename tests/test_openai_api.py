@@ -188,7 +188,7 @@ async def test_non_stream_completion_shape_and_usage(asgi_client) -> None:
         response = await asgi_client(app).post(
             "/v1/chat/completions",
             json={
-                "model": settings.llm.model_name,
+                "model": settings.llm.model,
                 "messages": [
                     {"role": "system", "content": "You are terse."},
                     {"role": "user", "content": "Hi there"},
@@ -199,7 +199,7 @@ async def test_non_stream_completion_shape_and_usage(asgi_client) -> None:
     response.raise_for_status()
     body = response.json()
     assert body["object"] == "chat.completion"
-    assert body["model"] == settings.llm.model_name
+    assert body["model"] == settings.llm.model
     choice = body["choices"][0]
     assert choice["message"] == {"role": "assistant", "content": "Hello, world"}
     assert choice["finish_reason"] == "stop"
@@ -297,7 +297,7 @@ async def test_stream_completion_emits_deltas_finish_and_done(
     assert payloads[-1] == "[DONE]"
     frames = [payload for payload in payloads if payload != "[DONE]"]
     assert all(frame["object"] == "chat.completion.chunk" for frame in frames)
-    assert all(frame["model"] == _settings.llm.model_name for frame in frames)
+    assert all(frame["model"] == _settings.llm.model for frame in frames)
     assert frames[0]["choices"][0]["delta"]["role"] == "assistant"
     deltas = [frame["choices"][0]["delta"].get("content", "") for frame in frames]
     assert deltas.count("Hello") == 1
@@ -450,7 +450,7 @@ async def test_unknown_model_is_rejected_before_session_inventory_or_execution(
             },
         )
 
-    available = "selected, requested" if orchestrated else settings.llm.model_name
+    available = "selected, requested" if orchestrated else settings.llm.model
     assert response.status_code == 400
     assert response.json() == {
         "error": {

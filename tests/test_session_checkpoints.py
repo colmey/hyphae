@@ -210,7 +210,7 @@ def _runner(
         _env_file=None,
         orchestration_enabled=False,
         llm={
-            "model_name": "test-model",
+            "model": "test-model",
             "max_retries": retries,
             "retry_base_delay": 0,
             "timeout_seconds": 0,
@@ -222,7 +222,7 @@ def _runner(
     return TurnRunner(
         routing=UnorchestratedRouting(
             llm=llm,
-            model_id=settings.llm.model_name,
+            model_id=settings.llm.model,
         ),
         limits=RunLimits.from_settings(settings),
         mcp=mcp,

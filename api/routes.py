@@ -71,7 +71,7 @@ async def health(
             else "degraded"
         ),
         provider=settings.llm.provider,
-        model=settings.llm.model_name,
+        model=settings.llm.model,
         connected_servers=mcp.connected_servers,
         tool_count=len(mcp.list_tools()),
         mcp_servers=[

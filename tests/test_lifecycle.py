@@ -155,7 +155,7 @@ def _wire_lifespan_dependencies(
         log_level="INFO",
         llm=SimpleNamespace(
             provider="test",
-            model_name="test-model",
+            model="test-model",
             max_tokens=4096,
         ),
         mcp_config_path="mcp.yaml",
@@ -481,7 +481,7 @@ async def test_lifespan_does_not_build_unorchestrated_llm_before_it_is_needed(
         log_level="INFO",
         llm=SimpleNamespace(
             provider="test",
-            model_name="test-model",
+            model="test-model",
             max_tokens=4096,
         ),
         mcp_config_path="missing-mcp.yaml",

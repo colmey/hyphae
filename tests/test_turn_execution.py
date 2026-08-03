@@ -213,7 +213,7 @@ def _settings(**overrides: Any) -> Settings:
     values = {
         "orchestration_enabled": True,
         "llm": {
-            "model_name": "unorchestrated-executing-model",
+            "model": "unorchestrated-executing-model",
             "max_retries": 0,
         },
     }
@@ -244,7 +244,7 @@ def _runner(
     else:
         routing = UnorchestratedRouting(
             llm=agent,
-            model_id=resolved_settings.llm.model_name,
+            model_id=resolved_settings.llm.model,
         )
     return TurnRunner(
         routing=routing,

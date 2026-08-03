@@ -155,7 +155,7 @@ def test_registry_constructs_gemini_lazily(
     class FactorySettings:
         llm = SimpleNamespace(
             provider="gemini",
-            model_name="gemini-test",
+            model="gemini-test",
             max_tokens=123,
         )
         openai_compat_base_url = ""

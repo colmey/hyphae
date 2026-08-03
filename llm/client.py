@@ -65,7 +65,7 @@ class _LLMDefaults(Protocol):
     def provider(self) -> str: ...
 
     @property
-    def model_name(self) -> str: ...
+    def model(self) -> str: ...
 
     @property
     def max_tokens(self) -> int: ...
@@ -309,7 +309,7 @@ def build_llm_client(settings: _UnorchestratedClientSettings) -> LLMClient:
     return _build_client(
         settings.llm.provider,
         spec=_ProviderBuildSpec(
-            model=settings.llm.model_name,
+            model=settings.llm.model,
             max_tokens=settings.llm.max_tokens,
         ),
         settings=settings,

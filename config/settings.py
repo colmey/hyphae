@@ -52,10 +52,10 @@ class LLMSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     provider: str = Field(default="gemini", description="LLM provider name")
-    model_name: str = Field(
+    model: str = Field(
         default="gemini-3-flash-preview",
         description="Provider-native model name to use",
-        validation_alias=AliasChoices("model_name", "model"),
+        validation_alias=AliasChoices("model", "model_name"),
     )
     max_tokens: int = Field(default=4096, gt=0)
     timeout_seconds: float = Field(
@@ -80,9 +80,9 @@ class LLMSettings(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _prefer_canonical_model_name(cls, values: Any) -> Any:
-        """Discard the compatibility `model` alias when both names are set."""
-        return prefer_canonical_alias(values, canonical="model_name", alias="model")
+    def _prefer_canonical_model(cls, values: Any) -> Any:
+        """Discard the compatibility `model_name` alias when both are set."""
+        return prefer_canonical_alias(values, canonical="model", alias="model_name")
 
     _strict_integers = field_validator("max_tokens", "max_retries", mode="before")(
         reject_bool_or_float_for_int
@@ -93,9 +93,9 @@ class LLMSettings(BaseModel):
     def _provider_is_valid(cls, value: str) -> str:
         return _validate_identifier(value, "provider identifier")
 
-    @field_validator("model_name")
+    @field_validator("model")
     @classmethod
-    def _model_name_is_valid(cls, value: str) -> str:
+    def _model_is_valid(cls, value: str) -> str:
         return _validate_identifier(value, "model identifier")
 
 
@@ -173,7 +173,7 @@ class Settings(BaseSettings):
 
     # Provider validation lives in llm.client to keep this layer import-light.
     # The one-split environment mapping preserves LLM_PROVIDER,
-    # LLM_MODEL_NAME, LLM_MAX_TOKENS, and the LLM execution-control names.
+    # LLM_MODEL, LLM_MAX_TOKENS, and the LLM execution-control names.
     llm: LLMSettings = Field(default_factory=LLMSettings)
 
     # Non-LLM execution timeouts; <= 0 disables the respective bound.

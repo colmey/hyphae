@@ -210,7 +210,7 @@ def _log_ready_summary(
         "harness ready: provider=%s default_model=%s | %s | "
         "mcp=%d/%d servers healthy (%d tools)",
         settings.llm.provider,
-        settings.llm.model_name,
+        settings.llm.model,
         orch_part,
         len(mcp.connected_servers),
         len(mcp.status_snapshot()),
@@ -231,7 +231,7 @@ async def lifespan(app: FastAPI):
     logger.info(
         "starting harness: provider=%s model=%s",
         settings.llm.provider,
-        settings.llm.model_name,
+        settings.llm.model,
     )
 
     unorchestrated_llm: LLMClient | None = None

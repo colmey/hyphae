@@ -19,7 +19,7 @@ local dev, containers, and CI. Tests that need hermetic defaults construct
 `Settings(_env_file=None)`.
 
 LLM values are grouped in application code under the typed `settings.llm`
-object (`settings.llm.provider`, `settings.llm.model_name`,
+object (`settings.llm.provider`, `settings.llm.model`,
 `settings.llm.max_tokens`, and the retry/timeout controls). Environment
 variables retain their existing flat `LLM_*` names. Sampling values such as
 `temperature` remain per-model settings in `models.yaml`; there is no global
@@ -32,7 +32,7 @@ and trace output whether values come from `.env` or the process environment.
 | Variable                       | Default                       | Purpose                                            |
 |--------------------------------|-------------------------------|----------------------------------------------------|
 | `LLM_PROVIDER`                 | `gemini`                      | Any provider registered in `llm/client.py`'s `_PROVIDERS` (currently `gemini`, `openai_compatible`; compatibility alias `openai` accepted); validated at build time |
-| `LLM_MODEL_NAME`                    | `gemini-3-flash-preview`      | Model identifier (legacy default; orchestrator overrides per request) |
+| `LLM_MODEL`                         | `gemini-3-flash-preview`      | Model identifier (legacy default; orchestrator overrides per request) |
 | `LLM_MAX_TOKENS`               | `4096`                        | Default max tokens per completion                  |
 | `ANTHROPIC_API_KEY`            | `""`                          | Anthropic key (if used by any model in `models.yaml`) |
 | `GEMINI_API_KEY`               | `""`                          | Gemini key (if used by any model in `models.yaml`)    |
@@ -81,7 +81,7 @@ migrate without an abrupt configuration break:
 | Canonical name | Deprecated input alias |
 |---|---|
 | `OPENAI_COMPAT_BASE_URL` | `OPENAI_PROVIDER_BASE_URL`, `OPENAI_BASE_URL` |
-| `LLM_MODEL_NAME` | `LLM_MODEL` |
+| `LLM_MODEL` | `LLM_MODEL_NAME` |
 | `LOOP_MAX_ITERATIONS` | `MAX_LOOP_ITERATIONS` |
 | `RUN_MAX_TOKENS` | `MAX_RUN_TOKENS` |
 | `RUN_MAX_SECONDS` | `MAX_RUN_SECONDS` |

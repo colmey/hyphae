@@ -16,7 +16,6 @@ from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
     CompletionUsage,
-    Message,
     ReasoningDelta,
     StreamEnd,
     TextBlock,
@@ -27,7 +26,9 @@ from llm.schemas import (
 from tooling import ToolRuntime
 
 from .context import (
+    ContextAssembly,
     ContextBudget,
+    ContextBudgetExceeded,
     assemble_context,
     clip_content,
     estimate_usage_tokens,
@@ -92,7 +93,7 @@ class _PreparedGeneration:
     """Immutable request inputs passed between the preparation and run phases."""
 
     request: GenerationRequest
-    messages_for_usage: tuple[Message, ...]
+    context_assembly: ContextAssembly
     final_iteration: bool
 
 
@@ -221,7 +222,7 @@ class _AgentRun:
         return "provider_error"
 
     async def _prepare_generation(self) -> _PreparedGeneration:
-        """Assemble one immutable generation request, degrading on failure."""
+        """Assemble one immutable generation request or a typed budget outcome."""
         final_iteration = self.iteration >= self.limits.max_iterations
         effective_system: str | None
         effective_tools: list[dict[str, Any]] | None
@@ -240,12 +241,15 @@ class _AgentRun:
             final_iteration,
         )
 
-        messages_for_usage = await self._assemble_generation_messages(
+        context_assembly = await self._assemble_generation_context(
             system=effective_system,
             tools=effective_tools,
         )
+        self.cumulative_usage = (
+            self.cumulative_usage + context_assembly.auxiliary_usage
+        )
         request = GenerationRequest(
-            messages=messages_for_usage,
+            messages=context_assembly.messages,
             tools=effective_tools or None,
             system=effective_system,
             max_tokens=self.limits.max_tokens,
@@ -253,50 +257,61 @@ class _AgentRun:
         )
         return _PreparedGeneration(
             request=request,
-            messages_for_usage=messages_for_usage,
+            context_assembly=context_assembly,
             final_iteration=final_iteration,
         )
 
-    async def _assemble_generation_messages(
+    async def _assemble_generation_context(
         self,
         *,
         system: str | None,
         tools: list[dict[str, Any]] | None,
-    ) -> tuple[Message, ...]:
-        """Assemble the request view or degrade to full staged history."""
-        messages_for_usage = tuple(self.session.messages)
+    ) -> ContextAssembly:
+        """Assemble a request view that is known to fit its configured budget."""
         context_window = self.limits.context_window
-        if context_window and context_window > 0:
-            try:
-                assembly = assemble_context(
-                    self.session.messages,
-                    budget=ContextBudget(
-                        context_window=context_window,
-                        max_output_tokens=self.limits.max_tokens or 0,
-                        safety_margin=self.limits.context_safety_margin_tokens,
-                    ),
-                    strategy=self.limits.context_strategy,
-                    system=system,
-                    tools=tools or None,
-                    llm=self.llm,
-                    recent_messages=self.limits.context_recent_messages,
-                    summary_max_tokens=self.limits.context_summary_max_tokens,
-                )
-                assembly_timeout = self.context.effective_timeout(
-                    self.limits.llm_timeout_seconds
-                )
-                if assembly_timeout and assembly_timeout > 0:
-                    async with asyncio.timeout(assembly_timeout):
-                        messages_for_usage = tuple((await assembly).messages)
-                else:
-                    messages_for_usage = tuple((await assembly).messages)
-            except Exception:  # noqa: BLE001
-                self.context.logger.warning(
-                    "context assembly failed; sending full history",
-                    exc_info=True,
-                )
+        if not context_window or context_window <= 0:
+            estimated = estimate_usage_tokens(
+                None,
+                messages=self.session.messages,
+                system=system,
+                tools=tools,
+            ).input_tokens
+            return ContextAssembly(tuple(self.session.messages), estimated)
 
-        return messages_for_usage
+        assembly_timeout = self.context.effective_timeout(
+            self.limits.llm_timeout_seconds
+        )
+        if assembly_timeout is not None and assembly_timeout <= 0:
+            raise RunDeadlineExceeded
+        try:
+            assembly = assemble_context(
+                self.session.messages,
+                budget=ContextBudget(
+                    context_window=context_window,
+                    max_output_tokens=self.limits.max_tokens or 0,
+                    safety_margin=self.limits.context_safety_margin_tokens,
+                ),
+                strategy=self.limits.context_strategy,
+                system=system,
+                tools=tools or None,
+                llm=self.llm,
+                recent_messages=self.limits.context_recent_messages,
+                summary_max_tokens=self.limits.context_summary_max_tokens,
+            )
+            if assembly_timeout and assembly_timeout > 0:
+                async with asyncio.timeout(assembly_timeout):
+                    return await assembly
+            return await assembly
+        except ContextBudgetExceeded:
+            raise
+        except TimeoutError:
+            if self.context.deadline_exceeded():
+                raise RunDeadlineExceeded from None
+            self.context.logger.warning("context compaction timed out")
+            raise ContextBudgetExceeded from None
+        except Exception:  # noqa: BLE001
+            self.context.logger.warning("context assembly failed", exc_info=True)
+            raise ContextBudgetExceeded from None
 
     async def _consume_generation(
         self,
@@ -357,9 +372,10 @@ class _AgentRun:
 
         usage = estimate_usage_tokens(
             response.usage,
-            messages=list(prepared.messages_for_usage),
+            messages=list(prepared.context_assembly.messages),
             system=prepared.request.system,
             response=response,
+            tools=prepared.request.tools,
         )
         self.cumulative_usage = self.cumulative_usage + usage
         yield await self.context.emit(
@@ -607,11 +623,34 @@ class _AgentRun:
                 self.context.elapsed_seconds(),
             )
         else:
-            self.context.logger.warning(
-                "run exceeded max_run_tokens=%d (used=%d)",
-                self.limits.max_run_tokens,
-                self.cumulative_usage.total_tokens,
-            )
+            if self.limits.max_run_tokens is None:
+                self.context.logger.warning(
+                    "context could not fit within its configured input budget "
+                    "(run usage=%d)",
+                    self.cumulative_usage.total_tokens,
+                )
+            else:
+                self.context.logger.warning(
+                    "run exceeded max_run_tokens=%d (used=%d)",
+                    self.limits.max_run_tokens,
+                    self.cumulative_usage.total_tokens,
+                )
+
+    def _auxiliary_usage_event(
+        self,
+        usage: CompletionUsage,
+        latency_ms: float,
+    ) -> UsageEvent:
+        """Present one compaction completion without folding it into generation."""
+        return UsageEvent(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+            thinking_tokens=usage.thinking_tokens,
+            cached_tokens=usage.cached_tokens,
+            iteration=self.iteration,
+            latency_ms=latency_ms,
+        )
 
     async def events(self) -> AsyncGenerator[Event, None]:
         """Drive the explicit preparation, generation, record, and tool phases."""
@@ -623,7 +662,42 @@ class _AgentRun:
                 return
 
             self.iteration += 1
-            prepared = await self._prepare_generation()
+            try:
+                prepared = await self._prepare_generation()
+            except ContextBudgetExceeded as exc:
+                if exc.auxiliary_usage.total_tokens:
+                    self.cumulative_usage = (
+                        self.cumulative_usage + exc.auxiliary_usage
+                    )
+                    yield await self.context.emit(
+                        self._auxiliary_usage_event(
+                            exc.auxiliary_usage,
+                            exc.auxiliary_latency_ms,
+                        )
+                    )
+                context_terminal_reason = (
+                    self._bounded_run_reason() or "budget_exceeded"
+                )
+                self._log_guard(context_terminal_reason)
+                yield await self.context.emit(self._done(context_terminal_reason))
+                return
+            except RunDeadlineExceeded:
+                yield await self.context.emit(self._done("deadline_exceeded"))
+                return
+
+            assembly = prepared.context_assembly
+            if assembly.compacted:
+                yield await self.context.emit(
+                    self._auxiliary_usage_event(
+                        assembly.auxiliary_usage,
+                        assembly.auxiliary_latency_ms,
+                    )
+                )
+                guard_reason = self._bounded_run_reason()
+                if guard_reason is not None:
+                    self._log_guard(guard_reason)
+                    yield await self.context.emit(self._done(guard_reason))
+                    return
 
             try:
                 generation_events = self._consume_generation(prepared)

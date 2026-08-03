@@ -8,8 +8,8 @@ LLM raw. The seam estimates the request's input tokens against an explicit
 budget (context_window − max_output_tokens − safety_margin) and, per the
 configured strategy, decides what the model sees:
 
-  - "naive" (default): pass-through. Over budget only logs a warning — the
-    exact behavior the harness had before this module existed.
+  - "naive" (default): pass-through only while the exact request fits. An
+    over-budget view produces an explicit typed budget outcome.
   - "compaction": when over budget, keep the first user message (the task
     header) and the last N protocol-safe units verbatim, and replace the
     middle with a one-call LLM summary that preserves decisions, constraints,
@@ -25,14 +25,15 @@ are kept or summarized atomically — an assistant message carrying tool_use
 blocks travels with the tool message(s) that answer it. A retained view can
 therefore never start with an orphan tool result.
 
-Degrade, never break: a failed summarization, malformed history, or a
-history too short to compact all fall back to pass-through with a warning
-(`degraded_reason` says why). The context layer must never kill a request.
+Hard boundary: a failed summarization, malformed history, or a history whose
+smallest required view cannot fit produces a typed budget outcome. The caller
+maps that outcome to an explicit terminal event; it never submits a request
+known to exceed the configured context budget.
 
 The module also owns the cheap local token estimator (chars/4 heuristic plus
 per-message/block overhead). estimate_usage_tokens() backs the loop's
 Phase-1 token cap when a provider reports absent/all-zero usage — common on
-local OpenAI-compatible servers.
+local OpenAI-compatible servers — and includes the exact request tool schemas.
 
 Import rule: this seam may import LLM schema types and LLMClient (for the
 summarizer call) but never MCP — the loop stays the only LLM⇄MCP bridge.
@@ -42,7 +43,10 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
 
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
@@ -133,7 +137,9 @@ def estimate_message_tokens(messages: list[Message]) -> int:
     return total
 
 
-def estimate_tools_tokens(tools: list[dict] | None) -> int:
+def estimate_tools_tokens(
+    tools: Sequence[Mapping[str, Any]] | None,
+) -> int:
     """Estimate the token cost of the tool schemas sent with a request."""
     if not tools:
         return 0
@@ -145,13 +151,14 @@ def estimate_usage_tokens(
     messages: list[Message] | None = None,
     system: str | None = None,
     response: AssistantMessage | None = None,
+    tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> CompletionUsage:
     """Return provider usage when it reported anything, else a local estimate.
 
     Local/OpenAI-compatible servers often report all-zero usage, which left
     the Phase-1 token cap inert. This fills the gap: absent/all-zero usage is
-    estimated from the outgoing messages (+ system prompt) and the assistant
-    response. Non-zero provider usage passes through untouched — never
+    estimated from the outgoing messages, system prompt, exact request tools,
+    and assistant response. Non-zero provider usage passes through untouched — never
     double-counted — except that a missing total is filled from input+output
     (arithmetic on provider figures, not an estimate).
     """
@@ -167,8 +174,10 @@ def estimate_usage_tokens(
             thinking_tokens=usage.thinking_tokens,
             cached_tokens=usage.cached_tokens,
         )
-    input_est = estimate_message_tokens(messages or []) + estimate_text_tokens(
-        system or ""
+    input_est = (
+        estimate_message_tokens(messages or [])
+        + estimate_text_tokens(system or "")
+        + estimate_tools_tokens(tools)
     )
     output_est = (
         estimate_message_tokens([response.to_message()])
@@ -200,19 +209,29 @@ class ContextBudget:
         return max(0, self.context_window - self.max_output_tokens - self.safety_margin)
 
 
-@dataclass
-class AssembledContext:
-    """What assemble_context() decided to send, and why."""
+@dataclass(frozen=True, slots=True)
+class ContextAssembly:
+    """One request view plus the cost of producing it."""
 
-    messages: list[Message]
+    messages: tuple[Message, ...]
     estimated_input_tokens: int
-    budget: ContextBudget
-    strategy: str
+    auxiliary_usage: CompletionUsage = field(default_factory=CompletionUsage)
+    auxiliary_latency_ms: float = 0.0
     compacted: bool = False
-    # Set when the strategy could not do its job (over budget under naive,
-    # summarizer failure, malformed/too-short history) and the full history
-    # was passed through instead.
-    degraded_reason: str | None = None
+
+
+class ContextBudgetExceeded(RuntimeError):
+    """The required protocol-safe request view cannot fit its input budget."""
+
+    def __init__(
+        self,
+        *,
+        auxiliary_usage: CompletionUsage | None = None,
+        auxiliary_latency_ms: float = 0.0,
+    ) -> None:
+        super().__init__("context cannot fit within the configured input budget")
+        self.auxiliary_usage = auxiliary_usage or CompletionUsage()
+        self.auxiliary_latency_ms = auxiliary_latency_ms
 
 
 # ---------------------------------------------------------------------------
@@ -226,11 +245,11 @@ async def assemble_context(
     budget: ContextBudget,
     strategy: str = "naive",
     system: str | None = None,
-    tools: list[dict] | None = None,
+    tools: Sequence[Mapping[str, Any]] | None = None,
     llm: LLMClient | None = None,
     recent_messages: int = 6,
     summary_max_tokens: int = 512,
-) -> AssembledContext:
+) -> ContextAssembly:
     """Build the outgoing message view for one LLM call.
 
     `system` and `tools` must be the *effective* values the call will use
@@ -239,8 +258,9 @@ async def assemble_context(
     `llm` is the summarizer client for "compaction"; it is called once, with
     no tools and no recursive context assembly.
 
-    Never raises for strategy-level failures — degrades to pass-through with
-    `degraded_reason` set and a warning logged.
+    Returns only a view known to fit. If the required protocol-safe content
+    cannot fit, raises ``ContextBudgetExceeded`` rather than submitting a
+    knowingly oversized generation request.
     """
     if strategy not in ("naive", "compaction"):
         logger.warning("unknown context_strategy %r; using 'naive'", strategy)
@@ -250,43 +270,29 @@ async def assemble_context(
     estimated = overhead + estimate_message_tokens(messages)
 
     if estimated <= budget.input_budget:
-        return AssembledContext(messages, estimated, budget, strategy)
+        return ContextAssembly(tuple(messages), estimated)
 
     if strategy == "naive":
         logger.warning(
-            "context over budget under 'naive' (est=%d > budget=%d); passing through",
+            "context over budget under 'naive' (est=%d > budget=%d)",
             estimated,
             budget.input_budget,
         )
-        return AssembledContext(
-            messages, estimated, budget, strategy, degraded_reason="over_budget"
-        )
+        raise ContextBudgetExceeded
 
     if llm is None:
-        logger.warning("compaction requested but no summarizer client; passing through")
-        return AssembledContext(
-            messages,
-            estimated,
-            budget,
-            strategy,
-            degraded_reason="no_summarizer_client",
-        )
+        logger.warning("compaction requested but no summarizer client")
+        raise ContextBudgetExceeded
 
-    try:
-        return await _compact(
-            messages,
-            budget=budget,
-            overhead=overhead,
-            estimated=estimated,
-            llm=llm,
-            recent_messages=recent_messages,
-            summary_max_tokens=summary_max_tokens,
-        )
-    except Exception:  # noqa: BLE001 -- the context layer must never kill a request
-        logger.warning("compaction failed; passing full history through", exc_info=True)
-        return AssembledContext(
-            messages, estimated, budget, strategy, degraded_reason="compaction_error"
-        )
+    return await _compact(
+        messages,
+        budget=budget,
+        overhead=overhead,
+        estimated=estimated,
+        llm=llm,
+        recent_messages=recent_messages,
+        summary_max_tokens=summary_max_tokens,
+    )
 
 
 def _protocol_units(messages: list[Message]) -> list[list[Message]]:
@@ -319,7 +325,7 @@ async def _compact(
     llm: LLMClient,
     recent_messages: int,
     summary_max_tokens: int,
-) -> AssembledContext:
+) -> ContextAssembly:
     units = _protocol_units(messages)
 
     # Pin the task header: the first user message stays verbatim so the goal
@@ -332,28 +338,21 @@ async def _compact(
 
     available = len(units) - start
     if available < 2:
-        logger.warning(
-            "history too short to compact (%d units); passing through", len(units)
-        )
-        return AssembledContext(
-            messages,
-            estimated,
-            budget,
-            "compaction",
-            degraded_reason="too_short_to_compact",
-        )
+        logger.warning("history too short to compact (%d units)", len(units))
+        raise ContextBudgetExceeded
 
     # Choose how many recent units survive verbatim: start from the configured
     # count (leaving at least one unit to summarize) and shrink while the
-    # fixed parts (overhead + pinned + a summary at its output cap) plus the
-    # recent tail still can't fit. keep=1 is the smallest protocol-safe view;
-    # if even that overflows we proceed anyway and log below.
+    # fixed parts plus the recent tail cannot fit. This is the sole reduction
+    # policy: reduce the recent tail to one complete protocol unit, then bound
+    # the summary text to the exact remaining estimate. Required pinned/recent
+    # units are never split or truncated.
     keep = max(1, min(recent_messages, available - 1))
     fixed = (
         overhead
         + estimate_message_tokens(pinned)
         + _MESSAGE_OVERHEAD_TOKENS
-        + summary_max_tokens
+        + max(1, summary_max_tokens)
     )
     while (
         keep > 1
@@ -372,31 +371,42 @@ async def _compact(
         # Only possible on malformed history (a tool result with no prior
         # assistant tool_use formed its own unit). Refuse rather than send an
         # orphan the provider will reject.
-        logger.warning(
-            "compaction boundary would orphan a tool result; passing through"
-        )
-        return AssembledContext(
-            messages,
-            estimated,
-            budget,
-            "compaction",
-            degraded_reason="malformed_history",
-        )
+        logger.warning("compaction boundary would orphan a tool result")
+        raise ContextBudgetExceeded
 
-    summary_text = await _summarize(
+    summary_prefix = f"{_SUMMARY_HEADER}\n"
+    summary_message_token_budget = budget.input_budget - (
+        overhead
+        + estimate_message_tokens([*pinned, *recent])
+        + _MESSAGE_OVERHEAD_TOKENS
+    )
+    summary_char_budget = (
+        summary_message_token_budget * _CHARS_PER_TOKEN - len(summary_prefix)
+    )
+    if summary_char_budget <= 0:
+        logger.warning(
+            "smallest protocol-safe context exceeds budget (available=%d, budget=%d)",
+            summary_message_token_budget,
+            budget.input_budget,
+        )
+        raise ContextBudgetExceeded
+
+    effective_summary_max_tokens = min(
+        max(1, summary_max_tokens),
+        max(1, summary_char_budget // _CHARS_PER_TOKEN),
+    )
+    summary_text, auxiliary_usage, auxiliary_latency_ms = await _summarize(
         middle,
         llm=llm,
-        max_tokens=summary_max_tokens,
-        transcript_char_cap=budget.input_budget * _CHARS_PER_TOKEN,
+        max_tokens=effective_summary_max_tokens,
+        context_budget=budget,
     )
     if summary_text is None:
-        return AssembledContext(
-            messages,
-            estimated,
-            budget,
-            "compaction",
-            degraded_reason="summarizer_failed",
+        raise ContextBudgetExceeded(
+            auxiliary_usage=auxiliary_usage,
+            auxiliary_latency_ms=auxiliary_latency_ms,
         )
+    summary_text = _truncate_to_char_budget(summary_text, summary_char_budget)
 
     # A plain user message, clearly marked — no new role or block type, and
     # nothing that looks like a tool call/result to any provider.
@@ -405,11 +415,9 @@ async def _compact(
     assembled_estimate = overhead + estimate_message_tokens(assembled)
 
     if assembled_estimate > budget.input_budget:
-        logger.warning(
-            "compacted context still over budget (est=%d > budget=%d); "
-            "sending the smallest protocol-safe view",
-            assembled_estimate,
-            budget.input_budget,
+        raise ContextBudgetExceeded(
+            auxiliary_usage=auxiliary_usage,
+            auxiliary_latency_ms=auxiliary_latency_ms,
         )
     logger.info(
         "context compacted: %d -> %d messages (est %d -> %d tokens, budget %d)",
@@ -419,9 +427,23 @@ async def _compact(
         assembled_estimate,
         budget.input_budget,
     )
-    return AssembledContext(
-        assembled, assembled_estimate, budget, "compaction", compacted=True
+    return ContextAssembly(
+        tuple(assembled),
+        assembled_estimate,
+        auxiliary_usage,
+        auxiliary_latency_ms,
+        compacted=True,
     )
+
+
+def _truncate_to_char_budget(text: str, char_budget: int) -> str:
+    """Deterministically bound text to an exact character allowance."""
+    if len(text) <= char_budget:
+        return text
+    marker = "\n…[truncated]"
+    if char_budget <= len(marker):
+        return marker[:char_budget]
+    return f"{text[: char_budget - len(marker)]}{marker}"
 
 
 def _flatten_for_summary(messages: list[Message]) -> str:
@@ -448,37 +470,61 @@ async def _summarize(
     *,
     llm: LLMClient,
     max_tokens: int,
-    transcript_char_cap: int,
-) -> str | None:
-    """One tool-less LLM call summarizing `messages`. None on any failure.
+    context_budget: ContextBudget,
+) -> tuple[str | None, CompletionUsage, float]:
+    """Run one tool-less summarizer call and retain its accounting.
 
-    The transcript is clipped to roughly the input budget so the summarizer
-    call itself can't overflow the same window — no recursive assembly.
+    The transcript uses the same deterministic truncation rule as the returned
+    summary, so this auxiliary request is also known to fit without recursive
+    context assembly.
     """
     transcript = _flatten_for_summary(messages)
-    transcript = clip_content(
-        transcript,
-        transcript_char_cap,
-        marker="transcript truncated for summarization",
+    summary_input_budget = ContextBudget(
+        context_window=context_budget.context_window,
+        max_output_tokens=max_tokens,
+        safety_margin=context_budget.safety_margin,
+    ).input_budget
+    transcript_token_budget = (
+        summary_input_budget
+        - estimate_text_tokens(_SUMMARY_SYSTEM)
+        - _MESSAGE_OVERHEAD_TOKENS
     )
+    if transcript_token_budget <= 0:
+        raise ContextBudgetExceeded
+    transcript = _truncate_to_char_budget(
+        transcript,
+        transcript_token_budget * _CHARS_PER_TOKEN,
+    )
+    request = GenerationRequest(
+        messages=[Message.user(transcript)],
+        system=_SUMMARY_SYSTEM,
+        max_tokens=max_tokens,
+    )
+    started = time.perf_counter()
     try:
-        request = GenerationRequest(
-            messages=[Message.user(transcript)],
-            system=_SUMMARY_SYSTEM,
-            max_tokens=max_tokens,
-        )
         response = await llm.complete(request)
+        usage = estimate_usage_tokens(
+            response.usage,
+            messages=list(request.messages),
+            system=request.system,
+            response=response,
+            tools=request.tools,
+        )
         text = "\n".join(
             b.text for b in response.content if isinstance(b, TextBlock) and b.text
         ).strip()
     except Exception:  # noqa: BLE001
-        logger.warning(
-            "history summarization failed; degrading to pass-through", exc_info=True
+        logger.warning("history summarization failed", exc_info=True)
+        usage = estimate_usage_tokens(
+            None,
+            messages=list(request.messages),
+            system=request.system,
+            tools=request.tools,
         )
-        return None
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        return None, usage, latency_ms
+    latency_ms = round((time.perf_counter() - started) * 1000, 2)
     if not text:
-        logger.warning(
-            "history summarization returned no text; degrading to pass-through"
-        )
-        return None
-    return text
+        logger.warning("history summarization returned no text")
+        return None, usage, latency_ms
+    return text, usage, latency_ms

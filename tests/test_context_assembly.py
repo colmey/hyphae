@@ -15,22 +15,20 @@ manager drive assemble_context() and run_agent() directly.
   3. CompletionUsage estimation   - provider usage passes through untouched; a
                           zero total is filled from input+output; all-zero
                           usage is estimated non-zero from messages+response.
-  4. naive              - under budget: pass-through (same list object);
-                          over budget: pass-through + degraded_reason, no
-                          mutation, no exception.
+  4. naive              - under budget: content pass-through; over budget:
+                          explicit typed terminal boundary, no mutation.
   5. compaction         - under budget: pass-through. Over budget: first
                           user message pinned verbatim, recent units kept
                           verbatim, summary message inserted, result under
                           budget, no orphaned tool-use/tool-result pairs,
                           original history structurally identical after.
-  6. Summarizer failure - degrades to pass-through; a full run_agent run
-                          with a failing summarizer still completes.
+  6. Summarizer failure - counts the attempted auxiliary call and terminates
+                          without submitting the oversized downstream request.
   7. Loop integration   - run_agent under compaction sends the compacted
                           view to the LLM while session.messages only grows
                           by the run's normal appends.
-  8. Token-cap fallback - a zero-usage response trips budget_exceeded via
-                          the estimator when max_run_tokens is low; non-zero
-                          provider usage is used as-is (never double-counted).
+  8. Token accounting   - fallback includes exact tools; auxiliary usage is
+                          separately emitted/traced and included in caps/done.
 
 Run from the project root with ``./runscript.sh -m pytest tests/test_context_assembly.py``.
 """
@@ -43,11 +41,20 @@ from typing import Any
 
 import pytest
 
-from agent import DoneEvent, InMemorySessionStore, RunLimits, TextEvent, run_agent
+from agent import (
+    DoneEvent,
+    InMemorySessionStore,
+    RunContext,
+    RunLimits,
+    TextEvent,
+    UsageEvent,
+    run_agent,
+)
 from agent.context import (
     _SUMMARY_HEADER,
     _SUMMARY_SYSTEM,
     ContextBudget,
+    ContextBudgetExceeded,
     assemble_context,
     estimate_message_tokens,
     estimate_text_tokens,
@@ -88,10 +95,14 @@ class RecordingLLM(LLMClient):
         *,
         summary_text: str = "- decided: use the API",
         fail_summary: bool = False,
+        summary_usage: CompletionUsage | None = None,
+        after_summary: Any = None,
     ) -> None:
         self._script = list(script)
         self._summary_text = summary_text
         self._fail_summary = fail_summary
+        self._summary_usage = summary_usage or CompletionUsage()
+        self._after_summary = after_summary
         self.loop_requests: list[GenerationRequest] = []
         self.summary_requests: list[GenerationRequest] = []
         self.summary_calls = 0
@@ -102,10 +113,12 @@ class RecordingLLM(LLMClient):
             self.summary_requests.append(request)
             if self._fail_summary:
                 raise RuntimeError("summarizer backend down")
+            if self._after_summary is not None:
+                self._after_summary()
             return AssistantMessage(
                 content=[TextBlock(text=self._summary_text)],
                 stop_reason="end_turn",
-                usage=CompletionUsage(),
+                usage=self._summary_usage,
             )
         self.loop_requests.append(request)
         if not self._script:
@@ -184,7 +197,7 @@ def seed_session(session, history: list[Message]) -> None:
             )
 
 
-def protocol_ok(messages: list[Message]) -> bool:
+def protocol_ok(messages: list[Message] | tuple[Message, ...]) -> bool:
     """No orphan tool results and no unanswered assistant tool calls."""
     for i, msg in enumerate(messages):
         if msg.role == Role.TOOL:
@@ -310,6 +323,27 @@ def test_usage_estimation() -> None:
         "missing usage estimated non-zero",
     )
 
+    tools = [
+        {
+            "name": "srv__tool",
+            "description": "x" * 400,
+            "input_schema": {"type": "object"},
+        }
+    ]
+    without_tools = estimate_usage_tokens(CompletionUsage(), messages=[text_msg])
+    with_tools = estimate_usage_tokens(
+        CompletionUsage(), messages=[text_msg], tools=tools
+    )
+    check(
+        with_tools.input_tokens
+        == without_tools.input_tokens + estimate_tools_tokens(tools),
+        "fallback usage includes the exact request tool schemas",
+    )
+    check(
+        estimate_usage_tokens(provider, messages=[text_msg], tools=tools) is provider,
+        "tool schemas never change authoritative provider usage",
+    )
+
 
 async def test_naive_context_strategy() -> None:
     section("naive strategy")
@@ -319,24 +353,19 @@ async def test_naive_context_strategy() -> None:
     history = over_budget_history()
     small = [Message.user("hi")]
     assembled = await assemble_context(small, budget=budget, strategy="naive")
-    check(
-        assembled.messages is small, "under budget: pass-through returns the same list"
-    )
-    check(
-        not assembled.compacted and assembled.degraded_reason is None,
-        "under budget: not compacted, not degraded",
-    )
+    check(assembled.messages == tuple(small), "under budget: content passes through")
+    check(not assembled.compacted, "under budget: not compacted")
 
     snapshot = copy.deepcopy(history)
-    assembled = await assemble_context(history, budget=budget, strategy="naive")
-    check(assembled.messages is history, "over budget: naive still passes through")
-    check(
-        assembled.degraded_reason == "over_budget", "over budget: degraded_reason set"
-    )
+    with pytest.raises(ContextBudgetExceeded):
+        await assemble_context(history, budget=budget, strategy="naive")
     check(history == snapshot, "naive never mutates the history")
 
     unknown = await assemble_context(small, budget=budget, strategy="wat")
-    check(unknown.strategy == "naive", "unknown strategy degrades to naive")
+    check(
+        unknown.messages == tuple(small) and not unknown.compacted,
+        "unknown strategy uses naive behavior",
+    )
 
 
 async def test_compaction_strategy() -> None:
@@ -352,7 +381,7 @@ async def test_compaction_strategy() -> None:
     )
     under = await assemble_context(small, budget=budget, strategy="compaction", llm=llm)
     check(
-        under.messages is small and not under.compacted,
+        under.messages == tuple(small) and not under.compacted,
         "under budget: compaction passes through, no summarizer call",
     )
     check(llm.summary_calls == 0, "no summarizer call when under budget")
@@ -378,7 +407,7 @@ async def test_compaction_strategy() -> None:
         b.text for b in summary_prompt.content if isinstance(b, TextBlock)
     )
     check(
-        "transcript truncated for summarization" in summary_transcript,
+        "[truncated]" in summary_transcript,
         "summarizer transcript is clipped with the summary marker",
     )
     check(
@@ -396,7 +425,7 @@ async def test_compaction_strategy() -> None:
     )
     # recent_messages=2 -> last two protocol units verbatim: the recent tool
     # pair and the final user question.
-    check(assembled.messages[-3:] == history[-3:], "recent tail verbatim")
+    check(assembled.messages[-3:] == tuple(history[-3:]), "recent tail verbatim")
     check(
         protocol_ok(assembled.messages),
         "no orphan tool results / unanswered tool calls",
@@ -409,20 +438,68 @@ async def test_compaction_strategy() -> None:
     check(history == snapshot, "compaction never mutates the original history")
 
 
-async def test_too_short_history_degrades_gracefully() -> None:
+async def test_too_short_history_has_explicit_budget_outcome() -> None:
     llm = RecordingLLM([])
     short = [Message.user("x" * 4000)]
-    degraded = await assemble_context(
-        short, budget=ContextBudget(context_window=100), strategy="compaction", llm=llm
-    )
-    check(
-        degraded.messages is short
-        and degraded.degraded_reason == "too_short_to_compact",
-        "too-short over-budget history passes through with a reason",
-    )
+    with pytest.raises(ContextBudgetExceeded):
+        await assemble_context(
+            short,
+            budget=ContextBudget(context_window=100),
+            strategy="compaction",
+            llm=llm,
+        )
+    check(llm.summary_calls == 0, "impossible required view is never submitted")
 
 
-async def test_summarizer_failure_degrades_to_pass_through() -> None:
+async def test_smallest_protocol_safe_view_overflow_is_explicit() -> None:
+    llm = RecordingLLM([])
+    history = [
+        Message.user("required task header"),
+        Message.assistant([TextBlock(text="eligible middle")]),
+        Message.user("required recent request " + "x" * 4000),
+    ]
+    with pytest.raises(ContextBudgetExceeded):
+        await assemble_context(
+            history,
+            budget=ContextBudget(
+                context_window=500,
+                max_output_tokens=100,
+                safety_margin=100,
+            ),
+            strategy="compaction",
+            llm=llm,
+            recent_messages=6,
+            summary_max_tokens=64,
+        )
+    check(llm.summary_calls == 0, "smallest overflowing view is not submitted")
+
+
+async def test_oversized_summary_is_deterministically_bounded() -> None:
+    budget = ContextBudget(
+        context_window=1000,
+        max_output_tokens=200,
+        safety_margin=100,
+    )
+    llm = RecordingLLM([], summary_text="s" * 4000)
+    assembled = await assemble_context(
+        over_budget_history(),
+        budget=budget,
+        strategy="compaction",
+        llm=llm,
+        recent_messages=2,
+        summary_max_tokens=64,
+    )
+    check(assembled.estimated_input_tokens <= budget.input_budget, "hard bound")
+    summary = next(
+        block.text
+        for message in assembled.messages
+        for block in message.content
+        if isinstance(block, TextBlock) and block.text.startswith(_SUMMARY_HEADER)
+    )
+    check(summary.endswith("[truncated]"), "one deterministic truncation marker")
+
+
+async def test_summarizer_failure_terminates_without_over_budget_submission() -> None:
     section("summarizer failure")
     budget = ContextBudget(
         context_window=1000, max_output_tokens=200, safety_margin=100
@@ -430,21 +507,17 @@ async def test_summarizer_failure_degrades_to_pass_through() -> None:
     history = over_budget_history()
     failing = RecordingLLM([], fail_summary=True)
     snapshot = copy.deepcopy(history)
-    assembled = await assemble_context(
-        history, budget=budget, strategy="compaction", llm=failing, recent_messages=2
-    )
-    check(
-        not assembled.compacted and assembled.degraded_reason == "summarizer_failed",
-        "summarizer failure -> pass-through with degraded_reason",
-    )
-    check(
-        assembled.messages is history and history == snapshot,
-        "summarizer failure leaves history untouched",
-    )
+    with pytest.raises(ContextBudgetExceeded) as raised:
+        await assemble_context(
+            history, budget=budget, strategy="compaction", llm=failing, recent_messages=2
+        )
+    check(raised.value.auxiliary_usage.total_tokens > 0, "failed call is estimated")
+    check(history == snapshot, "summarizer failure leaves history untouched")
 
-    # ...and a full run still completes
+    # ...and a full run terminates explicitly without a knowingly oversized
+    # downstream generation request.
     failing = RecordingLLM(
-        [text_response("final answer after degrade")], fail_summary=True
+        [text_response("must not run")], fail_summary=True
     )
     store = InMemorySessionStore()
     session = await store.create()
@@ -466,13 +539,134 @@ async def test_summarizer_failure_degrades_to_pass_through() -> None:
     ):
         events.append(event)
     done = next(e for e in events if isinstance(e, DoneEvent))
-    check(
-        done.reason == "end_turn", "run completes end_turn despite summarizer failure"
-    )
+    check(done.reason == "budget_exceeded", "run terminates at the context boundary")
     check(failing.summary_calls == 1, "summarizer was attempted once")
+    check(failing.loop_requests == [], "over-budget downstream request was not sent")
+
+
+async def test_compaction_usage_is_separate_and_included_in_terminal_totals() -> None:
+    llm = RecordingLLM(
+        [text_response("answer", usage=CompletionUsage(total_tokens=7))],
+        summary_usage=CompletionUsage(
+            input_tokens=20,
+            output_tokens=5,
+            total_tokens=25,
+            thinking_tokens=2,
+            cached_tokens=3,
+        ),
+    )
+    session = await InMemorySessionStore().create()
+    seed_session(session, over_budget_history())
+    events = [
+        event
+        async for event in run_agent(
+            session=session,
+            llm=llm,
+            mcp=ScriptedMCP(),
+            limits=RunLimits(
+                context_strategy="compaction",
+                context_window=1000,
+                context_safety_margin_tokens=100,
+                max_tokens=200,
+                context_recent_messages=2,
+                context_summary_max_tokens=64,
+            ),
+        )
+    ]
+    usages = [event for event in events if isinstance(event, UsageEvent)]
+    check([event.total_tokens for event in usages] == [25, 7], "separate usage events")
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    check(done.total_tokens == 32, "terminal total includes compaction and generation")
+    check(done.thinking_tokens == 2, "auxiliary thinking usage reaches terminal totals")
+
+
+async def test_compaction_usage_trips_cap_before_downstream_generation() -> None:
+    llm = RecordingLLM(
+        [text_response("must not run")],
+        summary_usage=CompletionUsage(input_tokens=15, output_tokens=5, total_tokens=20),
+    )
+    session = await InMemorySessionStore().create()
+    seed_session(session, over_budget_history())
+    events = [
+        event
+        async for event in run_agent(
+            session=session,
+            llm=llm,
+            mcp=ScriptedMCP(),
+            limits=RunLimits(
+                max_run_tokens=20,
+                context_strategy="compaction",
+                context_window=1000,
+                context_safety_margin_tokens=100,
+                max_tokens=200,
+                context_recent_messages=2,
+                context_summary_max_tokens=64,
+            ),
+        )
+    ]
+    check(llm.summary_calls == 1 and llm.loop_requests == [], "cap stops generation")
     check(
-        len(failing.loop_requests[0].messages) == len(session.messages) - 1,
-        "degraded call sent the full history",
+        [event.total_tokens for event in events if isinstance(event, UsageEvent)] == [20],
+        "compaction usage is emitted once",
+    )
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    check(done.reason == "budget_exceeded" and done.total_tokens == 20, "cap terminal")
+
+
+class _RecordingTracer:
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+
+    def emit(self, record: dict[str, Any]) -> None:
+        self.records.append(record)
+
+
+async def test_compaction_usage_is_traced_before_deadline_terminal() -> None:
+    tracer = _RecordingTracer()
+    context = RunContext.start(
+        max_run_seconds=60,
+        base_logger=logging.getLogger(__name__),
+        tracer=tracer,
+    )
+
+    def expire_deadline() -> None:
+        context.deadline = context.started_at
+
+    llm = RecordingLLM(
+        [text_response("must not run")],
+        summary_usage=CompletionUsage(input_tokens=9, output_tokens=3, total_tokens=12),
+        after_summary=expire_deadline,
+    )
+    session = await InMemorySessionStore().create()
+    seed_session(session, over_budget_history())
+    events = [
+        event
+        async for event in run_agent(
+            session=session,
+            llm=llm,
+            mcp=ScriptedMCP(),
+            context=context,
+            limits=RunLimits(
+                max_run_seconds=60,
+                context_strategy="compaction",
+                context_window=1000,
+                context_safety_margin_tokens=100,
+                max_tokens=200,
+                context_recent_messages=2,
+                context_summary_max_tokens=64,
+            ),
+        )
+    ]
+    check(llm.loop_requests == [], "expired deadline stops downstream generation")
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    check(done.reason == "deadline_exceeded" and done.total_tokens == 12, "deadline total")
+    usage_records = [record for record in tracer.records if record["type"] == "usage"]
+    check(len(usage_records) == 1, "one auxiliary usage trace")
+    check(usage_records[0]["total_tokens"] == 12, "trace carries auxiliary usage")
+    check(isinstance(usage_records[0]["latency_ms"], (int, float)), "trace latency")
+    check(
+        [record["type"] for record in tracer.records] == ["usage", "done"],
+        "auxiliary usage precedes the single deadline terminal",
     )
 
 

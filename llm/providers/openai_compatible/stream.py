@@ -67,17 +67,21 @@ async def _close_sdk_stream(
 class _ToolCallAccumulator:
     """Collect streamed call fragments and finalize exactly once."""
 
-    call_id: str = ""
-    name: str = ""
+    call_id: Any = ""
+    name: Any = ""
     argument_parts: list[str] = field(default_factory=list)
+    malformed_arguments: bool = False
 
     def update(self, *, call_id: Any, name: Any, arguments: Any) -> None:
         if call_id:
-            self.call_id = str(call_id)
-        if name:
-            self.name = str(name)
-        if arguments:
-            self.argument_parts.append(str(arguments))
+            self.call_id = call_id
+        if name is not None:
+            self.name = name
+        if arguments is not None:
+            if isinstance(arguments, str):
+                self.argument_parts.append(arguments)
+            else:
+                self.malformed_arguments = True
 
     def finalize(
         self, *, logger: logging.Logger | None = None
@@ -85,7 +89,9 @@ class _ToolCallAccumulator:
         return build_tool_use_block(
             call_id=self.call_id,
             name=self.name,
-            raw_arguments="".join(self.argument_parts),
+            raw_arguments=(
+                None if self.malformed_arguments else "".join(self.argument_parts)
+            ),
             logger=logger,
         )
 

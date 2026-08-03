@@ -91,17 +91,40 @@ def build_tool_use_block(
     logger: logging.Logger | None = None,
 ) -> ToolUseBlock:
     """Finalize one provider call into the canonical, replayable tool shape."""
-    try:
-        arguments = json.loads(raw_arguments) if raw_arguments else {}
-        parse_error = None
-    except (json.JSONDecodeError, TypeError):
-        if logger is not None:
-            logger.warning("could not parse tool arguments: %r", raw_arguments)
+    if isinstance(name, str) and name.strip():
+        canonical_name = name
+        name_error = None
+    else:
+        canonical_name = "invalid_tool_call"
+        name_error = (
+            "tool call name was missing or blank"
+            if name is None or isinstance(name, str)
+            else "tool call name was malformed"
+        )
+
+    arguments: dict[str, Any] = {}
+    argument_error: str | None = None
+    if not isinstance(raw_arguments, str):
+        argument_error = "tool call arguments were not a JSON string"
+    else:
+        try:
+            decoded = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            argument_error = "tool call arguments were not valid JSON"
+        else:
+            if isinstance(decoded, dict):
+                arguments = decoded
+            else:
+                argument_error = "tool call arguments must be a JSON object"
+
+    parse_error = name_error or argument_error
+    if parse_error is not None:
         arguments = {}
-        parse_error = f"arguments were not valid JSON: {raw_arguments!r}"
+        if logger is not None:
+            logger.warning("invalid OpenAI tool call: %s", parse_error)
     return ToolUseBlock(
         id=_tool_call_id(call_id),
-        name=str(name) if name is not None else "",
+        name=canonical_name,
         input=arguments,
         parse_error=parse_error,
     )
@@ -239,17 +262,24 @@ def tools_to_openai(
 
 def build_response_format(response_schema: type) -> dict[str, Any]:
     """Build an OpenAI response format for structured output."""
-    try:
-        schema = response_schema.model_json_schema()  # type: ignore[attr-defined]
-        return {
-            "type": "json_schema",
-            "json_schema": {
-                "name": response_schema.__name__,
-                "schema": schema,
-            },
-        }
-    except Exception:  # pragma: no cover - non-Pydantic or unsupported
-        return {"type": "json_object"}
+    schema_factory = getattr(response_schema, "model_json_schema", None)
+    if not callable(schema_factory):
+        raise TypeError("response_schema must provide model_json_schema()")
+    schema = schema_factory()
+    if not isinstance(schema, Mapping):
+        raise TypeError("response_schema.model_json_schema() must return a mapping")
+    schema_name = getattr(response_schema, "__name__", None)
+    if not isinstance(schema_name, str) or not schema_name.strip():
+        raise TypeError("response_schema must have a nonblank type name")
+
+    json_schema: dict[str, Any] = {
+        "name": schema_name,
+        "schema": dict(schema),
+    }
+    return {
+        "type": "json_schema",
+        "json_schema": json_schema,
+    }
 
 
 def build_request(
@@ -390,10 +420,18 @@ def usage_from_raw(raw_usage: Any) -> CompletionUsage:
     """Map OpenAI usage onto the provider-neutral usage schema."""
     if raw_usage is None:
         return CompletionUsage()
+    completion_details = getattr(raw_usage, "completion_tokens_details", None)
+    prompt_details = getattr(raw_usage, "prompt_tokens_details", None)
     return CompletionUsage(
         input_tokens=coerce_usage_count(getattr(raw_usage, "prompt_tokens", 0)),
         output_tokens=coerce_usage_count(
             getattr(raw_usage, "completion_tokens", 0)
         ),
         total_tokens=coerce_usage_count(getattr(raw_usage, "total_tokens", 0)),
+        thinking_tokens=coerce_usage_count(
+            getattr(completion_details, "reasoning_tokens", 0)
+        ),
+        cached_tokens=coerce_usage_count(
+            getattr(prompt_details, "cached_tokens", 0)
+        ),
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import FrozenInstanceError
 import inspect
+import json
 import logging
 from pathlib import Path
 import subprocess
@@ -19,6 +20,7 @@ from llm.providers.openai_compatible import OpenAICompatibleLLMClient
 from llm.providers.openai_compatible.client import OpenAICompatibleClientConfig
 from llm.providers.openai_compatible.codec import (
     build_request,
+    build_tool_use_block,
     merge_extra_body,
     messages_to_openai,
     build_response_format,
@@ -377,7 +379,76 @@ def test_missing_tool_id_and_malformed_arguments_remain_replayable(
     assert tool_use.parse_error is not None
     replay = messages_to_openai([message.to_message()], None)
     assert replay[0]["tool_calls"][0]["id"] == tool_use.id
-    assert "could not parse tool arguments" in caplog.text
+    assert "invalid OpenAI tool call" in caplog.text
+    assert '{"broken":' not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("name", "raw_arguments", "expected_name", "error_fragment"),
+    [
+        ("srv__tool", "{}", "srv__tool", None),
+        ("srv__tool", '{"value": 1}', "srv__tool", None),
+        ("srv__tool", "{broken", "srv__tool", "valid JSON"),
+        ("srv__tool", "[]", "srv__tool", "JSON object"),
+        ("srv__tool", '"scalar"', "srv__tool", "JSON object"),
+        ("srv__tool", "1", "srv__tool", "JSON object"),
+        ("srv__tool", "null", "srv__tool", "JSON object"),
+        ("srv__tool", None, "srv__tool", "JSON string"),
+        ("srv__tool", {"sdk": "value"}, "srv__tool", "JSON string"),
+        ("", "{}", "invalid_tool_call", "name was missing or blank"),
+        ("   ", "{}", "invalid_tool_call", "name was missing or blank"),
+        (None, "{}", "invalid_tool_call", "name was missing or blank"),
+        (123, "{}", "invalid_tool_call", "name was malformed"),
+    ],
+)
+def test_tool_calls_enforce_replayable_object_and_name_contract(
+    name: Any,
+    raw_arguments: Any,
+    expected_name: str,
+    error_fragment: str | None,
+) -> None:
+    tool_use = build_tool_use_block(
+        call_id=None,
+        name=name,
+        raw_arguments=raw_arguments,
+    )
+
+    assert tool_use.id.startswith("call_")
+    assert tool_use.name == expected_name
+    if error_fragment is None:
+        assert tool_use.input == json.loads(raw_arguments)
+        assert tool_use.parse_error is None
+    else:
+        assert tool_use.input == {}
+        assert error_fragment in (tool_use.parse_error or "")
+        assert len(tool_use.parse_error or "") <= 96
+        replay = messages_to_openai(
+            [Message.assistant([tool_use])],
+            None,
+        )
+        replayed_call = replay[0]["tool_calls"][0]
+        assert replayed_call["id"] == tool_use.id
+        assert replayed_call["function"]["name"] == tool_use.name
+        assert replayed_call["function"]["arguments"] == "{}"
+
+
+def test_tool_parse_logging_never_includes_raw_argument_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret_body = '{"secret":"do-not-log"'
+    logger = logging.getLogger("openai-tool-parse-test")
+    caplog.set_level(logging.WARNING, logger=logger.name)
+
+    tool_use = build_tool_use_block(
+        call_id="call_secret",
+        name="srv__tool",
+        raw_arguments=secret_body,
+        logger=logger,
+    )
+
+    assert tool_use.parse_error is not None
+    assert secret_body not in caplog.text
+    assert "do-not-log" not in caplog.text
 
 
 def test_message_and_tool_result_replay() -> None:
@@ -438,6 +509,56 @@ def test_usage_coercion_degrades_malformed_values_to_zero() -> None:
     )
 
     assert usage == CompletionUsage(input_tokens=11, output_tokens=0, total_tokens=0)
+
+
+def test_usage_maps_reasoning_and_cached_details_without_recomputing_total() -> None:
+    usage = usage_from_raw(
+        SimpleNamespace(
+            prompt_tokens=11,
+            completion_tokens=7,
+            total_tokens=99,
+            prompt_tokens_details=SimpleNamespace(cached_tokens="5"),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=3),
+        )
+    )
+
+    assert usage == CompletionUsage(
+        input_tokens=11,
+        output_tokens=7,
+        total_tokens=99,
+        thinking_tokens=3,
+        cached_tokens=5,
+    )
+
+
+def test_usage_detail_zeros_and_malformed_values_use_safe_coercion() -> None:
+    zero = usage_from_raw(
+        SimpleNamespace(
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        )
+    )
+    malformed = usage_from_raw(
+        SimpleNamespace(
+            prompt_tokens=1,
+            completion_tokens=2,
+            total_tokens=3,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=object()),
+            completion_tokens_details=SimpleNamespace(
+                reasoning_tokens=float("inf")
+            ),
+        )
+    )
+
+    assert zero == CompletionUsage()
+    assert malformed == CompletionUsage(
+        input_tokens=1,
+        output_tokens=2,
+        total_tokens=3,
+    )
 
 
 def test_real_openai_request_uses_supported_shape() -> None:
@@ -510,6 +631,70 @@ def test_structured_output_removes_tools_and_reports_client_signal() -> None:
     assert "tool_choice" not in built.sdk_kwargs
     assert built.ignored_tools_for_structured_output is True
     assert built.sdk_kwargs["response_format"] == build_response_format(Structured)
+    assert built.sdk_kwargs["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "Structured",
+            "schema": {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+            },
+        },
+    }
+
+
+def test_compatible_structured_output_preserves_existing_non_strict_shape() -> None:
+    class Structured:
+        @classmethod
+        def model_json_schema(cls) -> dict[str, Any]:
+            return {"type": "object"}
+
+    built = build_request(
+        GenerationRequest(messages=[], response_schema=Structured),
+        _config(compatible=True),
+    )
+
+    assert built.sdk_kwargs["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "Structured",
+            "schema": {"type": "object"},
+        },
+    }
+
+
+def test_structured_output_rejects_unsupported_schema_type() -> None:
+    with pytest.raises(TypeError, match="model_json_schema"):
+        build_request(
+            GenerationRequest(messages=[], response_schema=dict),
+            _config(),
+        )
+
+
+def test_structured_output_rejects_non_mapping_generated_schema() -> None:
+    class BrokenSchema:
+        @classmethod
+        def model_json_schema(cls) -> list[Any]:
+            return []
+
+    with pytest.raises(TypeError, match="must return a mapping"):
+        build_request(
+            GenerationRequest(messages=[], response_schema=BrokenSchema),
+            _config(),
+        )
+
+
+def test_structured_output_propagates_schema_generation_failure() -> None:
+    class BrokenSchema:
+        @classmethod
+        def model_json_schema(cls) -> dict[str, Any]:
+            raise RuntimeError("schema construction failed")
+
+    with pytest.raises(RuntimeError, match="schema construction failed"):
+        build_request(
+            GenerationRequest(messages=[], response_schema=BrokenSchema),
+            _config(),
+        )
 
 
 def test_extra_body_merge_preserves_existing_extensions() -> None:
@@ -726,6 +911,50 @@ async def test_streamed_tool_json_handles_every_split_point() -> None:
         assert tool_use.id.startswith("call_"), parts
         assert tool_use.input == {"query": "fragmented"}, parts
         assert end.message.stop_reason == "tool_use"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "arguments", "error_fragment"),
+    [
+        ("srv__lookup", "[]", "JSON object"),
+        ("", "{}", "name was missing or blank"),
+        ("srv__lookup", {}, "JSON string"),
+    ],
+)
+async def test_streamed_tool_calls_reject_invalid_final_shapes(
+    name: Any,
+    arguments: Any,
+    error_fragment: str,
+) -> None:
+    emitted = await _decode(
+        _OwnedSDKStream(
+            [
+                _sdk_chunk(
+                    _delta(
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id="call_invalid",
+                                function=SimpleNamespace(
+                                    name=name,
+                                    arguments=arguments,
+                                ),
+                            )
+                        ]
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ]
+        )
+    )
+    end = next(chunk for chunk in emitted if isinstance(chunk, StreamEnd))
+    tool_use = end.message.tool_uses()[0]
+
+    assert tool_use.id == "call_invalid"
+    assert tool_use.name
+    assert tool_use.input == {}
+    assert error_fragment in (tool_use.parse_error or "")
 
 
 @pytest.mark.anyio
@@ -1030,9 +1259,35 @@ async def test_stream_rejects_response_schema_before_sdk_call() -> None:
 
 
 @pytest.mark.anyio
+async def test_client_schema_failure_happens_before_sdk_call() -> None:
+    class BrokenSchema:
+        @classmethod
+        def model_json_schema(cls) -> dict[str, Any]:
+            raise ValueError("invalid response schema")
+
+    completions = _CompletionCapture(_response(content="unused"))
+    client = _client()
+    client._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=completions)
+    )
+
+    with pytest.raises(ValueError, match="invalid response schema"):
+        await client.complete(
+            GenerationRequest(messages=[], response_schema=BrokenSchema)
+        )
+
+    assert completions.requests == []
+
+
+@pytest.mark.anyio
 async def test_client_logs_translation_notices_with_once_only_thinking(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    class Structured:
+        @classmethod
+        def model_json_schema(cls) -> dict[str, Any]:
+            return {"type": "object"}
+
     completions = _CompletionCapture(_response(content="ok"))
     client = _client(profile=ModelProfile(thinking="none"))
     client._client = SimpleNamespace(
@@ -1041,7 +1296,7 @@ async def test_client_logs_translation_notices_with_once_only_thinking(
     request = GenerationRequest(
         messages=[Message.user("hello")],
         tools=[{"name": "tool", "description": "", "input_schema": {}}],
-        response_schema=dict,
+        response_schema=Structured,
         thinking_level="high",
     )
     caplog.set_level(

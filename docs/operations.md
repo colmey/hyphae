@@ -278,8 +278,9 @@ points straight at its trace. Grep one run with `grep '"run_id":"a1b2…"'`.
 
 The seam is `agent/tracing.py`: a `Tracer` ABC with async `start()` / `aclose()`
 and synchronous `emit(record)`, a `NoOpTracer`, and the `JSONLTracer`. Lifespan
-starts the tracer before publishing it through `app.state`; a routine open
-failure degrades to `tracer=None`. **Tracing is optional and best-effort:**
+starts the tracer before atomically publishing the complete
+`ApplicationRuntime` as `app.state.runtime`; a routine open failure publishes a
+runtime whose `tracer` is `None`. **Tracing is optional and best-effort:**
 disabled (the default) creates no queue, task, directory, or file.
 
 An enabled tracer serializes each event before submitting it to a bounded queue;
@@ -504,6 +505,10 @@ so a normal run neither loads developer credentials nor contacts configured serv
 ./runscript.sh -m pytest
 ```
 
+The current verified default suite contains 742 hermetic cases and deselects
+the seven explicitly live cases. The exact count may grow, but the live split
+must remain explicit.
+
 Configured-backend checks live behind an explicit `live` marker and are never part of
 that default signal. Select all live checks, or narrow them by capability:
 
@@ -523,6 +528,26 @@ All former smoke coverage is now pytest-native. Configured MCP, model, agent,
 orchestrator, HTTP, concurrency, and OpenAI-provider checks live in focused
 `test_*_live.py` modules with explicit markers. See `tests/README.md` for the
 current organization and focused commands.
+
+### Static and CI checks
+
+Run the repository-owned verification commands from the project root:
+
+```bash
+uv run ruff check .
+uv run mypy
+uv run python -m compileall -q \
+  agent api config llm mcp_runtime orchestrator tooling main.py tests
+uv run pytest --collect-only -q -m live
+uv run pytest -q
+```
+
+Mypy is strict. Its roots are declared once in `pyproject.toml`: all 48
+production Python modules plus `tests/fakes.py` and `tests/_app_support.py`.
+Ordinary test modules remain outside strict checking; the two shared support
+modules are included because they implement reusable production boundaries.
+The GitHub verification workflow runs the same argument-free `uv run mypy`
+command, so local and CI target sets cannot drift.
 
 ---
 

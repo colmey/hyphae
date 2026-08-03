@@ -26,7 +26,13 @@ application in-process; they do not require a separately launched Uvicorn proces
 ## Organization
 
 - `test_*.py` contains pytest-discovered hermetic regression tests.
-- `conftest.py` contains focused shared fakes and helpers.
+- `conftest.py` contains pytest fixtures.
+- `fakes.py` contains strict reusable `LLMClient`/`ToolRuntime` fakes and the
+  typed event collector.
+- `_app_support.py` contains strict typed FastAPI wiring around one complete
+  `ApplicationRuntime`; application tests replace that runtime or one named
+  value through its focused helpers rather than mutating independent
+  `app.state` fields.
 - `test_*_live.py` contains explicitly marked configured MCP, model, agent,
   orchestrator, HTTP, concurrency, and OpenAI-provider checks.
 - `eval_agent.py` remains a separate YAML-driven evaluation runner.
@@ -40,3 +46,14 @@ Run one configured integration directly by node id when diagnosing a layer, for 
 Run deterministic agent evaluations separately with
 `./runscript.sh tests/eval_agent.py`; opt into its live tier with
 `EVAL_LIVE=1 ./runscript.sh tests/eval_agent.py`.
+
+The repository mypy configuration checks both shared support modules in strict
+mode alongside production code. Run the exact local/CI gate with:
+
+```bash
+uv run mypy
+```
+
+Ordinary test modules remain excluded from strict checking; reusable support is
+included because protocol drift there can invalidate many otherwise-hermetic
+tests at once.

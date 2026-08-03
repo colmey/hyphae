@@ -27,17 +27,21 @@ design decisions behind them.
 │                              HTTP Client                                    │
 │                                  │                                          │
 │                                  ▼                                          │
-│                          POST /chat, GET /health                            │
+│              Native /chat* + /health; OpenAI-compatible /v1/*             │
 │                                                                             │
-│  ┌──────────────────────── api/routes.py ───────────────────────┐           │
+│  ┌──────────── api/routes.py + api/openai_compatible.py ───────┐           │
 │  │                                                                │         │
-│  │  1. Read the plain-text prompt; resolve/create the session     │         │
-│  │  2. Orchestrate -> pick model + tools + system                 │         │
-│  │  3. Append user message, run agent loop with the selections    │         │
-│  │  4. Stream-collect the answer text                             │         │
-│  │  5. Return plain text + X-Session-Id / X-Done-Reason headers   │         │
+│  │  1. Parse the native or OpenAI-compatible request              │         │
+│  │  2. Inject one typed ApplicationRuntime                        │         │
+│  │  3. Derive one coherent TurnRunner and resolve the session     │         │
+│  │  4. Run/stream the accepted turn                               │         │
+│  │  5. Render native text/SSE or OpenAI JSON/SSE                  │         │
 │  │                                                                │         │
-│  └────────────┬─────────────────────────────────┬────────────────┘          │
+│  └────────────────────────┬──────────────────────────────────────┘          │
+│                           ▼                                                 │
+│  ┌── api.dependencies.ApplicationRuntime / api.turn.TurnRunner ──┐         │
+│  │ settings + routing + limits + MCP + store/guard + policy/trace │         │
+│  └────────────┬─────────────────────────────────┬─────────────────┘         │
 │               │                                 │                           │
 │               ▼                                 ▼                           │
 │  ┌───── orchestrator/orchestrator.py ──┐  ┌── agent/loop.py: run_agent()    │
@@ -59,9 +63,17 @@ The **orchestrator** is an LLM-driven router that runs once per request
 and outputs a structured decision: which model handles the request,
 which subset of the MCP tool inventory the agent will see, and what
 system prompt the agent will run with. Its output is then fed into
-`run_agent()`, which is the reasoning loop and the **one bridge between
-worlds** — the only module that touches both the LLM client and the MCP
-manager.
+`run_agent()`, which is the provider-neutral reasoning loop and the bridge
+between `LLMClient` and the turn-local `ToolRuntime`. MCP connection/catalog
+ownership remains behind that neutral tool contract.
+
+The FastAPI lifespan publishes exactly one
+`api.dependencies.ApplicationRuntime` on `app.state`. It is a frozen process
+composition containing settings, routing, limits, MCP ownership, session
+store/guard, policy, and tracer. Every HTTP route receives that same value
+through `get_application_runtime()` and derives its `TurnRunner` from it; there
+are no independently injected stores or partially assembled routing fields.
+Whole-runtime dependency overrides therefore replace one coherent graph.
 
 `TurnRunner.open()` owns the accepted-turn envelope. After the route resolves or
 creates the session identity, it claims that identity before consuming the
@@ -89,6 +101,9 @@ finish. `TurnMetadata` carries the resolved model and optional sanitized
   declared `input_schema` at the dispatch seam (Phase 1 bounded runs).
 - **`pytest` + AnyIO** for hermetic regression discovery and async tests, and
   **`asgi-lifespan`** for FastAPI lifespan in in-process httpx checks.
+- **Mypy strict mode** for all production modules plus the two reusable test
+  support boundaries; target ownership lives in `pyproject.toml` and CI runs
+  the same argument-free `uv run mypy` command.
 
 ### Runtime conventions
 
@@ -96,7 +111,9 @@ finish. `TurnMetadata` carries the resolved model and optional sanitized
   production reader. A private interpolation map retains raw, source-provided
   declared and undeclared values without exposing undeclared keys as Settings
   fields or mutating `os.environ`; real process values win.
-  `Settings(_env_file=None)` is the hermetic-test boundary.
+  Direct fixtures use `Settings(_env_file=None)` as a hermetic boundary; the
+  strict ASGI support uses `Settings.model_validate(...)` so it bypasses all
+  settings sources without a third-party constructor typing workaround.
 - **Settings are pulled lazily** via `config.get_settings()`. Nothing imports a
   module-level settings instance, so importing `main` is credential-free and
   leaves process environment state untouched.
@@ -116,6 +133,23 @@ finish. `TurnMetadata` carries the resolved model and optional sanitized
 - **All runtime config lives under `config/`.** Three files: MCP server
   definitions, model registry, orchestrator system prompt. See
   [configuration.md](configuration.md).
+
+### Static typing boundaries
+
+Strict typing is the production default, not an aspirational check. Concrete
+domain values and narrow capability protocols carry data between packages;
+`Any` remains only where the value is genuinely unvalidated or SDK-shaped,
+not as a substitute for application ownership. The principal examples are tool
+JSON dictionaries, provider payloads, Pydantic's pre-validation input, and
+`LoggerAdapter.process()`'s standard-library-defined dynamic message mapping.
+
+Settings-facing protocols expose read-only properties, so frozen Pydantic
+settings satisfy consumers without falsely promising mutation. Per-run code
+accepts either a plain `logging.Logger` or the run-ID
+`logging.LoggerAdapter[logging.Logger]`; this is one logger capability at a
+time, not a collection. Reusable test fakes are checked against the same
+production protocols so ASGI/runtime tests cannot silently drift to a looser
+object shape.
 
 ---
 
@@ -138,7 +172,9 @@ hyphae/
 │   └── orchestrator_prompt.md  # Orchestrator's own system prompt
 │
 ├── tests/                    # Hermetic pytest suite + marked live checks
-│   ├── conftest.py               # Focused shared fakes and fixtures
+│   ├── conftest.py               # Shared pytest fixtures
+│   ├── fakes.py                  # Strict reusable LLM/tool fakes
+│   ├── _app_support.py           # Strict typed ASGI runtime wiring
 │   ├── test_*.py                  # Hermetic regression tests
 │   ├── test_*_live.py             # Explicit configured-backend integrations
 │   └── eval_agent.py              # Separate YAML-driven evaluation runner
@@ -181,7 +217,7 @@ hyphae/
 ├── api/
 │   ├── __init__.py           # Combines the routers into one
 │   ├── schemas.py            # HealthResponse and HTTP TokenUsage (Pydantic)
-│   ├── dependencies.py       # FastAPI Depends() providers (pull from app.state)
+│   ├── dependencies.py       # Typed ApplicationRuntime + whole-runtime Depends()
 │   ├── turn.py               # Shared orchestrate→loop core + TurnRunner seam (events/run)
 │   ├── routes.py             # Native: GET /health, POST /chat, POST /chat/stream
 │   └── openai_compatible.py  # OpenAI adapter: POST /v1/chat/completions, GET /v1/models
@@ -512,9 +548,9 @@ applies this terminal map:
   specificity have it.
 
 **Concurrency model.** FastAPI interleaves async handlers on one event loop.
-Distinct sessions use distinct `Session` objects; shared `app.state` singletons
-carry no per-user state. The only crossover vector is two concurrent requests on
-the same `session_id`.
+Distinct sessions use distinct `Session` objects; the single shared
+`app.state.runtime` composition carries no per-user state. The only crossover
+vector is two concurrent requests on the same `session_id`.
 
 - `SessionGuard` (`agent/session.py`) closes that vector: `claim(session_id)`
   is an async context manager that registers the id as in-flight; a second
@@ -554,11 +590,11 @@ recover. `ErrorEvent` is only for failures the model never sees.
 async def run_agent(
     session: Session,
     llm: LLMClient,
-    mcp: MCPManager,
+    mcp: ToolRuntime,
     *,
     store: SessionStore | None = None,
     system: str | None = None,
-    tools: list[dict] | None = None,
+    tools: list[dict[str, Any]] | None = None,
     thinking_level: str | None = None,
     limits: RunLimits | None = None,
     context: RunContext | None = None,
@@ -878,27 +914,24 @@ override directly.
 Startup order:
 1. `get_settings()` — Pydantic reads process variables and the project `.env`
    without mutating global environment state.
-2. `build_llm_client(settings)` — fails fast if API key missing.
-   This is the *legacy/default* client used when orchestration is
-   disabled.
-3. `load_mcp_config_from_settings(settings)` using the precedence-resolved,
+2. `load_mcp_config_from_settings(settings)` using the precedence-resolved,
    raw Settings mapping.
-4. `MCPManager(mcp_config, connect_timeout_seconds=...).startup()` — discovers
+3. `MCPManager(mcp_config, connect_timeout_seconds=...).startup()` — discovers
    all enabled-server catalogs in parallel without retaining connections. Each
    transport-open + initialize + list operation, at startup, request-driven
    refresh, or turn-lease discovery, is bounded as one unit
    unless the setting is `<= 0`; startup failures degrade MCP health without
    aborting application startup.
-5. `InMemorySessionStore()` and `SessionGuard()`.
-6. `_try_build_orchestration(settings)` — returns registry/orchestrator or
+4. Build the tool policy, `InMemorySessionStore`, and `SessionGuard`.
+5. `_try_build_orchestration(settings)` — returns registry/orchestrator or
    `(None, None)` on optional-layer failure. The legacy default LLM is built
    only for that fallback path; successful orchestration owns its clients
    exclusively through the registry.
-7. Policy and tracer are built. An enabled tracer opens its sink and starts its
-   bounded writer after the event loop exists; routine tracer startup failure
-   degrades to `None`. Only the successfully started tracer is published on
-   `app.state`.
-8. A single consolidated "harness ready" INFO log line is emitted.
+6. Start the optional tracer. Routine startup failure degrades to `None`.
+7. Construct one explicit `OrchestratedRouting` or `UnorchestratedRouting`, then
+   atomically publish `ApplicationRuntime` as `app.state.runtime`. No individual
+   runtime component is published separately.
+8. Emit one consolidated "harness ready" INFO log line.
 
 Shutdown attempts LLM, MCP, and tracer cleanup independently. The default LLM
 and every constructed registry client are deduplicated by object identity and
@@ -910,8 +943,12 @@ cancellation that initiated shutdown. Tracer cleanup first stops acceptance,
 then drains healthy accepted records through the background writer; its final
 counters are logged before active cancellation is re-raised.
 
-**`api/dependencies.py`** — `Depends()` providers that pull from `app.state`.
-`require_api_key` is the optional route-layer auth gate for `/chat`,
+**`api/dependencies.py`** — owns the typed process composition and the one
+dynamic framework seam. `get_application_runtime()` reads and validates
+`app.state.runtime`; routes and `require_api_key` derive everything else from
+that value. `ApplicationMCP` is the consumer-owned structural boundary for MCP
+turn ownership plus the health/catalog views HTTP actually needs.
+`require_api_key` remains the optional route-layer auth gate for `/chat`,
 `/chat/stream`, and `/v1/*`; `/health` stays open.
 
 **`api/routes.py`** — request flow:
@@ -953,15 +990,17 @@ and backlog as dropped; see `agent/tracing.py` and operations docs.
 
 ## Architectural Principles
 
-1. **Separate the agent loop from the LLM client.** The LLM client only
-   knows how to send messages and get a response back. The loop is the
-   only place that knows about tools, MCP, and iteration. This is the
-   #1 thing that keeps the harness extendable.
-2. **MCP servers are long-lived.** Connect on startup via the FastAPI
-   lifespan; do not spawn per-request.
-3. **One bridge between worlds.** `agent/loop.py` is the only module
-   that touches both the LLM client and the MCP manager. Neither of
-   those two knows the other exists.
+1. **Separate the agent loop from provider and transport ownership.** The LLM
+   client only sends canonical requests and returns canonical responses. The
+   loop consumes the neutral `ToolRuntime`; it does not own MCP connections or
+   provider SDK state.
+2. **MCP catalogs are process-owned; transport leases are turn-owned.** Startup
+   discovers immutable catalogs without retaining connections. Accepted turns
+   refresh due catalogs, and actual dispatch lazily opens task-owned connections
+   that close with that turn.
+3. **One provider-neutral bridge between model and tools.** `agent/loop.py`
+   coordinates `LLMClient` and `ToolRuntime`. Provider SDKs and MCP transports
+   remain behind those contracts and do not know about each other.
 4. **The loop is an async generator** yielding typed events. Each HTTP
    surface is a thin renderer over the same generator (`api/turn.py`):
    `/chat` collects all events into one plain-text response, `/chat/stream`
@@ -1045,8 +1084,10 @@ resolve a problem we hit; don't change them without understanding why.
     assistant turns and tool round-trips.
 17. **System prompt is a per-call argument, not stored on the Session.**
     Session = conversation state; system prompt = call-time configuration.
-18. **Routes use `Depends()`, not `request.app.state` directly.** Keeps
-    routes testable and explicit about their deps.
+18. **Routes inject one complete runtime, not individual state fields.** Only
+    `get_application_runtime()` reads `app.state`; native/OpenAI/auth/health
+    paths derive their owners from the same immutable composition. Tests
+    override the whole runtime, preventing split stores or partial routing.
 19. **Loop events serialize explicitly, never `dataclasses.asdict`.** The
     plain-text `/chat` response carries no event stream, but two serializers now
     exist — the JSONL trace (`agent/tracing.py`) and the `/v1` SSE adapter — and
@@ -1079,8 +1120,11 @@ resolve a problem we hit; don't change them without understanding why.
     `GenerationRequest` carries `tools=None` to enforce this.
 25. **Orchestration is optional and degradable.** Missing config files,
     failed LLM calls, or bad outputs all degrade to the legacy
-    (pre-orchestrator) behavior. `TurnRunner` checks its optional orchestrator
-    and registry and resolves the legacy path when either is absent.
+    (pre-orchestrator) behavior. Startup constructs one explicit routing union:
+    `OrchestratedRouting` contains both orchestrator and registry;
+    `UnorchestratedRouting` contains the fixed client/model and optional model
+    inventory. `TurnRunner` never reconstructs that choice from loose optional
+    state fields.
 26. **`TurnRequest.system_override` overrides `generated_system_prompt`.** The
     orchestrator still runs to pick model and tools, but combined `/v1` system
     messages win for downstream generation. Native `/chat` supplies no override.

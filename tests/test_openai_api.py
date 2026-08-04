@@ -103,6 +103,9 @@ class RegistryStub:
     def __init__(self, clients: dict[str, LLMClient]) -> None:
         self.clients = clients
 
+    def is_configured(self, model_id: str) -> bool:
+        return model_id in self.model_ids
+
     def get_or_default(self, model_id: str | None) -> tuple[str, LLMClient]:
         resolved = model_id if model_id in self.model_ids else "selected"
         return resolved, self.clients[resolved]
@@ -145,6 +148,8 @@ async def test_models_returns_registry_in_openai_list_shape(asgi_client) -> None
     llm = FakeLLM()
     with wired_app(llm) as (app, settings):
         registry = _registry(settings)
+        for model_id in registry._config.models:
+            registry._clients[model_id] = llm
         replace_routing(
             app,
             UnorchestratedRouting(
@@ -159,7 +164,68 @@ async def test_models_returns_registry_in_openai_list_shape(asgi_client) -> None
     body = response.json()
     assert body["object"] == "list"
     assert [model["id"] for model in body["data"]] == registry.model_ids
+    assert registry.model_ids
     assert all(model["object"] == "model" for model in body["data"])
+
+
+async def test_fixed_default_models_listing_hides_other_ready_registry_models(
+    asgi_client,
+) -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, settings):
+        registry = _registry(settings)
+        for model_id in registry._config.models:
+            registry._clients[model_id] = llm
+        default_id = registry.default_id()
+        replace_routing(
+            app,
+            UnorchestratedRouting(
+                llm=llm,
+                model_id=default_id,
+                inventory=registry,
+                advertised_model_ids=(default_id,),
+            ),
+        )
+        response = await asgi_client(app).get("/v1/models")
+
+    response.raise_for_status()
+    assert [model["id"] for model in response.json()["data"]] == [default_id]
+
+
+async def test_fixed_default_health_is_unorchestrated_and_default_only(
+    asgi_client,
+) -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, settings):
+        registry = _registry(settings)
+        for model_id in registry._config.models:
+            registry._clients[model_id] = llm
+        default_id = registry.default_id()
+        replace_routing(
+            app,
+            UnorchestratedRouting(
+                llm=llm,
+                model_id=default_id,
+                inventory=registry,
+                advertised_model_ids=(default_id,),
+            ),
+        )
+        response = await asgi_client(app).get("/health")
+
+    response.raise_for_status()
+    assert response.json()["orchestration_enabled"] is False
+    assert response.json()["available_model_ids"] == [default_id]
+
+
+async def test_direct_health_remains_unorchestrated_without_model_inventory(
+    asgi_client,
+) -> None:
+    with wired_app(FakeLLM()) as (app, _settings):
+        response = await asgi_client(app).get("/health")
+
+    response.raise_for_status()
+    assert response.json()["orchestration_enabled"] is False
+    assert response.json()["available_model_ids"] == []
 
 
 @pytest.mark.parametrize("path", ["/v1/models", "/v1/chat/completions"])

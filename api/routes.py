@@ -60,11 +60,16 @@ async def health(
 ) -> HealthResponse:
     mcp = runtime.mcp
     settings = runtime.settings
-    registry = (
-        runtime.routing.registry
-        if isinstance(runtime.routing, OrchestratedRouting)
-        else runtime.routing.inventory
-    )
+    routing = runtime.routing
+    if isinstance(routing, OrchestratedRouting):
+        orchestration_enabled = True
+        available_model_ids = routing.registry.model_ids
+    elif routing.advertised_model_ids is not None:
+        orchestration_enabled = False
+        available_model_ids = list(routing.advertised_model_ids)
+    else:
+        orchestration_enabled = False
+        available_model_ids = []
     server_statuses = mcp.status_snapshot()
     return HealthResponse(
         status=(
@@ -89,8 +94,8 @@ async def health(
             )
             for status in server_statuses
         ],
-        orchestration_enabled=registry is not None,
-        available_model_ids=registry.model_ids if registry is not None else [],
+        orchestration_enabled=orchestration_enabled,
+        available_model_ids=available_model_ids,
     )
 
 

@@ -70,5 +70,5 @@ class HealthResponse(BaseModel):
     )
     available_model_ids: list[str] = Field(
         default_factory=list,
-        description="Model IDs the orchestrator may route to. Empty when orchestration is disabled.",
+        description="Executable model IDs advertised by the active routing mode.",
     )

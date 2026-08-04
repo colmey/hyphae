@@ -34,7 +34,7 @@ from llm.providers.openai_compatible import OpenAICompatibleLLMClient
 from llm.schemas import AssistantMessage
 from main import _close_application_resources, _start_optional_tracer, lifespan
 from mcp_runtime import MCPServerStatus, Tool
-from orchestrator import LLMRegistry
+from orchestrator import LLMRegistry, ModelUnavailableError
 from tooling import ToolCallResult, ToolRuntime
 
 pytestmark = pytest.mark.anyio
@@ -693,11 +693,12 @@ async def test_orchestrated_lifespan_skips_unorchestrated_client_and_closes_regi
             "orchestrated startup must not build an unorchestrated LLM"
         ),
     )
-    monkeypatch.setattr(
-        main_module,
-        "_try_build_orchestration",
-        lambda value: (registry, object(), "trusted agent system"),
-    )
+    async def build_orchestration(value: Any) -> tuple[LLMRegistry, OrchestratedRouting]:
+        return registry, OrchestratedRouting(
+            orchestrator=object(), registry=registry, agent_system_prompt="trusted agent system"
+        )
+
+    monkeypatch.setattr(main_module, "_try_build_orchestration", build_orchestration)
 
     async with lifespan(app):
         runtime = app.state.runtime
@@ -728,7 +729,7 @@ async def test_orchestration_setup_failure_builds_one_unorchestrated_client(
     monkeypatch.setattr(
         main_module,
         "_try_build_orchestration",
-        lambda value: (None, None, None),
+        lambda value: _no_orchestration(),
     )
 
     async with lifespan(FastAPI()) as _:
@@ -738,7 +739,162 @@ async def test_orchestration_setup_failure_builds_one_unorchestrated_client(
     assert default.close_calls == 1
 
 
-def test_present_invalid_orchestration_config_is_fatal_before_provider_build(
+def _readiness_config(*, control_native_tools: bool = True) -> ModelsConfig:
+    return ModelsConfig(
+        models={
+            "default": ModelEntry(
+                provider="test", model="default", description="Default.", default=True
+            ),
+            "control": ModelEntry(
+                provider="test",
+                model="control",
+                description="Control.",
+                supports_native_tools=control_native_tools,
+            ),
+            "optional": ModelEntry(
+                provider="test", model="optional", description="Optional."
+            ),
+        }
+    )
+
+
+def test_registry_preflight_publishes_only_ready_models_and_reuses_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients = {model_id: _ClosingClient() for model_id in ("default", "control")}
+    calls: list[str] = []
+
+    def build(entry: ModelEntry, settings: Any) -> LLMClient:
+        calls.append(entry.model)
+        if entry.model == "optional":
+            raise RuntimeError("secret construction detail")
+        return clients[entry.model]
+
+    monkeypatch.setattr(registry_module, "build_llm_client_from_entry", build)
+    registry = LLMRegistry(_readiness_config(), _RegistrySettings())
+
+    registry.preflight()
+
+    assert calls == ["default", "control", "optional"]
+    assert registry.model_ids == ["default", "control"]
+    assert "optional" not in registry.describe_for_prompt()
+    assert registry.get("control") is clients["control"]
+    assert calls == ["default", "control", "optional"]
+    assert registry.get_or_default("optional") == ("default", clients["default"])
+    with pytest.raises(ModelUnavailableError, match="optional"):
+        registry.get("optional")
+    with pytest.raises(KeyError, match="unknown"):
+        registry.get("unknown")
+
+
+async def test_default_preflight_failure_closes_partial_clients_without_raw_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ready = _ClosingClient()
+    secret = "https://token:secret.example"
+
+    def build(entry: ModelEntry, settings: Any) -> LLMClient:
+        if entry.model == "default":
+            raise RuntimeError(secret)
+        return ready
+
+    monkeypatch.setattr(registry_module, "build_llm_client_from_entry", build)
+    monkeypatch.setattr(
+        main_module,
+        "load_models_config_from_settings",
+        lambda settings, known_providers: _readiness_config(),
+    )
+    monkeypatch.setattr(main_module, "load_orchestrator_prompt", lambda path: "route")
+    monkeypatch.setattr(main_module, "load_agent_prompt", lambda path: "agent")
+    settings = SimpleNamespace(
+        orchestration_enabled=True,
+        models_config_path="models.yaml",
+        orchestrator_prompt_path="orchestrator.md",
+        agent_prompt_path="agent.md",
+        orchestrator_model_id="control",
+    )
+
+    with pytest.raises(ModelUnavailableError, match="default"):
+        await main_module._try_build_orchestration(settings)
+
+    assert ready.close_calls == 1
+    assert secret not in caplog.text
+
+
+async def test_unavailable_control_degrades_to_fixed_ready_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default = _ClosingClient()
+
+    def build(entry: ModelEntry, settings: Any) -> LLMClient:
+        if entry.model == "control":
+            raise RuntimeError("control unavailable")
+        return default
+
+    monkeypatch.setattr(registry_module, "build_llm_client_from_entry", build)
+    monkeypatch.setattr(
+        main_module,
+        "load_models_config_from_settings",
+        lambda settings, known_providers: _readiness_config(),
+    )
+    monkeypatch.setattr(main_module, "load_orchestrator_prompt", lambda path: "route")
+    monkeypatch.setattr(main_module, "load_agent_prompt", lambda path: "agent")
+    settings = SimpleNamespace(
+        orchestration_enabled=True,
+        models_config_path="models.yaml",
+        orchestrator_prompt_path="orchestrator.md",
+        agent_prompt_path="agent.md",
+        orchestrator_model_id="control",
+    )
+
+    registry, routing = await main_module._try_build_orchestration(settings)
+
+    assert registry is not None
+    assert isinstance(routing, main_module.UnorchestratedRouting)
+    assert routing.llm is default
+    assert routing.advertised_model_ids == ("default",)
+    assert routing.inventory is registry
+    with pytest.raises(ModelUnavailableError, match="control"):
+        routing.inventory.get("control")
+
+
+async def test_unsuitable_control_degrades_without_reclassifying_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default = _ClosingClient()
+    control = _ClosingClient()
+
+    def build(entry: ModelEntry, settings: Any) -> LLMClient:
+        return default if entry.model == "default" else control
+
+    monkeypatch.setattr(registry_module, "build_llm_client_from_entry", build)
+    monkeypatch.setattr(
+        main_module,
+        "load_models_config_from_settings",
+        lambda settings, known_providers: _readiness_config(control_native_tools=False),
+    )
+    monkeypatch.setattr(main_module, "load_orchestrator_prompt", lambda path: "route")
+    monkeypatch.setattr(main_module, "load_agent_prompt", lambda path: "agent")
+    settings = SimpleNamespace(
+        orchestration_enabled=True,
+        models_config_path="models.yaml",
+        orchestrator_prompt_path="orchestrator.md",
+        agent_prompt_path="agent.md",
+        orchestrator_model_id="control",
+    )
+
+    _, routing = await main_module._try_build_orchestration(settings)
+
+    assert isinstance(routing, main_module.UnorchestratedRouting)
+    assert routing.llm is default
+
+
+async def _no_orchestration() -> tuple[None, None]:
+    return None, None
+
+
+async def test_present_invalid_orchestration_config_is_fatal_before_provider_build(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -773,7 +929,7 @@ models:
     )
 
     with pytest.raises(ConfigLoadError, match="invalid models config"):
-        main_module._try_build_orchestration(settings)
+        await main_module._try_build_orchestration(settings)
 
 
 def _wire_failing_orchestrator_registry(
@@ -781,9 +937,20 @@ def _wire_failing_orchestrator_registry(
     failure: BaseException,
 ) -> SimpleNamespace:
     class _FailingRegistry:
-        model_ids = ["control"]
-
         def __init__(self, models_config: Any, settings: Any) -> None:
+            self._ready = True
+
+        @property
+        def model_ids(self) -> list[str]:
+            return ["control"] if self._ready else []
+
+        def preflight(self) -> None:
+            try:
+                self.get("control")
+            except Exception:
+                self._ready = False
+
+        async def aclose(self) -> None:
             pass
 
         def default_id(self) -> str:
@@ -820,7 +987,7 @@ def _wire_failing_orchestrator_registry(
     )
 
 
-def test_missing_mandatory_provider_dependency_aborts_startup(
+async def test_missing_mandatory_provider_dependency_aborts_startup(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -829,13 +996,13 @@ def test_missing_mandatory_provider_dependency_aborts_startup(
         ModuleNotFoundError("No module named 'provider_sdk'"),
     )
 
-    with pytest.raises(ModuleNotFoundError, match="provider_sdk"):
-        main_module._try_build_orchestration(settings)
+    with pytest.raises(ModelUnavailableError, match="control"):
+        await main_module._try_build_orchestration(settings)
 
     assert "provider credential unavailable" not in caplog.text
 
 
-def test_missing_provider_credential_degrades_without_raw_error_logging(
+async def test_missing_provider_credential_aborts_without_raw_error_logging(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -845,12 +1012,12 @@ def test_missing_provider_credential_degrades_without_raw_error_logging(
         CredentialUnavailableError(secret),
     )
 
-    assert main_module._try_build_orchestration(settings) == (None, None, None)
-    assert "provider credential unavailable" in caplog.text
+    with pytest.raises(ModelUnavailableError, match="control"):
+        await main_module._try_build_orchestration(settings)
     assert secret not in caplog.text
 
 
-def test_missing_agent_prompt_disables_orchestration(
+async def test_missing_agent_prompt_disables_orchestration(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     settings = _wire_failing_orchestrator_registry(monkeypatch, AssertionError())
@@ -860,11 +1027,11 @@ def test_missing_agent_prompt_disables_orchestration(
         lambda path: (_ for _ in ()).throw(FileNotFoundError()),
     )
 
-    assert main_module._try_build_orchestration(settings) == (None, None, None)
+    assert await main_module._try_build_orchestration(settings) == (None, None)
     assert "agent prompt not found" in caplog.text
 
 
-def test_invalid_agent_prompt_aborts_startup(
+async def test_invalid_agent_prompt_aborts_startup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _wire_failing_orchestrator_registry(monkeypatch, AssertionError())
@@ -876,7 +1043,7 @@ def test_invalid_agent_prompt_aborts_startup(
     )
 
     with pytest.raises(ConfigValidationError, match="invalid agent prompt"):
-        main_module._try_build_orchestration(settings)
+        await main_module._try_build_orchestration(settings)
 
 
 async def test_tracer_startup_failure_does_not_log_raw_exception_text(
@@ -897,7 +1064,7 @@ async def test_tracer_startup_failure_does_not_log_raw_exception_text(
     assert "RuntimeError" in caplog.text
 
 
-def test_unexpected_provider_construction_failure_aborts_startup_without_logging(
+async def test_unexpected_provider_construction_failure_aborts_startup_without_logging(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -907,8 +1074,8 @@ def test_unexpected_provider_construction_failure_aborts_startup_without_logging
         RuntimeError(secret),
     )
 
-    with pytest.raises(RuntimeError, match="token=hidden"):
-        main_module._try_build_orchestration(settings)
+    with pytest.raises(ModelUnavailableError, match="control"):
+        await main_module._try_build_orchestration(settings)
 
     assert secret not in caplog.text
 
@@ -924,10 +1091,10 @@ def test_single_implicit_default_is_marked_in_prompt_inventory() -> None:
         }
     )
 
-    assert (
-        "- only (default)"
-        in LLMRegistry(config, _RegistrySettings()).describe_for_prompt()
-    )
+    registry = LLMRegistry(config, _RegistrySettings())
+    registry._clients["only"] = _ClosingClient()
+
+    assert "- only (default)" in registry.describe_for_prompt()
 
 
 async def test_disabled_orchestration_builds_one_unorchestrated_client_and_injects_mcp_timeout(
@@ -1014,11 +1181,12 @@ async def test_lifespan_cancellation_during_tracer_start_closes_all_owners(
     if orchestrated:
         registry = _registry()
         registry._clients["control"] = owned_client
-        monkeypatch.setattr(
-            main_module,
-            "_try_build_orchestration",
-            lambda value: (registry, object(), "trusted agent system"),
-        )
+        async def build_orchestration(value: Any) -> tuple[LLMRegistry, OrchestratedRouting]:
+            return registry, OrchestratedRouting(
+                orchestrator=object(), registry=registry, agent_system_prompt="trusted agent system"
+            )
+
+        monkeypatch.setattr(main_module, "_try_build_orchestration", build_orchestration)
         monkeypatch.setattr(
             main_module,
             "build_llm_client",

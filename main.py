@@ -34,9 +34,9 @@ from config import (
     load_models_config_from_settings,
     load_orchestrator_prompt,
 )
-from config.errors import CredentialUnavailableError, safe_path_display
+from config.errors import safe_path_display
 from llm.client import supported_providers
-from orchestrator import LLMRegistry, Orchestrator
+from orchestrator import LLMRegistry, ModelUnavailableError, Orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -129,17 +129,17 @@ async def _start_optional_tracer(tracer: Tracer | None) -> Tracer | None:
     return tracer
 
 
-def _try_build_orchestration(
+async def _try_build_orchestration(
     settings: Settings,
-) -> tuple[LLMRegistry | None, Orchestrator | None, str | None]:
+) -> tuple[LLMRegistry | None, RoutingRuntime | None]:
     """Build optional orchestration, degrading only on optional absence.
 
-    Missing optional files or control-model credentials disable orchestration.
+    Missing optional files disable orchestration.
     Present invalid configuration propagates and aborts application startup.
     """
     if not settings.orchestration_enabled:
         logger.info("orchestration disabled by Settings.orchestration_enabled=False")
-        return None, None, None
+        return None, None
 
     try:
         models_config = load_models_config_from_settings(
@@ -152,7 +152,7 @@ def _try_build_orchestration(
             "running in unorchestrated mode.",
             safe_path_display(settings.models_config_path),
         )
-        return None, None, None
+        return None, None
 
     try:
         orch_prompt = load_orchestrator_prompt(settings.orchestrator_prompt_path)
@@ -161,7 +161,7 @@ def _try_build_orchestration(
             "orchestrator prompt not found at %s; running in unorchestrated mode.",
             safe_path_display(settings.orchestrator_prompt_path),
         )
-        return None, None, None
+        return None, None
 
     try:
         agent_prompt = load_agent_prompt(settings.agent_prompt_path)
@@ -170,30 +170,33 @@ def _try_build_orchestration(
             "agent prompt not found at %s; running in unorchestrated mode.",
             safe_path_display(settings.agent_prompt_path),
         )
-        return None, None, None
+        return None, None
 
     registry = LLMRegistry(models_config, settings)
+    registry.preflight()
 
-    orch_model_id = settings.orchestrator_model_id or registry.default_id()
+    default_id = registry.default_id()
+    if default_id not in registry.model_ids:
+        await registry.aclose()
+        raise ModelUnavailableError(default_id)
+
+    orch_model_id = settings.orchestrator_model_id or default_id
     orch_entry = registry.get_entry(orch_model_id)
-    if orch_entry.supports_native_tools is False:
+    if (
+        orch_entry.supports_native_tools is False
+        or orch_model_id not in registry.model_ids
+    ):
         logger.warning(
-            "orchestrator_model_id=%r declares supports_native_tools:false; "
-            "prompted-tool models are not supported as orchestrator control "
-            "models. running in unorchestrated mode.",
+            "orchestrator control model is unavailable or unsuitable: model_id=%s; "
+            "running fixed ready default.",
             orch_model_id,
         )
-        return None, None, None
-
-    try:
-        registry.get(orch_model_id)
-    except CredentialUnavailableError:
-        logger.warning(
-            "provider credential unavailable for orchestrator_model_id=%r; "
-            "running in unorchestrated mode.",
-            orch_model_id,
+        return registry, UnorchestratedRouting(
+            llm=registry.get(default_id),
+            model_id=default_id,
+            inventory=registry,
+            advertised_model_ids=(default_id,),
         )
-        return None, None, None
 
     orchestrator = Orchestrator(
         registry=registry,
@@ -205,18 +208,22 @@ def _try_build_orchestration(
         len(registry.model_ids),
         orch_model_id,
     )
-    return registry, orchestrator, agent_prompt
+    return registry, OrchestratedRouting(
+        orchestrator=orchestrator,
+        registry=registry,
+        agent_system_prompt=agent_prompt,
+    )
 
 
 def _log_ready_summary(
     *,
     settings: Settings,
     mcp: MCPManager,
-    registry: LLMRegistry | None,
+    routing: RoutingRuntime,
 ) -> None:
     """Emit one greppable startup summary."""
-    if registry is not None:
-        orch_part = f"orchestration=on (models={len(registry.model_ids)})"
+    if isinstance(routing, OrchestratedRouting):
+        orch_part = f"orchestration=on (models={len(routing.registry.model_ids)})"
     else:
         orch_part = "orchestration=off"
 
@@ -272,22 +279,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         guard = SessionGuard()
 
-        registry, orchestrator, agent_prompt = _try_build_orchestration(settings)
-        if registry is None or orchestrator is None or agent_prompt is None:
+        registry, routing = await _try_build_orchestration(settings)
+        if routing is None:
             unorchestrated_llm = build_llm_client(settings)
 
         tracer = await _start_optional_tracer(
             build_tracer(enabled=settings.trace_enabled, path=settings.trace_jsonl_path)
         )
 
-        routing: RoutingRuntime
-        if registry is not None and orchestrator is not None and agent_prompt is not None:
-            routing = OrchestratedRouting(
-                orchestrator=orchestrator,
-                registry=registry,
-                agent_system_prompt=agent_prompt,
-            )
-        else:
+        if routing is None:
             routing = UnorchestratedRouting(
                 llm=unorchestrated_llm,
                 model_id=settings.llm.model,
@@ -306,7 +306,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _log_ready_summary(
             settings=settings,
             mcp=mcp,
-            registry=registry,
+            routing=routing,
         )
 
         yield

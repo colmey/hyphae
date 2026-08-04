@@ -30,6 +30,7 @@ from agent import (
 from agent.session import session_history_chars
 from agent.runtime import ModelLimits
 from llm.client import LLMClient
+from orchestrator import ModelUnavailableError
 from orchestrator.contracts import ModelRegistry, RoutingService
 from tooling import ToolRuntime, ToolSnapshot
 
@@ -95,6 +96,7 @@ class UnorchestratedRouting:
     llm: LLMClient | None
     model_id: str
     inventory: ModelRegistry | None = None
+    advertised_model_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +167,8 @@ class TurnRunner:
         try:
             if isinstance(self.routing, OrchestratedRouting):
                 return self.routing.registry.model_ids
+            if self.routing.advertised_model_ids is not None:
+                return list(self.routing.advertised_model_ids)
             if self.routing.inventory is not None:
                 return self.routing.inventory.model_ids
             return [self.routing.model_id]
@@ -181,6 +185,13 @@ class TurnRunner:
             return
         available = self.available_model_ids()
         if model_id not in available:
+            registry = (
+                self.routing.registry
+                if isinstance(self.routing, OrchestratedRouting)
+                else self.routing.inventory
+            )
+            if registry is not None and registry.is_configured(model_id):
+                raise ModelUnavailableError(model_id)
             raise HTTPException(
                 status_code=400,
                 detail=(

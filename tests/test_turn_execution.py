@@ -50,7 +50,7 @@ from llm.schemas import (
     CompletionUsage,
 )
 from tooling import ToolCallResult
-from orchestrator import Orchestrator
+from orchestrator import ModelUnavailableError, Orchestrator
 from orchestrator.contracts import ModelRegistry, RoutingService
 from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
 from tests._app_support import runtime_of, wired_app
@@ -152,6 +152,9 @@ class RegistryStub:
 
     def default_id(self) -> str:
         return "agent"
+
+    def is_configured(self, model_id: str) -> bool:
+        return model_id in self.model_ids
 
     def describe_for_prompt(self) -> str:
         return "- agent\n    default agent"
@@ -779,6 +782,54 @@ async def test_explicit_unknown_model_is_rejected_before_turn_setup() -> None:
     assert mcp.inventory_reads == 0
     assert orchestrator.calls == 0
     assert agent.calls == 0
+
+
+async def test_explicit_configured_unavailable_model_has_typed_outcome() -> None:
+    agent = AnswerLLM()
+    mcp = CountingMCP()
+
+    class UnavailableRegistry(RegistryStub):
+        model_ids = ["agent"]
+
+        def is_configured(self, model_id: str) -> bool:
+            return model_id in {"agent", "unavailable"}
+
+    runner = _runner(
+        agent=agent,
+        mcp=mcp,
+        orchestrator=FakeOrchestrator(),
+        registry=UnavailableRegistry(agent),
+    )
+
+    with pytest.raises(ModelUnavailableError, match="unavailable"):
+        await runner.run(
+            TurnRequest(
+                "hello",
+                Session(),
+                PersistencePolicy.EPHEMERAL,
+                model_id="unavailable",
+            )
+        )
+
+    assert mcp.inventory_reads == 0
+    assert agent.calls == 0
+
+
+def test_fixed_unorchestrated_routing_advertises_only_executable_default() -> None:
+    agent = AnswerLLM()
+    runner = _runner(agent=agent, mcp=CountingMCP(), settings=_settings())
+    registry = RegistryStub(agent)
+    fixed = replace(
+        runner,
+        routing=UnorchestratedRouting(
+            llm=agent,
+            model_id="agent",
+            inventory=registry,
+            advertised_model_ids=("agent",),
+        ),
+    )
+
+    assert fixed.available_model_ids() == ["agent"]
 
 
 async def test_ephemeral_turn_does_not_publish_session_to_store() -> None:

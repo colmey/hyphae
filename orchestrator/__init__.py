@@ -12,11 +12,12 @@ load_orchestrator_prompt, load_agent_prompt) live in the config package.
 """
 
 from .orchestrator import Orchestrator
-from .registry import LLMRegistry
+from .registry import LLMRegistry, ModelUnavailableError
 from .schemas import OrchestrationDecision, OrchestrationProposal, ToolPreferences
 
 __all__ = [
     "LLMRegistry",
+    "ModelUnavailableError",
     "Orchestrator",
     "OrchestrationDecision",
     "OrchestrationProposal",

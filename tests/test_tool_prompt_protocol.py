@@ -489,7 +489,9 @@ async def test_factory_selection() -> None:
         client_module._PROVIDERS.update(original)
 
 
-def test_orchestrator_guardrail(tmp_path: Path) -> None:
+async def test_orchestrator_guardrail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     print("--- orchestrator prompted-only guardrail ---")
     from main import _try_build_orchestration
 
@@ -518,9 +520,16 @@ models:
         context_default_window_tokens=32768,
         context_safety_margin_tokens=1024,
     )
-    registry, orchestrator, agent_prompt = _try_build_orchestration(settings)
+    import orchestrator.registry as registry_module
+
+    monkeypatch.setattr(
+        registry_module,
+        "build_llm_client_from_entry",
+        lambda entry, settings: ScriptedLLM([]),
+    )
+    registry, routing = await _try_build_orchestration(settings)
 
     check(
-        registry is None and orchestrator is None and agent_prompt is None,
-        "prompted-only orchestrator disables orchestration",
+        registry is not None and routing is not None,
+        "prompted-only control degrades to the ready fixed default",
     )

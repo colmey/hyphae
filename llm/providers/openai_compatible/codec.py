@@ -277,6 +277,70 @@ def build_response_format(response_schema: type) -> dict[str, Any]:
     }
 
 
+def _build_strict_response_format(response_schema: type) -> dict[str, Any]:
+    """Build the narrow strict schema shape supported by real OpenAI calls."""
+    response_format = build_response_format(response_schema)
+    json_schema = response_format["json_schema"]
+    schema = json_schema["schema"]
+
+    root_keys = {"description", "properties", "required", "title", "type"}
+    if set(schema) - root_keys:
+        raise ValueError("strict response_schema root contains unsupported keywords")
+    if schema.get("type") != "object":
+        raise ValueError("strict response_schema root must be an object")
+    properties = schema.get("properties", {})
+    if not isinstance(properties, Mapping):
+        raise ValueError("strict response_schema properties must be an object")
+
+    strict_properties: dict[str, dict[str, Any]] = {}
+    for name, property_schema in properties.items():
+        if not isinstance(name, str) or not name or not isinstance(property_schema, Mapping):
+            raise ValueError("strict response_schema properties must be named schemas")
+        property_type = property_schema.get("type")
+        if property_type == "string":
+            allowed_keys = {"default", "description", "enum", "title", "type"}
+            if set(property_schema) - allowed_keys:
+                raise ValueError(
+                    "strict response_schema string properties contain unsupported keywords"
+                )
+            strict_property = dict(property_schema)
+        elif property_type == "array":
+            allowed_keys = {"default", "description", "items", "title", "type"}
+            if set(property_schema) - allowed_keys:
+                raise ValueError(
+                    "strict response_schema array properties contain unsupported keywords"
+                )
+            items = property_schema.get("items")
+            if (
+                not isinstance(items, Mapping)
+                or set(items) != {"type"}
+                or items.get("type") != "string"
+            ):
+                raise ValueError(
+                    "strict response_schema arrays must contain string items"
+                )
+            strict_property = dict(property_schema)
+        else:
+            raise ValueError(
+                "strict response_schema properties must be strings or string arrays"
+            )
+        strict_property.pop("default", None)
+        strict_properties[name] = strict_property
+
+    strict_schema = dict(schema)
+    strict_schema["properties"] = strict_properties
+    strict_schema["required"] = list(strict_properties)
+    strict_schema["additionalProperties"] = False
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": json_schema["name"],
+            "strict": True,
+            "schema": strict_schema,
+        },
+    }
+
+
 def build_request(
     generation: GenerationRequest,
     config: OpenAICompatibleClientConfig,
@@ -318,7 +382,12 @@ def build_request(
             ignored_tools = True
             request.pop("tools", None)
             request.pop("tool_choice", None)
-        request["response_format"] = build_response_format(generation.response_schema)
+        response_format = (
+            build_response_format(generation.response_schema)
+            if config.compatible_endpoint
+            else _build_strict_response_format(generation.response_schema)
+        )
+        request["response_format"] = response_format
 
     inert_thinking = False
     if generation.thinking_level is not None:

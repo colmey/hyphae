@@ -23,7 +23,6 @@ from llm.providers.openai_compatible.codec import (
     build_tool_use_block,
     merge_extra_body,
     messages_to_openai,
-    build_response_format,
     response_to_message,
     usage_from_raw,
 )
@@ -42,6 +41,7 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
+from orchestrator.schemas import OrchestrationProposal
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -620,14 +620,16 @@ def test_structured_output_removes_tools_and_reports_client_signal() -> None:
     assert "tools" not in built.sdk_kwargs
     assert "tool_choice" not in built.sdk_kwargs
     assert built.ignored_tools_for_structured_output is True
-    assert built.sdk_kwargs["response_format"] == build_response_format(Structured)
     assert built.sdk_kwargs["response_format"] == {
         "type": "json_schema",
         "json_schema": {
             "name": "Structured",
+            "strict": True,
             "schema": {
                 "type": "object",
                 "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": False,
             },
         },
     }
@@ -651,6 +653,137 @@ def test_compatible_structured_output_preserves_existing_non_strict_shape() -> N
             "schema": {"type": "object"},
         },
     }
+
+
+def test_real_openai_orchestration_schema_uses_exact_strict_wire_shape() -> None:
+    built = build_request(
+        GenerationRequest(messages=[], response_schema=OrchestrationProposal),
+        _config(),
+    )
+
+    assert built.sdk_kwargs["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "OrchestrationProposal",
+            "strict": True,
+            "schema": {
+                "description": (
+                    "The structured output the orchestrator LLM must produce.\n\n"
+                    "Deliberately leaves `extra=\"forbid\"` off because Gemini "
+                    "rejects the\nresulting JSON Schema keyword. Runtime "
+                    "sanitization still validates model\nand tool IDs against live "
+                    "inventory."
+                ),
+                "properties": {
+                    "selected_model_id": {
+                        "description": "Must match one of the model IDs in models.yaml.",
+                        "title": "Selected Model Id",
+                        "type": "string",
+                    },
+                    "selected_tools": {
+                        "description": (
+                            "Namespaced tool names ({server}__{tool}) to expose to "
+                            "the agent. Empty list = no tools."
+                        ),
+                        "items": {"type": "string"},
+                        "title": "Selected Tools",
+                        "type": "array",
+                    },
+                    "thinking_level": {
+                        "description": (
+                            "How much the downstream model should deliberate: 'low' "
+                            "for lookups/single-tool calls, 'medium' for the typical "
+                            "case, 'high' for complex multi-step reasoning. Defaults "
+                            "to 'medium' if the orchestrator omits it."
+                        ),
+                        "enum": ["low", "medium", "high"],
+                        "title": "Thinking Level",
+                        "type": "string",
+                    },
+                },
+                "required": [
+                    "selected_model_id",
+                    "selected_tools",
+                    "thinking_level",
+                ],
+                "title": "OrchestrationProposal",
+                "type": "object",
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("schema", "message"),
+    [
+        (
+            type(
+                "ArrayRoot",
+                (),
+                {"model_json_schema": classmethod(lambda cls: {"type": "array"})},
+            ),
+            "root must be an object",
+        ),
+        (
+            type(
+                "ObjectProperty",
+                (),
+                {
+                    "model_json_schema": classmethod(
+                        lambda cls: {
+                            "type": "object",
+                            "properties": {"nested": {"type": "object"}},
+                        }
+                    )
+                },
+            ),
+            "properties must be strings or string arrays",
+        ),
+        (
+            type(
+                "ObjectArray",
+                (),
+                {
+                    "model_json_schema": classmethod(
+                        lambda cls: {
+                            "type": "object",
+                            "properties": {
+                                "nested": {
+                                    "type": "array",
+                                    "items": {"type": "object"},
+                                }
+                            },
+                        }
+                    )
+                },
+            ),
+            "arrays must contain string items",
+        ),
+        (
+            type(
+                "RootComposition",
+                (),
+                {
+                    "model_json_schema": classmethod(
+                        lambda cls: {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                            "allOf": [],
+                        }
+                    )
+                },
+            ),
+            "root contains unsupported keywords",
+        ),
+    ],
+)
+def test_real_openai_strict_schema_rejects_unsupported_shapes(
+    schema: type,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        build_request(GenerationRequest(messages=[], response_schema=schema), _config())
 
 
 def test_structured_output_rejects_unsupported_schema_type() -> None:
@@ -1260,6 +1393,28 @@ async def test_client_schema_failure_happens_before_sdk_call() -> None:
     with pytest.raises(ValueError, match="invalid response schema"):
         await client.complete(
             GenerationRequest(messages=[], response_schema=BrokenSchema)
+        )
+
+    assert completions.requests == []
+
+
+@pytest.mark.anyio
+async def test_client_strict_schema_failure_happens_before_sdk_call() -> None:
+    class UnsupportedStrictSchema:
+        @classmethod
+        def model_json_schema(cls) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {"nested": {"type": "object"}},
+            }
+
+    completions = _CompletionCapture(_response(content="unused"))
+    client = _client()
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    with pytest.raises(ValueError, match="properties must be strings or string arrays"):
+        await client.complete(
+            GenerationRequest(messages=[], response_schema=UnsupportedStrictSchema)
         )
 
     assert completions.requests == []

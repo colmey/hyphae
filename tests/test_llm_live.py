@@ -158,9 +158,7 @@ async def scenario_3_full_roundtrip(llm: LLMClient, mcp: TurnToolRuntime) -> Non
 async def test_configured_llm_scenarios() -> None:
     reset_settings()
     settings = get_settings()
-    print(
-        f"using provider={settings.llm.provider} model={settings.llm.model}"
-    )
+    print(f"using provider={settings.llm.provider} model={settings.llm.model}")
     print()
 
     llm = build_llm_client(settings)

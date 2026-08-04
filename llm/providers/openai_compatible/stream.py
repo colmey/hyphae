@@ -29,6 +29,7 @@ from .codec import (
     usage_from_raw,
 )
 
+
 async def _close_sdk_stream(
     stream: Any,
     *,
@@ -83,9 +84,7 @@ class _ToolCallAccumulator:
             else:
                 self.malformed_arguments = True
 
-    def finalize(
-        self, *, logger: logging.Logger | None = None
-    ) -> ToolUseBlock:
+    def finalize(self, *, logger: logging.Logger | None = None) -> ToolUseBlock:
         return build_tool_use_block(
             call_id=self.call_id,
             name=self.name,
@@ -257,9 +256,7 @@ async def decode_stream(
                         call_id=getattr(tool_call, "id", None),
                         name=getattr(function, "name", None) if function else None,
                         arguments=(
-                            getattr(function, "arguments", None)
-                            if function
-                            else None
+                            getattr(function, "arguments", None) if function else None
                         ),
                     )
 
@@ -307,14 +304,17 @@ async def decode_stream(
             else "empty"
         )
 
-        reasoning = "\n".join(
-            part
-            for part in (
-                "".join(structured_reasoning_parts).strip(),
-                stripper.reasoning,
+        reasoning = (
+            "\n".join(
+                part
+                for part in (
+                    "".join(structured_reasoning_parts).strip(),
+                    stripper.reasoning,
+                )
+                if part
             )
-            if part
-        ) or None
+            or None
+        )
 
         yield StreamEnd(
             message=AssistantMessage(

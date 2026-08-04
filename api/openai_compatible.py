@@ -127,9 +127,7 @@ _LEGACY_TOOL_SUMMARY_MARK = "🔧 "
 
 # Keyed on the marker so model-authored <details> blocks are left alone.
 _LEGACY_TOOL_BLOCK_RE = re.compile(
-    r"\n*<details>\s*<summary>"
-    + _LEGACY_TOOL_SUMMARY_MARK
-    + r".*?</details>\n*",
+    r"\n*<details>\s*<summary>" + _LEGACY_TOOL_SUMMARY_MARK + r".*?</details>\n*",
     re.DOTALL,
 )
 
@@ -174,10 +172,7 @@ def _format_tool_call_activity(
         separators=(",", ": "),
     )
     args = _bounded_activity_body(args, max_chars)
-    return (
-        f"{heading}\n\n"
-        f"**Arguments**\n\n{_fenced_activity_body(args, 'json')}\n\n"
-    )
+    return f"{heading}\n\n**Arguments**\n\n{_fenced_activity_body(args, 'json')}\n\n"
 
 
 def _format_tool_result_activity(
@@ -190,26 +185,19 @@ def _format_tool_result_activity(
     if event.is_error:
         status = "failed"
         latency = (
-            f" after {event.latency_ms:.0f} ms"
-            if event.latency_ms is not None
-            else ""
+            f" after {event.latency_ms:.0f} ms" if event.latency_ms is not None else ""
         )
     else:
         status = "completed"
         latency = (
-            f" in {event.latency_ms:.0f} ms"
-            if event.latency_ms is not None
-            else ""
+            f" in {event.latency_ms:.0f} ms" if event.latency_ms is not None else ""
         )
     heading = f"> **Tool** `{_tool_display_name(event.name)}` — {status}{latency}"
     if not include_details:
         return f"{heading}\n\n"
 
     result = _bounded_activity_body(event.content, max_chars)
-    return (
-        f"{heading}\n\n"
-        f"**Result**\n\n{_fenced_activity_body(result, 'text')}\n\n"
-    )
+    return f"{heading}\n\n**Result**\n\n{_fenced_activity_body(result, 'text')}\n\n"
 
 
 def _strip_legacy_tool_blocks(text: str) -> str:
@@ -247,9 +235,7 @@ def _prepare_chat_request(
     history = tuple(
         (
             role,
-            _strip_legacy_tool_blocks(text)
-            if role == "assistant"
-            else text,
+            _strip_legacy_tool_blocks(text) if role == "assistant" else text,
         )
         for role, text in convo[:-1]
     )
@@ -287,9 +273,7 @@ def _http_error_response(exc: StarletteHTTPException) -> JSONResponse:
     return _error_response(str(exc.detail), status=exc.status_code, err_type=err_type)
 
 
-async def openai_auth_exception_handler(
-    request: Request, exc: Exception
-) -> Response:
+async def openai_auth_exception_handler(request: Request, exc: Exception) -> Response:
     """Reshape a /v1 401 into the OpenAI error envelope; delegate everything else.
 
     Registered app-wide but scoped to /v1 401s, leaving native /chat untouched.
@@ -385,7 +369,9 @@ async def _stream_chat_completion(
             model = execution.metadata.model_id
             yield {
                 "data": json.dumps(
-                    _chat_completion_chunk(cid, created, model, {"role": "assistant"}, None)
+                    _chat_completion_chunk(
+                        cid, created, model, {"role": "assistant"}, None
+                    )
                 )
             }
             async for event in execution.events:
@@ -394,7 +380,9 @@ async def _stream_chat_completion(
                 if isinstance(event, TextEvent):
                     yield {
                         "data": json.dumps(
-                            _chat_completion_chunk(cid, created, model, {"content": event.text}, None)
+                            _chat_completion_chunk(
+                                cid, created, model, {"content": event.text}, None
+                            )
                         )
                     }
                 elif isinstance(event, ReasoningEvent):
@@ -428,9 +416,7 @@ async def _stream_chat_completion(
                                     cid,
                                     created,
                                     model,
-                                    {
-                                        "reasoning_content": activity
-                                    },
+                                    {"reasoning_content": activity},
                                     None,
                                 )
                             )
@@ -452,9 +438,7 @@ async def _stream_chat_completion(
                                     cid,
                                     created,
                                     model,
-                                    {
-                                        "reasoning_content": activity
-                                    },
+                                    {"reasoning_content": activity},
                                     None,
                                 )
                             )
@@ -483,7 +467,9 @@ async def _stream_chat_completion(
             assert model is not None
             yield {
                 "data": json.dumps(
-                    _chat_completion_chunk(cid, created, model, {}, _finish_reason(done_reason))
+                    _chat_completion_chunk(
+                        cid, created, model, {}, _finish_reason(done_reason)
+                    )
                 )
             }
     yield {"data": "[DONE]"}

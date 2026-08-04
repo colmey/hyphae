@@ -64,9 +64,7 @@ class NativeStreamingLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("complete() should not be used in native stream test")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
         yield ReasoningDelta("considering")
         yield TextDelta("Hel")
@@ -103,9 +101,7 @@ class ToolStreamingLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("complete() should not be used in stream mode")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         if self.calls == 1:
             yield StreamEnd(
@@ -134,9 +130,7 @@ class ErrorAfterDeltaLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("complete() should not be used in stream mode")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         yield TextDelta("partial")
         raise RuntimeError("stream broke")
 

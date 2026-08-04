@@ -26,9 +26,7 @@ from .runtime import RunContext, RunDeadlineExceeded, RunLimits
 logger = logging.getLogger(__name__)
 
 _RETRY_BACKOFF_CAP_SECONDS = 30.0
-_REASONING_RETRY_NOTICE = (
-    "\n\n[Generation was interrupted; retrying...]\n\n"
-)
+_REASONING_RETRY_NOTICE = "\n\n[Generation was interrupted; retrying...]\n\n"
 
 
 @dataclass(frozen=True)
@@ -316,9 +314,7 @@ async def generate_with_retry(
         assert attempt_response is not None
         if await attempts.retry(
             attempt_index,
-            eligible=(
-                attempt_response.stop_reason == "empty" and not visible_text
-            ),
+            eligible=(attempt_response.stop_reason == "empty" and not visible_text),
             mode="streaming",
             reason="empty response",
         ):

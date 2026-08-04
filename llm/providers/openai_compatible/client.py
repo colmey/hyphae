@@ -64,9 +64,7 @@ class OpenAICompatibleLLMClient(LLMClient):
                 self._close_task = None
                 task = None
         if task is None:
-            task = asyncio.create_task(
-                self._finish_close(), name="openai-client-close"
-            )
+            task = asyncio.create_task(self._finish_close(), name="openai-client-close")
             self._close_task = task
             task.add_done_callback(self._close_finished)
         await asyncio.shield(task)
@@ -100,9 +98,7 @@ class OpenAICompatibleLLMClient(LLMClient):
             logger=logger,
         )
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         if request.response_schema is not None:
             raise ValueError("response_schema is not supported for streaming")
 
@@ -128,9 +124,7 @@ class OpenAICompatibleLLMClient(LLMClient):
             async for chunk in decoder:
                 yield chunk
 
-    def _prepare_request(
-        self, generation: GenerationRequest
-    ) -> PreparedOpenAIRequest:
+    def _prepare_request(self, generation: GenerationRequest) -> PreparedOpenAIRequest:
         """Translate one request and emit client-owned adapter notices."""
         built = build_request(generation, self._config, logger=logger)
         if built.ignored_tools_for_structured_output:

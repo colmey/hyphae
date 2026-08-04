@@ -13,7 +13,13 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, Message, TextBlock, ToolUseBlock, CompletionUsage
+from llm.schemas import (
+    AssistantMessage,
+    Message,
+    TextBlock,
+    ToolUseBlock,
+    CompletionUsage,
+)
 
 
 _ACTION_INSTRUCTIONS = """\
@@ -338,7 +344,9 @@ def _parse_error_tool_message(
     )
 
 
-def _combine_usage(left: CompletionUsage | None, right: CompletionUsage | None) -> CompletionUsage | None:
+def _combine_usage(
+    left: CompletionUsage | None, right: CompletionUsage | None
+) -> CompletionUsage | None:
     if left is None:
         return right
     if right is None:

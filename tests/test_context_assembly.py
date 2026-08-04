@@ -53,6 +53,7 @@ from agent import (
 from agent.context import (
     _SUMMARY_HEADER,
     _SUMMARY_SYSTEM,
+    _protocol_units,
     ContextBudget,
     ContextBudgetExceeded,
     assemble_context,
@@ -74,6 +75,16 @@ from llm.schemas import (
 from tooling import ToolCallResult
 
 logging.basicConfig(level=logging.ERROR, format="%(levelname)-5s %(name)s: %(message)s")
+
+
+def test_protocol_unit_formation_rejects_malformed_transcript() -> None:
+    malformed = [
+        Message.assistant([ToolUseBlock(id="call", name="tool", input={})]),
+        Message.user("missing result"),
+    ]
+
+    with pytest.raises(ValueError, match="invalid transcript"):
+        _protocol_units(malformed)
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +159,13 @@ class ScriptedMCP:
 # ----- message/history builders -----
 
 
-def text_response(text: str, *, usage: CompletionUsage | None = None) -> AssistantMessage:
+def text_response(
+    text: str, *, usage: CompletionUsage | None = None
+) -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text=text)], stop_reason="end_turn", usage=usage or CompletionUsage()
+        content=[TextBlock(text=text)],
+        stop_reason="end_turn",
+        usage=usage or CompletionUsage(),
     )
 
 
@@ -204,15 +219,9 @@ def protocol_ok(messages: list[Message] | tuple[Message, ...]) -> bool:
             prev = messages[i - 1] if i else None
             if prev is None or prev.role != Role.ASSISTANT:
                 return False
-            use_ids = {
-                b.id
-                for b in prev.content
-                if isinstance(b, ToolUseBlock)
-            }
+            use_ids = {b.id for b in prev.content if isinstance(b, ToolUseBlock)}
             result_ids = {
-                b.tool_use_id
-                for b in msg.content
-                if isinstance(b, ToolResultBlock)
+                b.tool_use_id for b in msg.content if isinstance(b, ToolResultBlock)
             }
             if not result_ids <= use_ids:
                 return False
@@ -509,16 +518,18 @@ async def test_summarizer_failure_terminates_without_over_budget_submission() ->
     snapshot = copy.deepcopy(history)
     with pytest.raises(ContextBudgetExceeded) as raised:
         await assemble_context(
-            history, budget=budget, strategy="compaction", llm=failing, recent_messages=2
+            history,
+            budget=budget,
+            strategy="compaction",
+            llm=failing,
+            recent_messages=2,
         )
     check(raised.value.auxiliary_usage.total_tokens > 0, "failed call is estimated")
     check(history == snapshot, "summarizer failure leaves history untouched")
 
     # ...and a full run terminates explicitly without a knowingly oversized
     # downstream generation request.
-    failing = RecordingLLM(
-        [text_response("must not run")], fail_summary=True
-    )
+    failing = RecordingLLM([text_response("must not run")], fail_summary=True)
     store = InMemorySessionStore()
     session = await store.create()
     seed_session(session, over_budget_history())
@@ -583,7 +594,9 @@ async def test_compaction_usage_is_separate_and_included_in_terminal_totals() ->
 async def test_compaction_usage_trips_cap_before_downstream_generation() -> None:
     llm = RecordingLLM(
         [text_response("must not run")],
-        summary_usage=CompletionUsage(input_tokens=15, output_tokens=5, total_tokens=20),
+        summary_usage=CompletionUsage(
+            input_tokens=15, output_tokens=5, total_tokens=20
+        ),
     )
     session = await InMemorySessionStore().create()
     seed_session(session, over_budget_history())
@@ -606,7 +619,8 @@ async def test_compaction_usage_trips_cap_before_downstream_generation() -> None
     ]
     check(llm.summary_calls == 1 and llm.loop_requests == [], "cap stops generation")
     check(
-        [event.total_tokens for event in events if isinstance(event, UsageEvent)] == [20],
+        [event.total_tokens for event in events if isinstance(event, UsageEvent)]
+        == [20],
         "compaction usage is emitted once",
     )
     done = next(event for event in events if isinstance(event, DoneEvent))
@@ -659,7 +673,9 @@ async def test_compaction_usage_is_traced_before_deadline_terminal() -> None:
     ]
     check(llm.loop_requests == [], "expired deadline stops downstream generation")
     done = next(event for event in events if isinstance(event, DoneEvent))
-    check(done.reason == "deadline_exceeded" and done.total_tokens == 12, "deadline total")
+    check(
+        done.reason == "deadline_exceeded" and done.total_tokens == 12, "deadline total"
+    )
     usage_records = [record for record in tracer.records if record["type"] == "usage"]
     check(len(usage_records) == 1, "one auxiliary usage trace")
     check(usage_records[0]["total_tokens"] == 12, "trace carries auxiliary usage")
@@ -752,7 +768,9 @@ async def test_nonzero_provider_usage_is_authoritative() -> None:
         [
             text_response(
                 "answer",
-                usage=CompletionUsage(input_tokens=30, output_tokens=10, total_tokens=40),
+                usage=CompletionUsage(
+                    input_tokens=30, output_tokens=10, total_tokens=40
+                ),
             )
         ]
     )

@@ -64,7 +64,7 @@ class _RecordingLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.requests.append(request)
         return AssistantMessage(
-            content=[TextBlock("{\"selected_model_id\":\"model\"}")],
+            content=[TextBlock('{"selected_model_id":"model"}')],
             stop_reason="end_turn",
         )
 

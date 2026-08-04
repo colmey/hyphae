@@ -20,12 +20,14 @@ from agent import (
     Session,
     SessionBusyError,
     SessionGuard,
+    SessionHistoryLimitExceeded,
     SessionStore,
     TextEvent,
     ToolPolicy,
     Tracer,
     run_agent,
 )
+from agent.session import session_history_chars
 from agent.runtime import ModelLimits
 from llm.client import LLMClient
 from orchestrator.contracts import ModelRegistry, RoutingService
@@ -333,6 +335,13 @@ class TurnRunner:
                 )
                 if request.persistence is PersistencePolicy.PERSISTENT:
                     source_session = await self.store.get(request.session.session_id)
+                    prospective = source_session.staged_copy()
+                    prospective.append_user(request.prompt)
+                    if (
+                        session_history_chars(prospective.messages)
+                        > self.store.session_history_max_chars
+                    ):
+                        raise SessionHistoryLimitExceeded
                 elif request.persistence is PersistencePolicy.EPHEMERAL:
                     source_session = request.session
                 else:  # Defensive against future enum members.

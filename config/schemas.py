@@ -61,10 +61,7 @@ def _validate_http_url(value: str) -> str:
 
     labels = hostname.rstrip(".").split(".")
     if len(hostname) > 253 or any(
-        not label
-        or len(label) > 63
-        or label.startswith("-")
-        or label.endswith("-")
+        not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
         for label in labels
     ):
         raise PydanticCustomError("url_host", "MCP URL host is malformed")
@@ -145,7 +142,7 @@ class ToolPolicyConfig(_ImmutableConfigModel):
         if self.mode == "allow_list" and not self.allow:
             raise PydanticCustomError(
                 "allow_list_required",
-                "tool_policy.mode 'allow_list' requires a non-empty 'allow' list"
+                "tool_policy.mode 'allow_list' requires a non-empty 'allow' list",
             )
         for pattern in self.allow:
             validate_nonblank_bounded(
@@ -187,7 +184,7 @@ class MCPConfig(_ImmutableConfigModel):
             if not name.replace("-", "").replace("_", "").isalnum():
                 raise PydanticCustomError(
                     "identifier_characters",
-                    "server identifier must be alphanumeric with optional dashes/underscores"
+                    "server identifier must be alphanumeric with optional dashes/underscores",
                 )
         return self
 

@@ -99,9 +99,7 @@ class CaptureCreate:
         return self.response
 
 
-def install_capture(
-    client: OpenAICompatibleLLMClient, response: Any
-) -> CaptureCreate:
+def install_capture(client: OpenAICompatibleLLMClient, response: Any) -> CaptureCreate:
     capture = CaptureCreate(response)
     client._client = SimpleNamespace(  # type: ignore[attr-defined]
         chat=SimpleNamespace(completions=SimpleNamespace(create=capture))
@@ -189,9 +187,7 @@ async def test_openai_request_capture() -> None:
     capture = install_capture(client, fake_openai_response(content="ok"))
 
     await client.complete(
-        GenerationRequest(
-            messages=[Message.user("hello")], thinking_level="high"
-        )
+        GenerationRequest(messages=[Message.user("hello")], thinking_level="high")
     )
     request = capture.requests[-1]
     check(request.get("temperature") == 0.7, "temperature reaches OpenAI request")
@@ -221,9 +217,7 @@ async def test_openai_request_capture() -> None:
     )
     inert_capture = install_capture(inert, fake_openai_response(content="ok"))
     await inert.complete(
-        GenerationRequest(
-            messages=[Message.user("hello")], thinking_level="high"
-        )
+        GenerationRequest(messages=[Message.user("hello")], thinking_level="high")
     )
     check(
         "reasoning_effort" not in inert_capture.requests[-1],

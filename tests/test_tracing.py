@@ -74,7 +74,9 @@ class ScriptedLLM(LLMClient):
                     ),
                 ],
                 stop_reason="tool_use",
-                usage=CompletionUsage(input_tokens=10, output_tokens=5, total_tokens=15),
+                usage=CompletionUsage(
+                    input_tokens=10, output_tokens=5, total_tokens=15
+                ),
             )
         return AssistantMessage(
             content=[TextBlock(text="It is sunny.")],

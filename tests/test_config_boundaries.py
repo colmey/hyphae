@@ -283,6 +283,12 @@ def test_default_context_bounds_must_leave_positive_input_budget() -> None:
         )
 
 
+@pytest.mark.parametrize("value", [True, False, 0, -1])
+def test_session_history_max_chars_is_a_positive_integer(value: object) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, session_history_max_chars=value)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -490,13 +496,13 @@ def test_settings_interpolation_snapshot_is_frozen_and_time_stable(
 
     assert settings.interpolation_environment()["ROTATING_SECRET"] == "captured"
     with pytest.raises(AttributeError, match="snapshot is immutable"):
-        settings._interpolation_values = MappingProxyType({"ROTATING_SECRET": "changed"})
+        settings._interpolation_values = MappingProxyType(
+            {"ROTATING_SECRET": "changed"}
+        )
 
 
 def test_config_error_path_is_bounded_single_line_and_cause_is_private() -> None:
-    source = Path("segment\nAuthorization: Bearer hidden").joinpath(
-        *(["x" * 100] * 8)
-    )
+    source = Path("segment\nAuthorization: Bearer hidden").joinpath(*(["x" * 100] * 8))
     error = ConfigLoadError(source, "invalid config", cause=ValueError("secret"))
 
     assert "\n" not in str(error)
@@ -632,7 +638,9 @@ def test_application_settings_source_error_is_safely_wrapped(
     monkeypatch.setenv("LLM", "password=hunter2")
     reset_settings()
     try:
-        with pytest.raises(ConfigLoadError, match="could not load application settings") as error:
+        with pytest.raises(
+            ConfigLoadError, match="could not load application settings"
+        ) as error:
             get_settings()
     finally:
         reset_settings()
@@ -743,7 +751,9 @@ models:
         load_models_config(path)
 
 
-def test_validation_locations_do_not_render_unknown_mapping_keys(tmp_path: Path) -> None:
+def test_validation_locations_do_not_render_unknown_mapping_keys(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "mcp.yaml"
     path.write_text(
         """\

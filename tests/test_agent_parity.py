@@ -427,10 +427,7 @@ def _assert_terminal(events: list[Event], reason: str) -> DoneEvent:
 
 def test_public_imports_and_run_agent_calling_contract() -> None:
     assert run_agent.__module__ == "agent.loop"
-    assert (
-        OpenAICompatibleLLMClient.__name__
-        == "OpenAICompatibleLLMClient"
-    )
+    assert OpenAICompatibleLLMClient.__name__ == "OpenAICompatibleLLMClient"
     assert GeminiLLMClient.__name__ == "GeminiLLMClient"
 
     parameters = inspect.signature(run_agent).parameters
@@ -565,9 +562,7 @@ class TimeoutLLM(LLMClient):
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         try:
             await asyncio.Event().wait()
@@ -613,7 +608,9 @@ async def test_per_attempt_timeout_exhaustion_is_exact(stream: bool) -> None:
         (
             (
                 StreamAttempt(()),
-                StreamAttempt((TextDelta("recovered"), StreamEnd(_answer("recovered")))),
+                StreamAttempt(
+                    (TextDelta("recovered"), StreamEnd(_answer("recovered")))
+                ),
             ),
             "end_turn",
             ["recovered"],
@@ -1095,9 +1092,7 @@ async def test_complete_multi_tool_checkpoint_is_balanced_and_ordered() -> None:
         name="batch",
         stream=False,
         llm_script=(
-            _multi_tool_call(
-                (("batch-1", {"n": 1}), ("batch-2", {"n": 2}))
-            ),
+            _multi_tool_call((("batch-1", {"n": 1}), ("batch-2", {"n": 2}))),
             _answer("done"),
         ),
         tool_script=(ToolCallResult("one", False), ToolCallResult("two", False)),
@@ -1157,9 +1152,7 @@ async def test_published_checkpoint_detaches_before_continuation() -> None:
     session = await store.create()
     session.append_user("go")
     llm = DetachingLLM()
-    mcp = ScriptedMCP(
-        (ToolCallResult("first", False), ToolCallResult("second", False))
-    )
+    mcp = ScriptedMCP((ToolCallResult("first", False), ToolCallResult("second", False)))
     events: list[Event] = []
     second_call_visible = asyncio.Event()
 
@@ -1193,7 +1186,9 @@ async def test_published_checkpoint_detaches_before_continuation() -> None:
 
     assert normalize_messages(first_published.messages) == first_snapshot
     assert store.saved_sessions[-1] is not first_published
-    assert normalize_messages((await store.get(session.session_id)).messages)[-1] == _message(
+    assert normalize_messages((await store.get(session.session_id)).messages)[
+        -1
+    ] == _message(
         "tool",
         _tool_result_block("second-batch", _NOT_STARTED, is_error=True),
     )
@@ -1203,6 +1198,8 @@ async def test_ephemeral_run_leaves_native_store_unchanged() -> None:
     native = RecordingStore()
     persisted = await native.create(metadata={"owner": "native"})
     persisted.append_user("existing")
+    await native.save(persisted)
+    native.save_count = 0
     before = normalize_messages(persisted.messages)
     ephemeral = Session(session_id="ephemeral-fixed")
     ephemeral.append_user("go")
@@ -1219,7 +1216,9 @@ async def test_ephemeral_run_leaves_native_store_unchanged() -> None:
 
     _assert_terminal(events, "end_turn")
     assert native.ids() == [persisted.session_id]
-    assert normalize_messages((await native.get(persisted.session_id)).messages) == before
+    assert (
+        normalize_messages((await native.get(persisted.session_id)).messages) == before
+    )
     assert native.save_count == 0
 
 
@@ -1237,9 +1236,7 @@ class BlockingGenerationLLM(LLMClient):
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         assert self.use_stream
         try:
             self.started.set()
@@ -1339,7 +1336,9 @@ async def test_cancellation_after_tool_call_before_dispatch_marks_not_started() 
     assert [event.type for event in observed] == ["usage", "tool_call"]
     assert mcp.calls == []
     assert store.save_count == 1
-    assert normalize_messages((await store.get(session.session_id)).messages)[-1] == _message(
+    assert normalize_messages((await store.get(session.session_id)).messages)[
+        -1
+    ] == _message(
         "tool", _tool_result_block("call-before", _NOT_STARTED, is_error=True)
     )
 
@@ -1359,7 +1358,9 @@ async def test_cancellation_during_in_flight_tool_marks_outcome_unknown() -> Non
     assert [event.type for event in observed] == ["usage", "tool_call"]
     assert mcp.calls == [("srv__tool", {})]
     assert store.save_count == 1
-    assert normalize_messages((await store.get(session.session_id)).messages)[-1] == _message(
+    assert normalize_messages((await store.get(session.session_id)).messages)[
+        -1
+    ] == _message(
         "tool", _tool_result_block("call-active", _UNKNOWN_OUTCOME, is_error=True)
     )
 
@@ -1370,11 +1371,7 @@ async def test_cancellation_after_one_result_repairs_remaining_call() -> None:
     session.append_user("go")
     mcp = ScriptedMCP((ToolCallResult("first", False),))
     llm = ParityLLM(
-        (
-            _multi_tool_call(
-                (("call-first", {"n": 1}), ("call-second", {"n": 2}))
-            ),
-        )
+        (_multi_tool_call((("call-first", {"n": 1}), ("call-second", {"n": 2}))),)
     )
     observed = await _cancel_collection(
         session,

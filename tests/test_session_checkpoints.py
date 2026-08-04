@@ -15,10 +15,12 @@ from agent import (
     RunLimits,
     Session,
     SessionGuard,
+    SessionHistoryLimitExceeded,
     TextEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
+from agent.session import session_history_chars
 from api.turn import (
     PersistencePolicy,
     TurnRequest,
@@ -49,8 +51,8 @@ CANCELLED_BEFORE_START = "tool call was not executed because execution was cance
 
 
 class CountingStore(InMemorySessionStore):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, session_history_max_chars: int = 256_000) -> None:
+        super().__init__(session_history_max_chars=session_history_max_chars)
         self.save_count = 0
 
     async def save(self, session: Session) -> None:
@@ -116,9 +118,7 @@ class BlockingAfterDeltaLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() expected")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         yield TextDelta("visible")
         self.waiting.set()
         await asyncio.Event().wait()
@@ -133,9 +133,7 @@ class ScriptedStreamLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() expected")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.messages_seen.append(list(request.messages))
         chunks = self.attempts[self.calls]
         self.calls += 1
@@ -167,6 +165,18 @@ class ToolBatchLLM(LLMClient):
         await asyncio.Event().wait()
 
 
+class DuplicateToolIdLLM(LLMClient):
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        return AssistantMessage(
+            content=[
+                ToolUseBlock(id="duplicate", name="srv__tool_0", input={}),
+                ToolUseBlock(id="duplicate", name="srv__tool_1", input={}),
+            ],
+            stop_reason="tool_use",
+            usage=CompletionUsage(total_tokens=1),
+        )
+
+
 class ToolThenBlockingStreamLLM(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
@@ -175,9 +185,7 @@ class ToolThenBlockingStreamLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() expected")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         if self.calls == 1:
             yield StreamEnd(
@@ -278,6 +286,8 @@ async def test_cancellation_before_first_model_output_publishes_nothing() -> Non
     store = CountingStore()
     original = await store.create(metadata={"stable": True})
     original.append_user("prior")
+    await store.save(original)
+    store.save_count = 0
     llm = BlockingLLM()
     runner = _runner(llm, ToolMCP(), store)
     before = list(original.messages)
@@ -291,7 +301,6 @@ async def test_cancellation_before_first_model_output_publishes_nothing() -> Non
         await task
 
     fetched = await store.get(original.session_id)
-    assert fetched is original
     assert fetched.messages == before
     assert store.save_count == 0
     await _assert_reusable(store, original)
@@ -487,10 +496,7 @@ async def test_intermediate_checkpoint_is_detached_from_later_tool_batch() -> No
     ) as execution:
         seen_second_batch = False
         async for event in execution.events:
-            if (
-                isinstance(event, ToolCallEvent)
-                and event.id == "batch-1-call-0"
-            ):
+            if isinstance(event, ToolCallEvent) and event.id == "batch-1-call-0":
                 seen_second_batch = True
                 published = await store.get(original.session_id)
                 assert len(published.messages) == 3
@@ -528,7 +534,7 @@ async def test_later_incomplete_generation_retains_earlier_tool_checkpoint() -> 
         await task
 
     published_after_cancel = await store.get(original.session_id)
-    assert published_after_cancel is published_before_cancel
+    assert published_after_cancel == published_before_cancel
     assert len(published_after_cancel.messages) == 3
     assert store.save_count == 1
     await _assert_reusable(store, original)
@@ -610,3 +616,101 @@ async def test_ephemeral_turn_never_saves_shared_store() -> None:
     assert result.answer == "follow-up"
     assert store.save_count == 0
     assert store.ids() == original_ids
+
+
+async def test_persistent_prompt_over_limit_is_rejected_before_turn_resources() -> None:
+    probe = Session()
+    probe.append_user("prospective")
+    store = CountingStore(
+        session_history_max_chars=session_history_chars(probe.messages) - 1
+    )
+    original = await store.create()
+    mcp = ToolMCP()
+    runner = _runner(AnswerLLM(), mcp, store)
+
+    with pytest.raises(SessionHistoryLimitExceeded, match="start a new session"):
+        await runner.run(
+            TurnRequest("prospective", original, PersistencePolicy.PERSISTENT)
+        )
+
+    assert mcp.calls == []
+    assert store.save_count == 0
+    assert (await store.get(original.session_id)).messages == []
+
+
+async def test_checkpoint_overflow_retains_prior_checkpoint_and_reports_safe_terminal() -> (
+    None
+):
+    prior = Session()
+    prior.append_user("prior")
+    prior.append_assistant_text("stable")
+    prospective = prior.staged_copy()
+    prospective.append_user("new")
+    store = CountingStore(
+        session_history_max_chars=session_history_chars(prospective.messages)
+    )
+    created = await store.create()
+    prior.session_id = created.session_id
+    await store.save(prior)
+    store.save_count = 0
+    runner = _runner(AnswerLLM(), ToolMCP(), store)
+
+    result = await runner.run(TurnRequest("new", created, PersistencePolicy.PERSISTENT))
+
+    assert result.answer == ""
+    assert result.done_reason == "session_history_limit"
+    assert result.usage.total_tokens == 1
+    fetched = await store.get(created.session_id)
+    assert fetched.messages == prior.messages
+    assert store.save_count == 1
+
+
+async def test_tool_checkpoint_overflow_never_persists_partial_protocol_unit() -> None:
+    probe = Session()
+    probe.append_user("tools")
+    store = CountingStore(
+        session_history_max_chars=session_history_chars(probe.messages)
+    )
+    original = await store.create()
+    runner = _runner(ToolBatchLLM(), ToolMCP(), store)
+
+    result = await runner.run(
+        TurnRequest("tools", original, PersistencePolicy.PERSISTENT)
+    )
+
+    assert result.done_reason == "session_history_limit"
+    assert (await store.get(original.session_id)).messages == []
+    assert store.save_count == 1
+
+
+async def test_ephemeral_turn_ignores_persistent_history_bound() -> None:
+    store = CountingStore(session_history_max_chars=2)
+    runner = _runner(AnswerLLM(), ToolMCP(), store)
+
+    result = await runner.run(
+        TurnRequest("x" * 10_000, Session(), PersistencePolicy.EPHEMERAL)
+    )
+
+    assert result.answer == "follow-up"
+    assert store.save_count == 0
+
+
+async def test_invalid_provider_tool_batch_terminates_safely_without_dispatch() -> None:
+    store = CountingStore()
+    original = await store.create()
+    mcp = ToolMCP()
+    runner = _runner(DuplicateToolIdLLM(), mcp, store)
+
+    async with runner.open(
+        TurnRequest("tools", original, PersistencePolicy.PERSISTENT)
+    ) as execution:
+        events = [event async for event in execution.events]
+
+    assert mcp.calls == []
+    assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+        "LLM provider returned invalid tool-call output"
+    ]
+    assert [event.reason for event in events if isinstance(event, DoneEvent)] == [
+        "provider_error"
+    ]
+    assert (await store.get(original.session_id)).messages == []

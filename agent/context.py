@@ -60,6 +60,8 @@ from llm.schemas import (
     CompletionUsage,
 )
 
+from .session import validate_transcript
+
 logger = logging.getLogger(__name__)
 
 # chars/4 is the standard cheap heuristic; good enough for budget guarding.
@@ -303,6 +305,7 @@ def _protocol_units(messages: list[Message]) -> list[list[Message]]:
     units whole is what guarantees compaction never splits a tool-use/
     tool-result pair across the retained/summarized boundary.
     """
+    validate_transcript(messages)
     units: list[list[Message]] = []
     for msg in messages:
         if (
@@ -380,8 +383,8 @@ async def _compact(
         + estimate_message_tokens([*pinned, *recent])
         + _MESSAGE_OVERHEAD_TOKENS
     )
-    summary_char_budget = (
-        summary_message_token_budget * _CHARS_PER_TOKEN - len(summary_prefix)
+    summary_char_budget = summary_message_token_budget * _CHARS_PER_TOKEN - len(
+        summary_prefix
     )
     if summary_char_budget <= 0:
         logger.warning(
@@ -459,9 +462,7 @@ def _flatten_for_summary(messages: list[Message]) -> str:
                 lines.append(f"assistant called tool {block.name} with {args}")
             elif isinstance(block, ToolResultBlock):
                 marker = " (error)" if block.is_error else ""
-                lines.append(
-                    f"tool result{marker} from {block.name}: {block.content}"
-                )
+                lines.append(f"tool result{marker} from {block.name}: {block.content}")
     return "\n".join(lines)
 
 

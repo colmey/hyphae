@@ -38,7 +38,9 @@ def _tool_call(
 
 def _answer() -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock("done")], stop_reason="end_turn", usage=CompletionUsage(total_tokens=1)
+        content=[TextBlock("done")],
+        stop_reason="end_turn",
+        usage=CompletionUsage(total_tokens=1),
     )
 
 
@@ -94,7 +96,9 @@ async def _collect(
 
 
 def _done(events: list[Any]) -> str:
-    return next(event.reason for event in reversed(events) if isinstance(event, DoneEvent))
+    return next(
+        event.reason for event in reversed(events) if isinstance(event, DoneEvent)
+    )
 
 
 async def test_valid_schema_compiles_once_and_validator_is_reused(
@@ -346,7 +350,9 @@ async def test_inventory_refresh_does_not_mutate_in_flight_validators() -> None:
 
     assert _done(first_events) == _done(second_events) == "end_turn"
     assert mcp.calls == [("srv__tool", {"q": "old"})]
-    second_result = next(event for event in second_events if event.type == "tool_result")
+    second_result = next(
+        event for event in second_events if event.type == "tool_result"
+    )
     assert second_result.is_error is True
     assert "is not of type 'integer'" in second_result.content
 

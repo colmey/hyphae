@@ -27,9 +27,7 @@ class StallingLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() must be used")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         call = self.calls
         try:
@@ -54,9 +52,7 @@ class PacedLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream() must be used")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         for text in ("a", "b", "c"):
             await asyncio.sleep(0.02)
             yield TextDelta(text)

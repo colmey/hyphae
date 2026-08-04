@@ -115,13 +115,7 @@ def test_error_result_uses_failure_status_without_missing_latency() -> None:
         _result("boom", is_error=True, latency_ms=None),
         2000,
         include_details=True,
-    ) == (
-        "> **Tool** `web.search` — failed\n\n"
-        "**Result**\n\n"
-        "```text\n"
-        "boom\n"
-        "```\n\n"
-    )
+    ) == ("> **Tool** `web.search` — failed\n\n**Result**\n\n```text\nboom\n```\n\n")
 
 
 def test_summary_activity_is_plain_and_omits_bodies() -> None:
@@ -339,9 +333,7 @@ def test_reasoning_mode_streams_ordered_activity_and_clean_answer() -> None:
         "content",
     ]
     activity = [
-        delta["reasoning_content"]
-        for delta in deltas
-        if "reasoning_content" in delta
+        delta["reasoning_content"] for delta in deltas if "reasoning_content" in delta
     ]
     assert ["first_tool" in text for text in activity] == [
         True,
@@ -391,9 +383,7 @@ def test_reasoning_fragments_are_streamed_without_whitespace_changes() -> None:
     chunks = [frame for frame in frames[:-1] if isinstance(frame, dict)]
     deltas = [_delta(frame) for frame in chunks]
     streamed_reasoning = [
-        delta["reasoning_content"]
-        for delta in deltas
-        if "reasoning_content" in delta
+        delta["reasoning_content"] for delta in deltas if "reasoning_content" in delta
     ]
 
     assert streamed_reasoning == fragments
@@ -419,10 +409,7 @@ def test_tool_activity_adds_boundaries_only_between_semantic_phases() -> None:
 
     chunks = [frame for frame in frames[:-1] if isinstance(frame, dict)]
     deltas = [_delta(frame) for frame in chunks]
-    reasoning = "".join(
-        delta.get("reasoning_content", "")
-        for delta in deltas
-    )
+    reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
 
     assert reasoning == (
         "Need a search.\n\n"
@@ -447,9 +434,7 @@ def test_reasoning_full_mode_includes_bounded_tool_details() -> None:
     chunks = [frame for frame in frames[:-1] if isinstance(frame, dict)]
     deltas = [_delta(frame) for frame in chunks]
     activity = [
-        delta["reasoning_content"]
-        for delta in deltas
-        if "reasoning_content" in delta
+        delta["reasoning_content"] for delta in deltas if "reasoning_content" in delta
     ]
 
     assert '"query": "café"' in activity[0]

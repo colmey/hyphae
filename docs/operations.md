@@ -166,8 +166,9 @@ scratchpads. The `SessionStore` ABC is kept solely as the seam for if that
 ever changes. To add a durable backend:
 
 1. Write a new class in `agent/session.py` (or a new file) that
-   implements `SessionStore.create / get / save` against a real backend
-   (SQLite, Postgres, Redis). Note `provider_metadata` holds raw **bytes**
+   implements `SessionStore.create / get / save` and the positive
+   `session_history_max_chars` policy against a real backend (SQLite, Postgres,
+   Redis). Note `provider_metadata` holds raw **bytes**
    (Gemini's `thought_signature`), so the serializer needs base64/binary
    handling, not naive JSON.
 2. Replace `InMemorySessionStore(...)` in `main.py`'s lifespan with the new
@@ -606,8 +607,10 @@ extension path described above.
 - **Sessions are in-memory by design.** Conversation history dies with the
   process — intentional, since LibreChat holds the durable context and
   re-feeds it. The store is bounded (`SESSION_TTL_SECONDS`,
-  `SESSION_CAPACITY`) so it can't grow without limit. Durable persistence
-  is the `SessionStore` ABC's job if the use case ever changes.
+  `SESSION_CAPACITY`, `SESSION_HISTORY_MAX_CHARS`) so neither the session count
+  nor one persistent transcript can grow without limit. Over-limit turns keep
+  the prior complete checkpoint and must continue in a new session. Durable
+  persistence is the `SessionStore` ABC's job if the use case ever changes.
 - **Streaming is available on `/v1`.** `POST /v1/chat/completions` with
   `stream: true` returns an SSE stream of `chat.completion.chunk` frames. The
   native `/chat` endpoint is still non-streaming; use `/chat/stream` for the

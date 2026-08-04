@@ -41,7 +41,9 @@ class TransientFailure(RuntimeError):
 
 def _answer(text: str = "ok") -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text)], stop_reason="end_turn", usage=CompletionUsage(total_tokens=1)
+        content=[TextBlock(text)],
+        stop_reason="end_turn",
+        usage=CompletionUsage(total_tokens=1),
     )
 
 
@@ -50,7 +52,9 @@ def _empty() -> AssistantMessage:
 
 
 def _done(events: list[Any]) -> str:
-    return next(event.reason for event in reversed(events) if isinstance(event, DoneEvent))
+    return next(
+        event.reason for event in reversed(events) if isinstance(event, DoneEvent)
+    )
 
 
 def _capture_retry_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
@@ -82,9 +86,7 @@ class ParityLLM(LLMClient):
             raise item
         return item
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.stream_calls += 1
         try:
             item = self._next()
@@ -145,9 +147,7 @@ class NativeSignalLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream expected")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         try:
             yield ReasoningDelta("thinking")
             yield TextDelta("streamed")
@@ -276,9 +276,7 @@ class IncompleteStreamLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream expected")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         try:
             if self.calls > 1:
@@ -292,7 +290,10 @@ class IncompleteStreamLLM(LLMClient):
 
 @pytest.mark.parametrize(
     ("visible", "reason", "calls", "text"),
-    [(False, "end_turn", 2, ["recovered"]), (True, "incomplete_stream", 1, ["partial"])],
+    [
+        (False, "end_turn", 2, ["recovered"]),
+        (True, "incomplete_stream", 1, ["partial"]),
+    ],
 )
 async def test_missing_stream_end_retries_only_before_visible_output(
     visible: bool,
@@ -356,9 +357,7 @@ class ReasoningThenTransientLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream expected")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         self.requests.append(request)
         try:
@@ -408,9 +407,7 @@ class ReasoningThenIncompleteLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream expected")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         if self.calls == 1:
             yield ReasoningDelta("unfinished thought")
@@ -430,9 +427,7 @@ async def test_reasoning_only_incomplete_stream_marks_retry_boundary() -> None:
 
     assert chunks == [
         ReasoningDelta("unfinished thought"),
-        ReasoningDelta(
-            "\n\n[Generation was interrupted; retrying...]\n\n"
-        ),
+        ReasoningDelta("\n\n[Generation was interrupted; retrying...]\n\n"),
         TextDelta("recovered"),
         StreamEnd(_answer("recovered")),
     ]
@@ -451,9 +446,7 @@ class BlockingLLM(LLMClient):
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.calls += 1
         try:
             self.started.set()
@@ -684,9 +677,7 @@ class DeltaThenBlockLLM(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("stream expected")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         try:
             yield TextDelta("visible")
             await asyncio.Event().wait()
@@ -736,7 +727,10 @@ async def test_generation_consumer_close_closes_active_stream_exactly_once() -> 
 
 @pytest.mark.parametrize(
     ("outcome", "reason", "has_error"),
-    [(_answer(), "end_turn", False), (ValueError("provider failed"), "llm_error", True)],
+    [
+        (_answer(), "end_turn", False),
+        (ValueError("provider failed"), "llm_error", True),
+    ],
 )
 async def test_cleanup_failure_does_not_replace_primary_outcome(
     outcome: AssistantMessage | BaseException,

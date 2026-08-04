@@ -502,9 +502,7 @@ def test_messages_preserve_roles_blocks_errors_and_tool_thought_signatures() -> 
     assert contents[1].parts[1].thought_signature == signature
     assert contents[1].parts[1].function_call.name == "srv__tool"
     assert contents[1].parts[1].function_call.args == {"q": "x"}
-    assert contents[2].parts[0].function_response.response == {
-        "content": "result"
-    }
+    assert contents[2].parts[0].function_response.response == {"content": "result"}
     assert contents[2].parts[1].function_response.response == {
         "content": "failed",
         "error": True,
@@ -677,10 +675,7 @@ async def test_client_invokes_sdk_and_logs_call_metadata(
     assert call["config"].system_instruction == "system"
     assert message.model == "gemini-test"
     assert message.text_blocks() == [TextBlock("answer")]
-    assert (
-        "gemini complete: model=gemini-test messages=1 tools=1"
-        in caplog.text
-    )
+    assert "gemini complete: model=gemini-test messages=1 tools=1" in caplog.text
 
 
 @pytest.mark.anyio
@@ -708,9 +703,7 @@ async def test_client_inherits_coarse_streaming(
     assert chunks[1] == TextDelta("answer")
     assert isinstance(chunks[2], StreamEnd)
     assert chunks[2].message.text_blocks() == [TextBlock("answer")]
-    assert chunks[2].message.to_message() == Message.assistant(
-        [TextBlock("answer")]
-    )
+    assert chunks[2].message.to_message() == Message.assistant([TextBlock("answer")])
 
 
 def test_transient_error_classification(

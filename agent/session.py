@@ -23,9 +23,9 @@ Design notes:
   - The store interface is async even though the in-memory implementation
     doesn't need it. This keeps the call sites unchanged when we swap to a
     real DB.
-  - `InMemorySessionStore` evicts on TTL + max-size so it cannot grow
-    unbounded under many concurrent users. Eviction is lazy (swept on
-    create), not a background task.
+  - `InMemorySessionStore` evicts on TTL + max-size and rejects retained
+    transcripts over its positive character bound. Eviction is lazy (swept
+    on create), not a background task.
   - `SessionGuard` is an in-process reject-if-busy guard. It is lock-free: on
     the single-threaded asyncio loop a check-then-add with no `await` between
     is atomic. Switching to wait-semantics later means swapping the in-flight
@@ -33,14 +33,17 @@ Design notes:
   - `save()` is explicit rather than auto-on-mutate. The loop publishes only
     protocol-safe checkpoints: a complete non-tool assistant response, or a
     tool-use message followed by exactly one result per call. After an
-    intermediate checkpoint it continues on another staged copy, so even the
-    reference-storing in-memory backend cannot expose later mutation.
+    intermediate checkpoint it continues on another staged copy. Store
+    create/get/save boundaries also deep-copy canonical nested values, so
+    caller mutation cannot alter a retained checkpoint.
 """
 
 from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -68,6 +71,104 @@ def _new_session_id() -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+class SessionHistoryLimitExceeded(ValueError):
+    """The complete retained transcript cannot fit within its configured bound."""
+
+    def __init__(self) -> None:
+        super().__init__("session history limit reached; start a new session")
+
+
+class TranscriptValidationError(ValueError):
+    """Canonical retained history violates the tool-call/result protocol."""
+
+
+def session_history_chars(messages: Sequence[Message]) -> int:
+    """Measure the deterministic in-memory canonical representation.
+
+    Canonical messages contain dataclasses, JSON-shaped collections, and opaque
+    provider bytes. Their Python representation includes every retained field
+    without introducing a second serialization format or changing byte values.
+    """
+    return len(repr(list(messages)))
+
+
+def validate_transcript(
+    messages: Sequence[Message],
+    *,
+    allow_pending: bool = False,
+) -> None:
+    """Validate canonical assistant tool-call/result protocol units."""
+    pending: tuple[ToolUseBlock, ...] | None = None
+    for message in messages:
+        tool_uses_in_message = tuple(
+            block for block in message.content if isinstance(block, ToolUseBlock)
+        )
+        tool_results_in_message = tuple(
+            block for block in message.content if isinstance(block, ToolResultBlock)
+        )
+        if tool_uses_in_message and message.role is not Role.ASSISTANT:
+            raise TranscriptValidationError(
+                "invalid transcript: tool calls may appear only in assistant messages"
+            )
+        if tool_results_in_message and message.role is not Role.TOOL:
+            raise TranscriptValidationError(
+                "invalid transcript: tool results may appear only in tool messages"
+            )
+
+        if pending is not None:
+            if message.role is not Role.TOOL:
+                raise TranscriptValidationError(
+                    "invalid transcript: assistant tool calls require one following result message"
+                )
+            if not all(isinstance(block, ToolResultBlock) for block in message.content):
+                raise TranscriptValidationError(
+                    "invalid transcript: tool messages may contain only tool results"
+                )
+            results = tuple(
+                block for block in message.content if isinstance(block, ToolResultBlock)
+            )
+            if len(results) != len(pending):
+                raise TranscriptValidationError(
+                    "invalid transcript: tool calls require exactly one result each"
+                )
+            expected = {tool_use.id: tool_use.name for tool_use in pending}
+            actual_ids = [result.tool_use_id for result in results]
+            if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != set(
+                expected
+            ):
+                raise TranscriptValidationError(
+                    "invalid transcript: tool result IDs and names must match their calls"
+                )
+            if any(expected[result.tool_use_id] != result.name for result in results):
+                raise TranscriptValidationError(
+                    "invalid transcript: tool result IDs and names must match their calls"
+                )
+            pending = None
+            continue
+
+        if message.role is Role.TOOL:
+            raise TranscriptValidationError(
+                "invalid transcript: orphan tool result message"
+            )
+        if message.role is not Role.ASSISTANT:
+            continue
+
+        tool_uses = tool_uses_in_message
+        if not tool_uses:
+            continue
+        ids = [tool_use.id for tool_use in tool_uses]
+        if len(ids) != len(set(ids)):
+            raise TranscriptValidationError(
+                "invalid transcript: assistant tool-call IDs must be unique"
+            )
+        pending = tool_uses
+
+    if pending is not None and not allow_pending:
+        raise TranscriptValidationError(
+            "invalid transcript: assistant tool calls require one following result message"
+        )
 
 
 @dataclass
@@ -181,6 +282,12 @@ class SessionStore(ABC):
         """Persist (or re-persist) the given session."""
         ...
 
+    @property
+    @abstractmethod
+    def session_history_max_chars(self) -> int:
+        """Maximum complete retained transcript size for persistent sessions."""
+        ...
+
 
 class InMemorySessionStore(SessionStore):
     """Dict-backed store, bounded by TTL and max-size. Process-lifetime only.
@@ -200,10 +307,28 @@ class InMemorySessionStore(SessionStore):
     production bounds are injected from Settings in main.py.
     """
 
-    def __init__(self, ttl_seconds: int = 0, max_count: int = 0) -> None:
+    def __init__(
+        self,
+        ttl_seconds: int = 0,
+        max_count: int = 0,
+        session_history_max_chars: int = 256_000,
+    ) -> None:
+        if session_history_max_chars <= 0:
+            raise ValueError("session_history_max_chars must be positive")
         self._sessions: dict[str, Session] = {}
         self._ttl_seconds = ttl_seconds
         self._max_count = max_count
+        self._session_history_max_chars = session_history_max_chars
+
+    @property
+    def session_history_max_chars(self) -> int:
+        return self._session_history_max_chars
+
+    def _validated_snapshot(self, session: Session) -> Session:
+        validate_transcript(session.messages)
+        if session_history_chars(session.messages) > self._session_history_max_chars:
+            raise SessionHistoryLimitExceeded
+        return deepcopy(session)
 
     def _evict(self) -> None:
         """Drop expired then surplus sessions. Cheap; called on create()."""
@@ -226,22 +351,20 @@ class InMemorySessionStore(SessionStore):
     async def create(self, metadata: dict[str, Any] | None = None) -> Session:
         self._evict()
         session = Session(metadata=dict(metadata) if metadata else {})
-        self._sessions[session.session_id] = session
+        self._sessions[session.session_id] = self._validated_snapshot(session)
         return session
 
     async def get(self, session_id: str) -> Session:
         try:
-            return self._sessions[session_id]
+            stored = self._sessions[session_id]
         except KeyError as e:
             raise SessionNotFoundError(session_id) from e
+        return self._validated_snapshot(stored)
 
     async def save(self, session: Session) -> None:
-        # In-memory: the Session object held by the store is the same
-        # instance the caller already mutated, so save() is structurally a
-        # no-op. We still bump updated_at and re-stamp the dict entry so
-        # behavior matches what a SQL-backed implementation would do.
-        session.updated_at = _utc_now()
-        self._sessions[session.session_id] = session
+        snapshot = self._validated_snapshot(session)
+        snapshot.updated_at = _utc_now()
+        self._sessions[session.session_id] = snapshot
 
     # ----- convenience for tests / debugging -----
 

@@ -44,7 +44,13 @@ from .events import (
     UsageEvent,
 )
 from .generation import generate_with_retry
-from .session import Session, SessionStore
+from .session import (
+    Session,
+    SessionHistoryLimitExceeded,
+    SessionStore,
+    TranscriptValidationError,
+    validate_transcript,
+)
 from .runtime import RunContext, RunDeadlineExceeded, RunLimits
 from .tool_execution import (
     ActiveToolBatch,
@@ -245,9 +251,7 @@ class _AgentRun:
             system=effective_system,
             tools=effective_tools,
         )
-        self.cumulative_usage = (
-            self.cumulative_usage + context_assembly.auxiliary_usage
-        )
+        self.cumulative_usage = self.cumulative_usage + context_assembly.auxiliary_usage
         request = GenerationRequest(
             messages=context_assembly.messages,
             tools=effective_tools or None,
@@ -363,12 +367,23 @@ class _AgentRun:
 
         self.session.append_assistant(response)
         tool_uses = response.tool_uses()
+        transcript_error: TranscriptValidationError | None = None
+        try:
+            validate_transcript(self.session.messages, allow_pending=bool(tool_uses))
+        except TranscriptValidationError as exc:
+            transcript_error = exc
         self.active_tool_batch = (
-            ActiveToolBatch(tuple(tool_uses)) if tool_uses else None
+            ActiveToolBatch(tuple(tool_uses))
+            if tool_uses and transcript_error is None
+            else None
         )
 
-        if self.active_tool_batch is None:
-            await self._publish_checkpoint(continue_work=False)
+        checkpoint_error: SessionHistoryLimitExceeded | None = None
+        if self.active_tool_batch is None and transcript_error is None:
+            try:
+                await self._publish_checkpoint(continue_work=False)
+            except SessionHistoryLimitExceeded as exc:
+                checkpoint_error = exc
 
         usage = estimate_usage_tokens(
             response.usage,
@@ -389,6 +404,11 @@ class _AgentRun:
                 latency_ms=latency_ms,
             )
         )
+
+        if transcript_error is not None:
+            raise transcript_error
+        if checkpoint_error is not None:
+            raise checkpoint_error
 
         if response.reasoning and not streamed_reasoning:
             yield await self.context.emit(ReasoningEvent(text=response.reasoning))
@@ -502,8 +522,7 @@ class _AgentRun:
         )
         if (
             is_error
-            and self.consecutive_tool_errors
-            == _CONSECUTIVE_ERROR_NUDGE_THRESHOLD
+            and self.consecutive_tool_errors == _CONSECUTIVE_ERROR_NUDGE_THRESHOLD
         ):
             content = f"{content}\n\n{_FAILURE_NUDGE}"
 
@@ -666,9 +685,7 @@ class _AgentRun:
                 prepared = await self._prepare_generation()
             except ContextBudgetExceeded as exc:
                 if exc.auxiliary_usage.total_tokens:
-                    self.cumulative_usage = (
-                        self.cumulative_usage + exc.auxiliary_usage
-                    )
+                    self.cumulative_usage = self.cumulative_usage + exc.auxiliary_usage
                     yield await self.context.emit(
                         self._auxiliary_usage_event(
                             exc.auxiliary_usage,
@@ -707,8 +724,7 @@ class _AgentRun:
             except RunDeadlineExceeded:
                 self._clear_pending_generation()
                 self.context.logger.warning(
-                    "run exceeded max_run_seconds=%.1f during LLM call "
-                    "(elapsed=%.1fs)",
+                    "run exceeded max_run_seconds=%.1f during LLM call (elapsed=%.1fs)",
                     self.limits.max_run_seconds,
                     self.context.elapsed_seconds(),
                 )
@@ -740,8 +756,7 @@ class _AgentRun:
                     yield await self.context.emit(
                         ErrorEvent(
                             message=(
-                                "LLM stream ended without a terminal provider "
-                                "message"
+                                "LLM stream ended without a terminal provider message"
                             )
                         )
                     )
@@ -775,9 +790,7 @@ class _AgentRun:
                     assert terminal_reason is not None
                     if terminal_reason == "provider_error":
                         yield await self.context.emit(
-                            ErrorEvent(
-                                message="LLM provider terminated abnormally"
-                            )
+                            ErrorEvent(message="LLM provider terminated abnormally")
                         )
                     yield await self.context.emit(self._done(terminal_reason))
                     return
@@ -788,10 +801,28 @@ class _AgentRun:
                         yield event
                 tool_terminal_reason = self._take_terminal_reason()
                 if tool_terminal_reason is not None:
-                    yield await self.context.emit(
-                        self._done(tool_terminal_reason)
-                    )
+                    yield await self.context.emit(self._done(tool_terminal_reason))
                     return
+            except TranscriptValidationError:
+                self.active_tool_batch = None
+                self._pending_terminal_reason = None
+                self.context.logger.warning(
+                    "provider returned an invalid canonical tool transcript"
+                )
+                yield await self.context.emit(
+                    ErrorEvent(message="LLM provider returned invalid tool-call output")
+                )
+                yield await self.context.emit(self._done("provider_error"))
+                return
+            except SessionHistoryLimitExceeded as exc:
+                self.active_tool_batch = None
+                self._pending_terminal_reason = None
+                self.context.logger.warning(
+                    "session checkpoint rejected by retained-history limit"
+                )
+                yield await self.context.emit(ErrorEvent(message=str(exc)))
+                yield await self.context.emit(self._done("session_history_limit"))
+                return
             except (asyncio.CancelledError, GeneratorExit):
                 if self.active_tool_batch is not None:
                     try:

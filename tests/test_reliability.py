@@ -59,7 +59,9 @@ def empty_response() -> AssistantMessage:
 
 def truncated_response(text: str) -> AssistantMessage:
     return AssistantMessage(
-        content=[TextBlock(text=text)], stop_reason="max_tokens", usage=CompletionUsage()
+        content=[TextBlock(text=text)],
+        stop_reason="max_tokens",
+        usage=CompletionUsage(),
     )
 
 

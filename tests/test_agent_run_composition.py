@@ -84,17 +84,13 @@ async def test_record_response_clears_short_lived_generation_state() -> None:
     run.iteration = 1
 
     prepared = await run._prepare_generation()
-    generation_events = [
-        event async for event in run._consume_generation(prepared)
-    ]
+    generation_events = [event async for event in run._consume_generation(prepared)]
 
     assert generation_events == []
     assert run._pending_response is response
     assert run.tool_dispatcher is dispatcher
 
-    record_events = [
-        event async for event in run._record_response(prepared)
-    ]
+    record_events = [event async for event in run._record_response(prepared)]
 
     assert [type(event) for event in record_events] == [UsageEvent, TextEvent]
     assert run._pending_response is None

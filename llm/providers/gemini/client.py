@@ -61,9 +61,7 @@ class GeminiLLMClient(LLMClient):
                 self._close_task = None
                 task = None
         if task is None:
-            task = asyncio.create_task(
-                self._finish_close(), name="gemini-client-close"
-            )
+            task = asyncio.create_task(self._finish_close(), name="gemini-client-close")
             self._close_task = task
             task.add_done_callback(self._close_finished)
         await asyncio.shield(task)

@@ -59,6 +59,7 @@ and trace output whether values come from `.env` or the process environment.
 | `CONTEXT_SUMMARY_MAX_TOKENS`   | `512`                         | Output cap for the one-call compaction summarizer |
 | `SESSION_TTL_SECONDS`          | `3600`                        | Idle TTL before an in-memory session is evicted (`<= 0` disables) |
 | `SESSION_CAPACITY`            | `1000`                        | Max sessions retained in memory; oldest-updated evicted first (`<= 0` disables) |
+| `SESSION_HISTORY_MAX_CHARS`   | `256000`                      | Positive hard bound on each persistent session's complete canonical retained transcript; over-limit turns are rejected without truncating stored history |
 | `LOG_LEVEL`                    | `INFO`                        | Python logging level (DEBUG opens per-request orchestrator detail) |
 | `TRACE_ENABLED`                | `false`                       | Serialize the loop's event stream to a JSONL trace (one record per event, tagged with `run_id` + step + timestamp + latency). Off = `tracer=None`, zero hot-path cost |
 | `TRACE_JSONL_PATH`                   | `traces/harness.jsonl`        | Append-only JSONL trace file; parent dirs are created. Captures full prompts/args/results — treat as sensitive and guard at the filesystem level (the trace file is not covered by `HYPHAE_API_KEY`) |

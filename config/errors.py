@@ -67,6 +67,7 @@ _SAFE_LOCATION_PARTS = frozenset(
         "run_max_tokens",
         "sampling",
         "session_capacity",
+        "session_history_max_chars",
         "session_max_count",
         "session_ttl_seconds",
         "supports_native_tools",

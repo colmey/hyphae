@@ -119,6 +119,7 @@ def wired_app(
             else InMemorySessionStore(
                 ttl_seconds=settings.session_ttl_seconds,
                 max_count=settings.session_capacity,
+                session_history_max_chars=settings.session_history_max_chars,
             )
         ),
         guard=SessionGuard(),

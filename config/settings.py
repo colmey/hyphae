@@ -37,6 +37,7 @@ from .errors import (
 )
 from .paths import CONFIG_DIR, REPOSITORY_ROOT, resolve_application_path
 
+
 def _validate_identifier(value: str, label: str, *, allow_blank: bool = False) -> str:
     return validate_nonblank_bounded(
         value,
@@ -356,6 +357,11 @@ class Settings(BaseSettings):
         description="Max sessions retained in memory; oldest-updated evicted first.",
         validation_alias=AliasChoices("session_capacity", "session_max_count"),
     )
+    session_history_max_chars: int = Field(
+        default=256_000,
+        gt=0,
+        description="Maximum canonical retained transcript characters per session.",
+    )
 
     # When off, routes use the default LLM and full tool inventory directly.
     orchestration_enabled: bool = Field(
@@ -390,6 +396,7 @@ class Settings(BaseSettings):
         "loop_max_iterations",
         "session_ttl_seconds",
         "session_capacity",
+        "session_history_max_chars",
         mode="before",
     )
     @classmethod

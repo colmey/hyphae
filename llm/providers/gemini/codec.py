@@ -148,9 +148,7 @@ def build_generation_config(
     active_logger = logger or _LOGGER
     genai_tools = tools_to_gemini(generation.tools) if generation.tools else None
     config_kwargs: dict[str, Any] = {
-        "max_output_tokens": (
-            generation.max_tokens or config.default_max_tokens
-        ),
+        "max_output_tokens": (generation.max_tokens or config.default_max_tokens),
         "tools": genai_tools,
         "automatic_function_calling": genai_types.AutomaticFunctionCallingConfig(
             disable=True,
@@ -235,11 +233,7 @@ def response_to_message(
 
         function_call = getattr(part, "function_call", None)
         if function_call is not None:
-            metadata = (
-                {"thought_signature": signature}
-                if signature is not None
-                else {}
-            )
+            metadata = {"thought_signature": signature} if signature is not None else {}
             blocks.append(
                 ToolUseBlock(
                     id=f"call_{uuid.uuid4().hex[:12]}",
@@ -278,18 +272,10 @@ def usage_from_response(response: Any) -> CompletionUsage:
         return CompletionUsage()
 
     return CompletionUsage(
-        input_tokens=coerce_usage_count(
-            getattr(usage, "prompt_token_count", 0)
-        ),
-        output_tokens=coerce_usage_count(
-            getattr(usage, "candidates_token_count", 0)
-        ),
-        total_tokens=coerce_usage_count(
-            getattr(usage, "total_token_count", 0)
-        ),
-        thinking_tokens=coerce_usage_count(
-            getattr(usage, "thoughts_token_count", 0)
-        ),
+        input_tokens=coerce_usage_count(getattr(usage, "prompt_token_count", 0)),
+        output_tokens=coerce_usage_count(getattr(usage, "candidates_token_count", 0)),
+        total_tokens=coerce_usage_count(getattr(usage, "total_token_count", 0)),
+        thinking_tokens=coerce_usage_count(getattr(usage, "thoughts_token_count", 0)),
         cached_tokens=coerce_usage_count(
             getattr(usage, "cached_content_token_count", 0)
         ),

@@ -116,23 +116,19 @@ class Tracer(ABC):
 
     @property
     @abstractmethod
-    def accepted(self) -> int:
-        ...
+    def accepted(self) -> int: ...
 
     @property
     @abstractmethod
-    def written(self) -> int:
-        ...
+    def written(self) -> int: ...
 
     @property
     @abstractmethod
-    def dropped(self) -> int:
-        ...
+    def dropped(self) -> int: ...
 
     @property
     @abstractmethod
-    def writer_failures(self) -> int:
-        ...
+    def writer_failures(self) -> int: ...
 
 
 class NoOpTracer(Tracer):
@@ -249,7 +245,9 @@ class JSONLTracer(Tracer):
             )
         self._state = _TracerState.RUNNING
         self._accepting = True
-        logger.info("tracing enabled: JSONL trace -> %s", _safe_path_display(self._path))
+        logger.info(
+            "tracing enabled: JSONL trace -> %s", _safe_path_display(self._path)
+        )
 
     def emit(self, record: TraceRecord) -> None:
         if not self._accepting or self._queue is None:
@@ -409,11 +407,7 @@ class JSONLTracer(Tracer):
         try:
             writer_task = self._writer_task
             queue = self._queue
-            if (
-                writer_task is not None
-                and queue is not None
-                and not writer_task.done()
-            ):
+            if writer_task is not None and queue is not None and not writer_task.done():
                 await queue.put(_STOP)
             if writer_task is not None:
                 await writer_task

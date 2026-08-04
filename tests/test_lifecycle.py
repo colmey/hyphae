@@ -193,9 +193,7 @@ class _AppMCPManager:
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
         return []
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> ToolCallResult:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
         raise AssertionError(f"unexpected tool dispatch: {name} {arguments!r}")
 
     @asynccontextmanager
@@ -882,7 +880,10 @@ def test_single_implicit_default_is_marked_in_prompt_inventory() -> None:
         }
     )
 
-    assert "- only (default)" in LLMRegistry(config, _RegistrySettings()).describe_for_prompt()
+    assert (
+        "- only (default)"
+        in LLMRegistry(config, _RegistrySettings()).describe_for_prompt()
+    )
 
 
 async def test_disabled_orchestration_builds_one_unorchestrated_client_and_injects_mcp_timeout(

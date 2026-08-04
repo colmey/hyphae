@@ -190,9 +190,7 @@ def test_constructor_normalizes_real_and_compatible_endpoint_modes(
     assert signature.parameters["profile"].default is None
 
     real = OpenAICompatibleLLMClient("key", "model", 10)
-    empty_base_url = OpenAICompatibleLLMClient(
-        "key", "model", 10, base_url=""
-    )
+    empty_base_url = OpenAICompatibleLLMClient("key", "model", 10, base_url="")
     profile = ModelProfile(temperature=0.2)
     compatible = OpenAICompatibleLLMClient(
         "key",
@@ -260,7 +258,9 @@ def test_empty_choices_are_retryable_empty_with_usage_and_default_model() -> Non
     assert message.stop_reason == "empty"
     assert message.raw_stop_reason is None
     assert message.model == "test-model"
-    assert message.usage == CompletionUsage(input_tokens=1, output_tokens=2, total_tokens=3)
+    assert message.usage == CompletionUsage(
+        input_tokens=1, output_tokens=2, total_tokens=3
+    )
 
 
 def test_refusal_is_visible_and_canonical_even_with_stop() -> None:
@@ -274,18 +274,14 @@ def test_refusal_is_visible_and_canonical_even_with_stop() -> None:
 
 
 def test_refusal_does_not_duplicate_identical_visible_content() -> None:
-    message = _message(
-        _response("stop", content="not allowed", refusal="not allowed")
-    )
+    message = _message(_response("stop", content="not allowed", refusal="not allowed"))
 
     assert message.stop_reason == "refusal"
     assert message.text_blocks() == [TextBlock("not allowed")]
 
 
 def test_unterminated_leading_reasoning_is_never_visible() -> None:
-    message = _message(
-        _response("stop", content="<think>private unfinished reasoning")
-    )
+    message = _message(_response("stop", content="<think>private unfinished reasoning"))
 
     assert message.stop_reason == "empty"
     assert message.reasoning == "private unfinished reasoning"
@@ -312,9 +308,7 @@ def test_actual_tool_content_overrides_finish_reason(
         id="call_provider",
         function=SimpleNamespace(name="srv__tool", arguments='{"q":"x"}'),
     )
-    message = _message(
-        _response(finish_reason, content=None, tool_calls=[tool_call])
-    )
+    message = _message(_response(finish_reason, content=None, tool_calls=[tool_call]))
 
     assert message.stop_reason == "tool_use"
     assert message.raw_stop_reason == finish_reason
@@ -325,9 +319,7 @@ def test_actual_tool_content_overrides_finish_reason(
 
 def test_legacy_function_call_is_normalized_with_synthetic_id() -> None:
     legacy = SimpleNamespace(name="srv__legacy", arguments='{"value":1}')
-    message = _message(
-        _response("function_call", content=None, function_call=legacy)
-    )
+    message = _message(_response("function_call", content=None, function_call=legacy))
 
     assert message.stop_reason == "tool_use"
     assert message.raw_stop_reason == "function_call"
@@ -547,9 +539,7 @@ def test_usage_detail_zeros_and_malformed_values_use_safe_coercion() -> None:
             completion_tokens=2,
             total_tokens=3,
             prompt_tokens_details=SimpleNamespace(cached_tokens=object()),
-            completion_tokens_details=SimpleNamespace(
-                reasoning_tokens=float("inf")
-            ),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=float("inf")),
         )
     )
 
@@ -773,9 +763,7 @@ def _owned_stream_client(
 ) -> tuple[OpenAICompatibleLLMClient, _OwnedStreamingCompletions]:
     completions = _OwnedStreamingCompletions(stream)
     client = _client(compatible=True)
-    client._client = SimpleNamespace(
-        chat=SimpleNamespace(completions=completions)
-    )
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return client, completions
 
 
@@ -805,9 +793,7 @@ def _sdk_chunk(
     choices: bool = True,
 ) -> Any:
     choice_items = (
-        [SimpleNamespace(finish_reason=finish_reason, delta=delta)]
-        if choices
-        else []
+        [SimpleNamespace(finish_reason=finish_reason, delta=delta)] if choices else []
     )
     return SimpleNamespace(model=model, usage=usage, choices=choice_items)
 
@@ -849,10 +835,7 @@ def _tool_chunks(argument_parts: list[str]) -> list[Any]:
 
 
 async def _decode(stream: _OwnedSDKStream) -> list[Any]:
-    return [
-        chunk
-        async for chunk in decode_stream(stream, default_model="test-model")
-    ]
+    return [chunk async for chunk in decode_stream(stream, default_model="test-model")]
 
 
 def _run_stripper(pieces: list[str]) -> tuple[str, str | None]:
@@ -865,9 +848,7 @@ def _run_stripper(pieces: list[str]) -> tuple[str, str | None]:
 def test_reasoning_stripper_handles_every_tag_split_point() -> None:
     source = " \t<think>private chain</think>  visible answer"
     for split_at in range(len(source) + 1):
-        visible, reasoning = _run_stripper(
-            [source[:split_at], source[split_at:]]
-        )
+        visible, reasoning = _run_stripper([source[:split_at], source[split_at:]])
         assert visible == "visible answer", split_at
         assert reasoning == "private chain", split_at
 
@@ -879,7 +860,11 @@ def test_reasoning_stripper_handles_every_tag_split_point() -> None:
 @pytest.mark.parametrize(
     ("pieces", "expected_visible", "expected_reasoning"),
     [
-        (["Hello <think>not leading</think>"], "Hello <think>not leading</think>", None),
+        (
+            ["Hello <think>not leading</think>"],
+            "Hello <think>not leading</think>",
+            None,
+        ),
         (["plain"], "plain", None),
         (["<think>unfinished"], "", "unfinished"),
         (["   "], "   ", None),
@@ -1014,15 +999,17 @@ async def test_streamed_reasoning_refusal_usage_and_model_assembly() -> None:
         "answer",
         " refused",
     ]
-    assert [
-        chunk.text for chunk in emitted if isinstance(chunk, ReasoningDelta)
-    ] == ["secret"]
+    assert [chunk.text for chunk in emitted if isinstance(chunk, ReasoningDelta)] == [
+        "secret"
+    ]
     assert end.message.text_blocks() == [TextBlock("answer refused")]
     assert end.message.reasoning == "secret"
     assert end.message.stop_reason == "refusal"
     assert end.message.raw_stop_reason == "stop"
     assert end.message.model == "test-model"
-    assert end.message.usage == CompletionUsage(input_tokens=1, output_tokens=2, total_tokens=3)
+    assert end.message.usage == CompletionUsage(
+        input_tokens=1, output_tokens=2, total_tokens=3
+    )
 
 
 @pytest.mark.anyio
@@ -1062,9 +1049,10 @@ async def test_unclosed_think_tag_is_sanitized_into_reasoning_delta() -> None:
         )
     )
 
-    assert "".join(
-        chunk.text for chunk in emitted if isinstance(chunk, ReasoningDelta)
-    ) == "unfinished thought"
+    assert (
+        "".join(chunk.text for chunk in emitted if isinstance(chunk, ReasoningDelta))
+        == "unfinished thought"
+    )
     assert not any(isinstance(chunk, TextDelta) for chunk in emitted)
     assert "<think>" not in repr(emitted)
     end = next(chunk for chunk in emitted if isinstance(chunk, StreamEnd))
@@ -1267,9 +1255,7 @@ async def test_client_schema_failure_happens_before_sdk_call() -> None:
 
     completions = _CompletionCapture(_response(content="unused"))
     client = _client()
-    client._client = SimpleNamespace(
-        chat=SimpleNamespace(completions=completions)
-    )
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
     with pytest.raises(ValueError, match="invalid response schema"):
         await client.complete(
@@ -1290,18 +1276,14 @@ async def test_client_logs_translation_notices_with_once_only_thinking(
 
     completions = _CompletionCapture(_response(content="ok"))
     client = _client(profile=ModelProfile(thinking="none"))
-    client._client = SimpleNamespace(
-        chat=SimpleNamespace(completions=completions)
-    )
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     request = GenerationRequest(
         messages=[Message.user("hello")],
         tools=[{"name": "tool", "description": "", "input_schema": {}}],
         response_schema=Structured,
         thinking_level="high",
     )
-    caplog.set_level(
-        logging.INFO, logger="llm.providers.openai_compatible"
-    )
+    caplog.set_level(logging.INFO, logger="llm.providers.openai_compatible")
 
     await client.complete(request)
     await client.complete(request)

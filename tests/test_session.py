@@ -6,9 +6,21 @@ from datetime import timedelta
 
 import pytest
 
-from agent import InMemorySessionStore, SessionBusyError, SessionGuard
-from agent.session import SessionNotFoundError
-from llm.schemas import AssistantMessage, Role, TextBlock, ToolResultBlock, ToolUseBlock
+from agent import InMemorySessionStore, Session, SessionBusyError, SessionGuard
+from agent.session import (
+    SessionHistoryLimitExceeded,
+    SessionNotFoundError,
+    session_history_chars,
+    validate_transcript,
+)
+from llm.schemas import (
+    AssistantMessage,
+    Message,
+    Role,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 
 pytestmark = pytest.mark.anyio
@@ -74,7 +86,7 @@ async def test_session_round_trip_preserves_all_message_kinds() -> None:
 
     await store.save(session)
     fetched = await store.get(session.session_id)
-    assert fetched is session
+    assert fetched is not session
     assert len(fetched.messages) == 4
     assert fetched.turn_count() == 1
     assert len(store) == 1
@@ -104,18 +116,182 @@ async def test_store_evicts_oldest_session_at_max_count() -> None:
     assert len(store) <= 3
     with pytest.raises(SessionNotFoundError):
         await store.get(created[0].session_id)
-    assert await store.get(created[-1].session_id) is created[-1]
+    assert await store.get(created[-1].session_id) == created[-1]
 
 
 async def test_store_evicts_stale_session_by_ttl() -> None:
     store = InMemorySessionStore(ttl_seconds=60, max_count=0)
     stale = await store.create()
-    stale.updated_at -= timedelta(seconds=120)
+    store._sessions[stale.session_id].updated_at -= timedelta(seconds=120)
     fresh = await store.create()
 
     with pytest.raises(SessionNotFoundError):
         await store.get(stale.session_id)
-    assert await store.get(fresh.session_id) is fresh
+    assert await store.get(fresh.session_id) == fresh
+
+
+def test_transcript_validator_accepts_ordinary_and_complete_multi_tool_history() -> (
+    None
+):
+    messages = [
+        Message.user("go"),
+        Message.assistant(
+            [
+                ToolUseBlock(id="one", name="same-tool", input={}),
+                ToolUseBlock(id="two", name="same-tool", input={}),
+            ]
+        ),
+        Message.tool_results(
+            [
+                ToolResultBlock(tool_use_id="one", name="same-tool", content="1"),
+                ToolResultBlock(tool_use_id="two", name="same-tool", content="2"),
+            ]
+        ),
+        Message.assistant([TextBlock("done")]),
+        Message.user("thanks"),
+    ]
+
+    validate_transcript(messages)
+
+    messages[2] = Message.tool_results(list(reversed(messages[2].content)))  # type: ignore[arg-type]
+    validate_transcript(messages)
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [Message.tool_results([ToolResultBlock("orphan", "tool", "x")])],
+        [Message(role=Role.USER, content=[ToolUseBlock("call", "tool", {})])],
+        [
+            Message(
+                role=Role.ASSISTANT,
+                content=[ToolResultBlock("call", "tool", "result")],
+            )
+        ],
+        [Message.assistant([ToolUseBlock("one", "tool", {})])],
+        [
+            Message.assistant(
+                [ToolUseBlock("same", "one", {}), ToolUseBlock("same", "two", {})]
+            ),
+            Message.tool_results(
+                [
+                    ToolResultBlock("same", "one", "1"),
+                    ToolResultBlock("same", "two", "2"),
+                ]
+            ),
+        ],
+        [
+            Message.assistant([ToolUseBlock("one", "tool", {})]),
+            Message.tool_results(
+                [
+                    ToolResultBlock("one", "tool", "1"),
+                    ToolResultBlock("one", "tool", "2"),
+                ]
+            ),
+        ],
+        [
+            Message.assistant([ToolUseBlock("one", "tool", {})]),
+            Message.tool_results([ToolResultBlock("other", "tool", "1")]),
+        ],
+        [
+            Message.assistant([ToolUseBlock("one", "tool", {})]),
+            Message.tool_results([ToolResultBlock("one", "other", "1")]),
+        ],
+    ],
+    ids=[
+        "orphan",
+        "tool-use-in-user",
+        "tool-result-in-assistant",
+        "missing",
+        "duplicate-call-id",
+        "duplicate-result",
+        "mismatched-id",
+        "mismatched-name",
+    ],
+)
+def test_transcript_validator_rejects_malformed_tool_protocol(
+    messages: list[Message],
+) -> None:
+    with pytest.raises(ValueError, match="transcript"):
+        validate_transcript(messages)
+
+
+async def test_store_create_get_and_save_are_deeply_detached() -> None:
+    store = InMemorySessionStore()
+    created = await store.create(metadata={"nested": {"values": [1]}})
+    created.metadata["nested"]["values"].append(2)
+    assert (await store.get(created.session_id)).metadata == {"nested": {"values": [1]}}
+
+    created.append_assistant(
+        AssistantMessage(
+            content=[
+                ToolUseBlock(
+                    id="call",
+                    name="tool",
+                    input={"nested": ["original"]},
+                    provider_metadata={"signature": b"opaque", "nested": {"x": [1]}},
+                )
+            ]
+        )
+    )
+    created.append_tool_results([ToolResultBlock("call", "tool", "ok")])
+    await store.save(created)
+    created.messages[0].content[0].input["nested"].append("caller")  # type: ignore[union-attr]
+    created.messages[0].content[0].provider_metadata["nested"]["x"].append(2)  # type: ignore[union-attr]
+
+    first = await store.get(created.session_id)
+    block = first.messages[0].content[0]
+    assert isinstance(block, ToolUseBlock)
+    assert block.input == {"nested": ["original"]}
+    assert block.provider_metadata == {
+        "signature": b"opaque",
+        "nested": {"x": [1]},
+    }
+    first.messages[0].content[0].provider_metadata["nested"]["x"].append(3)  # type: ignore[union-attr]
+    second = await store.get(created.session_id)
+    assert second.messages[0].content[0].provider_metadata["nested"] == {"x": [1]}  # type: ignore[union-attr]
+
+
+async def test_store_rejects_malformed_saved_and_restored_transcripts() -> None:
+    store = InMemorySessionStore()
+    session = await store.create()
+    session.messages.append(
+        Message.tool_results([ToolResultBlock("orphan", "tool", "result")])
+    )
+    with pytest.raises(ValueError, match="orphan"):
+        await store.save(session)
+
+    store._sessions[session.session_id].messages.append(
+        Message.tool_results([ToolResultBlock("orphan", "tool", "result")])
+    )
+    with pytest.raises(ValueError, match="orphan"):
+        await store.get(session.session_id)
+
+
+async def test_store_rejects_restored_transcript_over_history_limit() -> None:
+    store = InMemorySessionStore(session_history_max_chars=2)
+    session = await store.create()
+    store._sessions[session.session_id].append_user("oversized restored history")
+
+    with pytest.raises(SessionHistoryLimitExceeded, match="session history limit"):
+        await store.get(session.session_id)
+
+
+async def test_store_accepts_exact_history_limit_and_rejects_one_character_over() -> (
+    None
+):
+    candidate = Session()
+    candidate.append_user("bounded")
+    exact = session_history_chars(candidate.messages)
+    store = InMemorySessionStore(session_history_max_chars=exact)
+    stored = await store.create()
+    candidate.session_id = stored.session_id
+
+    await store.save(candidate)
+    candidate.messages[0].content[0].text += "x"  # type: ignore[union-attr]
+    with pytest.raises(SessionHistoryLimitExceeded, match="session history limit"):
+        await store.save(candidate)
+    assert (await store.get(stored.session_id)).messages[0].content[0].text == "bounded"  # type: ignore[union-attr]
 
 
 async def test_session_guard_rejects_same_id_and_releases_claim() -> None:

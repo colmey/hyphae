@@ -330,6 +330,10 @@ preserves earlier safe checkpoints, balances an interrupted tool batch with
 explicit synthetic results when possible, re-raises cancellation, and never
 persists a prompt-only or unmatched-tool transcript. Ephemeral `/v1` turns use
 the same staging rules but never publish to the native store.
+Persistent history is bounded by `SESSION_HISTORY_MAX_CHARS`; an over-limit
+prompt or checkpoint is rejected without truncating or replacing the prior
+complete checkpoint. The `/v1` adapter remains ephemeral and is not subject to
+that retained-store bound.
 
 ## `GET /v1/models`
 

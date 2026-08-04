@@ -39,9 +39,7 @@ class _NativeStreamingClient(LLMClient):
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         raise AssertionError("native stream must not call complete")
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.requests.append(request)
         yield StreamEnd(AssistantMessage(content=[], stop_reason="empty"))
 
@@ -89,9 +87,7 @@ async def test_default_stream_forwards_same_request_and_message() -> None:
 
 
 async def test_default_stream_rejects_schema_before_complete() -> None:
-    client = _CompleteOnlyClient(
-        AssistantMessage(content=[], stop_reason="empty")
-    )
+    client = _CompleteOnlyClient(AssistantMessage(content=[], stop_reason="empty"))
     request = GenerationRequest(messages=[], response_schema=dict)
 
     with pytest.raises(ValueError, match="response_schema"):

@@ -181,9 +181,7 @@ class LLMClient(ABC):
         """
         return isinstance(exc, (TimeoutError, ConnectionError))
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         """Stream one completion turn.
 
         Default implementation for complete-only providers: run `complete()`,

@@ -130,9 +130,7 @@ def build_tool_use_block(
     )
 
 
-def merge_extra_body(
-    request: dict[str, Any], extensions: Mapping[str, Any]
-) -> None:
+def merge_extra_body(request: dict[str, Any], extensions: Mapping[str, Any]) -> None:
     """Merge compatible-endpoint extensions without replacing existing values."""
     merged = dict(request.get("extra_body") or {})
     for key, value in extensions.items():
@@ -153,10 +151,7 @@ def _split_reasoning(text: str | None) -> tuple[str | None, str]:
             return reasoning or None, ""
         return None, text
     reasoning = (
-        match.group(0)
-        .replace(_THINK_OPEN, "")
-        .replace(_THINK_CLOSE, "")
-        .strip()
+        match.group(0).replace(_THINK_OPEN, "").replace(_THINK_CLOSE, "").strip()
         or None
     )
     return reasoning, text[match.end() :]
@@ -424,14 +419,10 @@ def usage_from_raw(raw_usage: Any) -> CompletionUsage:
     prompt_details = getattr(raw_usage, "prompt_tokens_details", None)
     return CompletionUsage(
         input_tokens=coerce_usage_count(getattr(raw_usage, "prompt_tokens", 0)),
-        output_tokens=coerce_usage_count(
-            getattr(raw_usage, "completion_tokens", 0)
-        ),
+        output_tokens=coerce_usage_count(getattr(raw_usage, "completion_tokens", 0)),
         total_tokens=coerce_usage_count(getattr(raw_usage, "total_tokens", 0)),
         thinking_tokens=coerce_usage_count(
             getattr(completion_details, "reasoning_tokens", 0)
         ),
-        cached_tokens=coerce_usage_count(
-            getattr(prompt_details, "cached_tokens", 0)
-        ),
+        cached_tokens=coerce_usage_count(getattr(prompt_details, "cached_tokens", 0)),
     )

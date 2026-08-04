@@ -45,9 +45,7 @@ class FakeLLM(LLMClient):
             usage=CompletionUsage(input_tokens=11, output_tokens=3, total_tokens=14),
         )
 
-    async def stream(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[StreamChunk]:
         self.stream_calls += 1
         self.requests_seen.append(request)
         yield TextDelta(text="Hello")
@@ -58,7 +56,9 @@ class FakeLLM(LLMClient):
                 content=[TextBlock(text="Hello, world")],
                 stop_reason="end_turn",
                 model="fake",
-                usage=CompletionUsage(input_tokens=11, output_tokens=3, total_tokens=14),
+                usage=CompletionUsage(
+                    input_tokens=11, output_tokens=3, total_tokens=14
+                ),
             )
         )
 

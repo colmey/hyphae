@@ -240,7 +240,11 @@ async def test_exact_repeat_across_batches_uses_canonical_arguments() -> None:
     [
         (ToolCallResult("ok", False), "ok", False),
         (ToolCallResult("declared failure", True), "declared failure", True),
-        (RuntimeError("transport broke"), "tool execution raised: transport broke", True),
+        (
+            RuntimeError("transport broke"),
+            "tool execution raised: transport broke",
+            True,
+        ),
     ],
 )
 async def test_real_dispatch_outcomes_have_latency(

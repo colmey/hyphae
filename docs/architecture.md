@@ -533,7 +533,8 @@ applies this terminal map:
 - `last_assistant_tool_uses()` — convenience for "what tools did the
   model just ask me to run?"
 - `SessionStore` ABC: `create(metadata)`, `get(session_id)`,
-  `save(session)`. Async throughout, even though `InMemorySessionStore`
+  `save(session)`, plus its positive retained-history bound. Async throughout,
+  even though `InMemorySessionStore`
   doesn't need to be — keeps call sites unchanged when a durable backend
   lands. The harness keeps no durable copy (LibreChat re-feeds context),
   so the ABC is retained purely as that future seam.
@@ -543,6 +544,11 @@ applies this terminal map:
   load. Eviction is lazy (swept on `create()`), not a background task.
   Active/in-flight sessions stay "young" because `save()` bumps
   `updated_at` every turn, so they aren't evicted out from under a request.
+  `create()`, `get()`, and `save()` detach nested canonical values; saved and
+  restored transcripts pass one canonical tool-call/result validator.
+  `SESSION_HISTORY_MAX_CHARS` bounds each persistent transcript. A prospective
+  prompt or checkpoint over that bound is rejected explicitly, leaving the
+  previous complete checkpoint intact. Ephemeral `/v1` history is unaffected.
 - `SessionNotFoundError(KeyError)` — subclassing `KeyError` means
   existing `except KeyError` catches still work; callers wanting
   specificity have it.
@@ -669,8 +675,8 @@ Per-iteration algorithm:
    clip the result, update failure counters, emit `ToolResultEvent`, and build
    the matching `ToolResultBlock`.
 9. Append the complete matching result batch and publish the balanced tool
-   protocol. Continue from a fresh `staged_copy()` so later mutation cannot
-   alias the object just saved by `InMemorySessionStore`. Cancellation keeps
+   protocol. Continue from a fresh `staged_copy()`; store snapshots separately
+   ensure later nested mutation cannot alias retained history. Cancellation keeps
    completed results, marks an in-flight call as outcome-unknown, marks
    unstarted calls cancelled, best-effort publishes the balanced batch, and
    re-raises the original cancellation or generator-close signal. Once the
@@ -1065,9 +1071,10 @@ resolve a problem we hit; don't change them without understanding why.
 10. **`google-genai`, not `google-generativeai`.** The latter is deprecated.
 11. **Session mutation goes through helpers** (`append_user`,
     `append_assistant`, `append_tool_results`), not direct `.messages.append()`.
-12. **`SessionStore.save()` is explicit, not auto-on-mutate.** In-memory
-    save is a no-op today; writing the calls explicitly now means durable
-    storage can drop in without call-site changes.
+12. **`SessionStore.save()` is explicit, not auto-on-mutate.** The in-memory
+    store validates and detaches each checkpoint; writing the calls explicitly
+    means durable storage can preserve the same boundary without changing the
+    loop.
 13. **The loop publishes only safe checkpoints.** A complete non-tool response
     or a balanced assistant-tool-call/result batch may be saved; prompt-only and
     unmatched tool state never becomes visible. Cancellation preserves the last

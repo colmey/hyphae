@@ -55,7 +55,9 @@ def check(cond: bool, msg: str) -> None:
     assert cond, msg
 
 
-def text_response(text: str, *, usage: CompletionUsage | None = None) -> AssistantMessage:
+def text_response(
+    text: str, *, usage: CompletionUsage | None = None
+) -> AssistantMessage:
     return AssistantMessage(
         content=[TextBlock(text=text)],
         stop_reason="end_turn",
@@ -285,7 +287,9 @@ async def test_repair() -> None:
                 '```json\n{"tool":"srv__lookup","arguments":}\n```',
                 usage=CompletionUsage(total_tokens=2),
             ),
-            text_response(action_text("repaired"), usage=CompletionUsage(total_tokens=3)),
+            text_response(
+                action_text("repaired"), usage=CompletionUsage(total_tokens=3)
+            ),
         ]
     )
     wrapper = PromptedToolLLMClient(inner)

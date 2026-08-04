@@ -512,14 +512,15 @@ models:
         orchestration_enabled=True,
         models_config_path=str(models_path),
         orchestrator_prompt_path=str(prompt_path),
+        agent_prompt_path=str(prompt_path),
         orchestrator_model_id="",
         llm=SimpleNamespace(max_tokens=128),
         context_default_window_tokens=32768,
         context_safety_margin_tokens=1024,
     )
-    registry, orchestrator = _try_build_orchestration(settings)
+    registry, orchestrator, agent_prompt = _try_build_orchestration(settings)
 
     check(
-        registry is None and orchestrator is None,
+        registry is None and orchestrator is None and agent_prompt is None,
         "prompted-only orchestrator disables orchestration",
     )

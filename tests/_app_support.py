@@ -100,7 +100,11 @@ def wired_app(
         else _StaticApplicationMCP(tool_source)
     )
     routing = (
-        OrchestratedRouting(orchestrator=orchestrator, registry=registry)
+        OrchestratedRouting(
+            orchestrator=orchestrator,
+            registry=registry,
+            agent_system_prompt="trusted agent system",
+        )
         if orchestrator is not None and registry is not None
         else UnorchestratedRouting(
             llm=llm,

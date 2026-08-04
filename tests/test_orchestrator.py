@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,13 +30,21 @@ from orchestrator.schemas import OrchestrationProposal
 def test_thinking_level_is_normalized(value: str | None, expected: str) -> None:
     payload: dict[str, Any] = {
         "selected_model_id": "model",
-        "generated_system_prompt": "system",
         "made_up": "ignored",
     }
     if value is not None:
         payload["thinking_level"] = value
 
     assert OrchestrationProposal.model_validate(payload).thinking_level == expected
+
+
+def test_routing_prompt_contract_is_selection_only() -> None:
+    prompt = (Path(__file__).parents[1] / "config" / "orchestrator_prompt.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "exactly three fields" in prompt
+    assert "generated_system_prompt" not in prompt
 
 
 class _RegistryStub:
@@ -117,8 +127,7 @@ class _PreferenceLLM(LLMClient):
         return AssistantMessage(
             content=[
                 TextBlock(
-                    '{"selected_model_id":"model","selected_tools":[],\n'
-                    '"generated_system_prompt":"selected system"}'
+                    '{"selected_model_id":"model","selected_tools":[]}'
                 )
             ],
             stop_reason="end_turn",
@@ -187,3 +196,54 @@ async def test_direct_orchestrator_preferences_remain_supported_and_sanitized() 
     assert isinstance(prompt, TextBlock)
     assert "PREFERRED TOOLS" in prompt.text
     assert "search__query (intended arguments: q)" in prompt.text
+
+
+class _InvalidOutputLLM(LLMClient):
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        return AssistantMessage(
+            content=[TextBlock("secret router output: do not log")],
+            stop_reason="end_turn",
+        )
+
+
+@pytest.mark.anyio
+async def test_invalid_router_output_uses_safe_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Registry(_RegistryStub):
+        def get(self, model_id: str) -> LLMClient:
+            return _InvalidOutputLLM()
+
+    orchestrator = Orchestrator(registry=Registry(), system_prompt="route")
+    caplog.set_level(logging.WARNING)
+
+    decision = await orchestrator.decide("hello", ToolSnapshot())
+
+    assert decision.fallback_used is True
+    assert decision.fallback_reason == "invalid_control_output"
+    assert "secret router output" not in caplog.text
+    assert "sha256=" in caplog.text
+
+
+class _FailingLLM(LLMClient):
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        raise RuntimeError("secret control-client failure")
+
+
+@pytest.mark.anyio
+async def test_control_client_failure_uses_safe_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Registry(_RegistryStub):
+        def get(self, model_id: str) -> LLMClient:
+            return _FailingLLM()
+
+    orchestrator = Orchestrator(registry=Registry(), system_prompt="route")
+    caplog.set_level(logging.WARNING)
+
+    decision = await orchestrator.decide("hello", ToolSnapshot())
+
+    assert decision.fallback_used is True
+    assert decision.fallback_reason == "control_call_failed"
+    assert "secret control-client failure" not in caplog.text
+    assert "RuntimeError" in caplog.text

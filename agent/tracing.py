@@ -524,7 +524,6 @@ def event_record(event: Event, *, run_id: str | None, step: int) -> TraceRecord:
     elif isinstance(event, OrchestrationDecisionEvent):
         rec["model_id"] = event.model_id
         rec["tools"] = event.tools
-        rec["system_prompt"] = event.system_prompt
         rec["fallback_used"] = event.fallback_used
         rec["thinking_level"] = event.thinking_level
     elif isinstance(event, DoneEvent):

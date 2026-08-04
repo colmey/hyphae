@@ -56,7 +56,7 @@ def _check_thinking_level_parsing() -> None:
     print("=" * 72)
     print("Offline: OrchestrationProposal.thinking_level parsing")
     print("=" * 72)
-    base = {"selected_model_id": "x", "generated_system_prompt": "y"}
+    base = {"selected_model_id": "x"}
 
     assert OrchestrationProposal.model_validate(base).thinking_level == "medium", (
         "omitted thinking_level should default to 'medium'"
@@ -186,10 +186,6 @@ async def test_configured_orchestration_decisions() -> None:
             print(f"  selected_tools ({len(result.selected_tools)}/{total_tools}):")
             for t in result.selected_tools:
                 print(f"      - {t}")
-            sys_preview = result.generated_system_prompt.replace("\n", " ")
-            if len(sys_preview) > 200:
-                sys_preview = sys_preview[:197] + "..."
-            print(f"  generated_system_prompt: {sys_preview}")
 
             # ----- structural assertions (cheap; always must hold) -----
             assert result.selected_model_id in registry.model_ids, (

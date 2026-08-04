@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 
@@ -25,7 +26,7 @@ _HISTORY_MAX_CHARS_PER_MSG = 500
 
 
 class Orchestrator:
-    """Picks a model, a tool subset, and a system prompt for one request."""
+    """Picks a model and tool subset for one request."""
 
     def __init__(
         self,
@@ -33,15 +34,10 @@ class Orchestrator:
         registry: ModelRegistry,
         system_prompt: str,
         model_id: str | None = None,
-        fallback_system_prompt: str | None = None,
     ) -> None:
         self._registry = registry
         self._system_prompt = system_prompt
         self._orch_model_id = model_id or registry.default_id()
-        self._fallback_system = (
-            fallback_system_prompt
-            or "You are a helpful assistant. Use the available tools when relevant."
-        )
 
     async def decide(
         self,
@@ -69,17 +65,24 @@ class Orchestrator:
                     raw = await self._call_orchestrator_llm(orch_llm, prompt)
             else:
                 raw = await self._call_orchestrator_llm(orch_llm, prompt)
-        except Exception as e:
-            reason = f"orchestrator LLM call failed: {e}"
-            decision_log.warning("%s; using fallback", reason)
+        except Exception as exc:
+            reason = "control_call_failed"
+            decision_log.warning(
+                "orchestrator control call failed (%s); using fallback",
+                type(exc).__name__,
+            )
             return self._fallback_decision(reason, tools)
 
         try:
             proposal = self._parse_proposal(raw)
-        except (json.JSONDecodeError, ValidationError) as e:
-            reason = f"orchestrator output unparseable: {e}"
+        except (json.JSONDecodeError, ValidationError) as exc:
+            reason = "invalid_control_output"
             decision_log.warning(
-                "%s; using fallback. raw=%r", reason, raw[:500] if raw else raw
+                "orchestrator control output invalid (%s, chars=%d, sha256=%s); "
+                "using fallback",
+                type(exc).__name__,
+                len(raw),
+                hashlib.sha256(raw.encode("utf-8")).hexdigest(),
             )
             return self._fallback_decision(reason, tools)
 
@@ -221,11 +224,7 @@ class Orchestrator:
         """
         known_models = set(self._registry.model_ids)
         if proposal.selected_model_id not in known_models:
-            log.warning(
-                "orchestrator picked unknown model_id %r; correcting to %r",
-                proposal.selected_model_id,
-                self._registry.default_id(),
-            )
+            log.warning("orchestrator selected an unknown model; using default")
             model_id = self._registry.default_id()
         else:
             model_id = proposal.selected_model_id
@@ -236,20 +235,19 @@ class Orchestrator:
             if t in known_tools:
                 valid_tools.append(t)
             else:
-                log.warning("orchestrator picked unknown tool %r; dropping", t)
+                log.warning("orchestrator selected an unknown tool; dropping it")
 
         # Keep the caller's valid preferred tools visible.
         if preferences:
             for t in preferences.preferred_tools:
                 if t not in known_tools:
-                    log.warning("preferred tool %r not in MCP inventory; ignoring", t)
+                    log.warning("preferred tool is not in MCP inventory; ignoring it")
                 elif t not in valid_tools:
                     valid_tools.append(t)
 
         return OrchestrationProposal(
             selected_model_id=model_id,
             selected_tools=valid_tools,
-            generated_system_prompt=proposal.generated_system_prompt,
             thinking_level=proposal.thinking_level,
         )
 
@@ -261,7 +259,6 @@ class Orchestrator:
         proposal = OrchestrationProposal(
             selected_model_id=self._registry.default_id(),
             selected_tools=all_tools,
-            generated_system_prompt=self._fallback_system,
         )
         return OrchestrationDecision(
             result=proposal,

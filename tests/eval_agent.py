@@ -148,7 +148,6 @@ class ScriptedOrchestrator:
         proposal = OrchestrationProposal(
             selected_model_id=self._config.get("selected_model_id", "default"),
             selected_tools=list(self._config.get("selected_tools", [])),
-            generated_system_prompt=self._config.get("generated_system_prompt", ""),
             thinking_level=self._config.get("thinking_level", "medium"),
         )
         return OrchestrationDecision(
@@ -300,6 +299,7 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
         routing = OrchestratedRouting(
             orchestrator=ScriptedOrchestrator(orch_cfg),
             registry=ScriptedRegistry(llm, model_ids=["default"]),
+            agent_system_prompt="trusted agent system",
         )
         runner = TurnRunner(
             routing=routing,

@@ -103,6 +103,7 @@ class OrchestratedRouting:
 
     orchestrator: RoutingService
     registry: ModelRegistry
+    agent_system_prompt: str
 
 
 type RoutingRuntime = UnorchestratedRouting | OrchestratedRouting
@@ -235,12 +236,11 @@ class TurnRunner:
         system_prompt = (
             request.system_override
             if request.system_override is not None
-            else proposal.generated_system_prompt
+            else self.routing.agent_system_prompt
         )
         event = OrchestrationDecisionEvent(
             model_id=resolved_id,
             tools=[tool.name for tool in selected_tools.tools],
-            system_prompt=system_prompt,
             fallback_used=decision.fallback_used,
             thinking_level=proposal.thinking_level,
         )
@@ -250,9 +250,6 @@ class TurnRunner:
             len(selected_tools.tools),
             proposal.thinking_level,
             decision.fallback_used,
-        )
-        context.logger.debug(
-            "chat: system_prompt=%r tools=%r", system_prompt, event.tools
         )
         return _ResolvedRouting(
             llm=selected_llm,

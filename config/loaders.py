@@ -311,3 +311,21 @@ def load_orchestrator_prompt(path: Path | str) -> str:
         safe_path_display(source),
     )
     return text
+
+
+def load_agent_prompt(path: Path | str) -> str:
+    """Load a nonblank trusted agent prompt with safe I/O diagnostics."""
+    source = _resolve_source(path, "agent prompt")
+    try:
+        text = source.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        raise _missing_file(source, "agent prompt") from None
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ConfigLoadError(source, "could not read agent prompt", cause=exc) from None
+    if not text:
+        raise ConfigValidationError(source, "invalid agent prompt: file is empty")
+
+    logger.info(
+        "loaded agent prompt: %d chars from %s", len(text), safe_path_display(source)
+    )
+    return text

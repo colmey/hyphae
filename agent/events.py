@@ -77,18 +77,17 @@ class UsageEvent:
 
 @dataclass
 class OrchestrationDecisionEvent:
-    """The orchestrator picked a model, tool subset, and system prompt.
+    """The orchestrator picked a model and tool subset.
 
     Emitted by TurnRunner before run_agent() runs, so that
     clients can see why a particular model was chosen. Carries the same
-    fields as orchestrator.schemas.OrchestrationProposal but lives here so
+    routing fields as orchestrator.schemas.OrchestrationProposal but lives here so
     the API layer doesn't have to import the orchestrator package just to
     type-check event serialization.
     """
 
     model_id: str
     tools: list[str]
-    system_prompt: str
     fallback_used: bool = False
     thinking_level: str | None = None
     type: Literal["orchestration"] = "orchestration"

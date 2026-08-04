@@ -4,6 +4,7 @@
 
 from .errors import ConfigLoadError, ConfigValidationError
 from .loaders import (
+    load_agent_prompt,
     load_mcp_config,
     load_mcp_config_from_settings,
     load_models_config,
@@ -38,6 +39,7 @@ __all__ = [
     "StreamableHTTPServer",
     "ToolPolicyConfig",
     "get_settings",
+    "load_agent_prompt",
     "load_mcp_config",
     "load_mcp_config_from_settings",
     "load_models_config",

@@ -376,6 +376,10 @@ class Settings(BaseSettings):
         default=CONFIG_DIR / "orchestrator_prompt.md",
         description="Path to the orchestrator's system prompt file (markdown or plain text).",
     )
+    agent_prompt_path: Path = Field(
+        default=CONFIG_DIR / "agent_prompt.md",
+        description="Path to the trusted downstream agent system prompt file.",
+    )
     orchestrator_model_id: str = Field(
         default="",
         description=(
@@ -407,6 +411,7 @@ class Settings(BaseSettings):
         "mcp_config_path",
         "models_config_path",
         "orchestrator_prompt_path",
+        "agent_prompt_path",
         "trace_jsonl_path",
     )
     @classmethod

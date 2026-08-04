@@ -28,6 +28,7 @@ from config import (
     load_mcp_config_from_settings,
     load_models_config,
     load_models_config_from_settings,
+    load_agent_prompt,
     load_orchestrator_prompt,
     get_settings,
     reset_settings,
@@ -194,12 +195,14 @@ def test_application_paths_are_repository_root_relative_from_any_cwd(
         mcp_config_path="deploy/mcp.yaml",
         models_config_path="deploy/models.yaml",
         orchestrator_prompt_path="deploy/prompt.md",
+        agent_prompt_path="deploy/agent.md",
         trace_jsonl_path="var/trace.jsonl",
     )
 
     assert settings.mcp_config_path == _REPO_ROOT / "deploy/mcp.yaml"
     assert settings.models_config_path == _REPO_ROOT / "deploy/models.yaml"
     assert settings.orchestrator_prompt_path == _REPO_ROOT / "deploy/prompt.md"
+    assert settings.agent_prompt_path == _REPO_ROOT / "deploy/agent.md"
     assert settings.trace_jsonl_path == _REPO_ROOT / "var/trace.jsonl"
 
 
@@ -613,6 +616,25 @@ def test_prompt_loader_uses_root_paths_and_safe_errors(tmp_path: Path) -> None:
     with pytest.raises(ConfigValidationError) as error:
         load_orchestrator_prompt(empty)
     assert error.value.path == empty
+    with pytest.raises(ConfigValidationError) as error:
+        load_agent_prompt(empty)
+    assert error.value.path == empty
+
+
+def test_agent_prompt_loader_reports_unreadable_files_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt = tmp_path / "agent.md"
+    prompt.write_text("trusted", encoding="utf-8")
+
+    def deny_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        raise PermissionError("secret prompt text")
+
+    monkeypatch.setattr(Path, "read_text", deny_read_text)
+    with pytest.raises(ConfigLoadError) as error:
+        load_agent_prompt(prompt)
+    assert error.value.path == prompt
+    assert "secret prompt text" not in str(error.value)
 
 
 def test_application_settings_error_does_not_render_rejected_secret(
@@ -657,12 +679,14 @@ from config import (
     load_mcp_config_from_settings,
     load_models_config_from_settings,
     load_orchestrator_prompt,
+    load_agent_prompt,
 )
 root = Path({str(_REPO_ROOT)!r})
 settings = Settings(_env_file=root / '.env.example')
 assert settings.mcp_config_path == root / 'config/mcp_config.yaml'
 assert settings.models_config_path == root / 'config/models.yaml'
 assert settings.orchestrator_prompt_path == root / 'config/orchestrator_prompt.md'
+assert settings.agent_prompt_path == root / 'config/agent_prompt.md'
 assert settings.trace_jsonl_path == root / 'traces/harness.jsonl'
 assert load_mcp_config_from_settings(settings).mcp_servers
 assert load_models_config_from_settings(
@@ -670,6 +694,7 @@ assert load_models_config_from_settings(
     known_providers={{'gemini', 'openai', 'openai_compatible'}},
 ).default_id()
 assert load_orchestrator_prompt(settings.orchestrator_prompt_path)
+assert load_agent_prompt(settings.agent_prompt_path)
 """
     subprocess.run(
         [sys.executable, "-c", code],

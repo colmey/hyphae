@@ -32,10 +32,6 @@ class OrchestrationProposal(BaseModel):
         description="Namespaced tool names ({server}__{tool}) to expose to the agent. "
         "Empty list = no tools.",
     )
-    generated_system_prompt: str = Field(
-        ...,
-        description="The system instruction to run the downstream agent with.",
-    )
     thinking_level: Literal["low", "medium", "high"] = Field(
         default="medium",
         description="How much the downstream model should deliberate: 'low' for "

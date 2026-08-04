@@ -494,7 +494,6 @@ cases:
       fallback_reason: "scripted fallback"
       selected_model_id: default
       selected_tools: ["srv__lookup"]
-      generated_system_prompt: "Use the fallback system prompt."
       thinking_level: low
     expect:
       done_reason: end_turn
@@ -502,7 +501,7 @@ cases:
       selected_thinking_level: low
       system_contains_on_calls:
         - call: 1
-          substring: "fallback system prompt"
+          substring: "trusted agent system"
 
   - id: live_no_tool_smoke
     tier: live

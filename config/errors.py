@@ -59,6 +59,7 @@ _SAFE_LOCATION_PARTS = frozenset(
         "openai_provider_base_url",
         "openai_tool_block_max_chars",
         "orchestration_enabled",
+        "agent_prompt_path",
         "orchestrator_prompt_path",
         "orchestrator_model_id",
         "provider",

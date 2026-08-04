@@ -6,6 +6,7 @@ import asyncio
 import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,7 +18,14 @@ from openai import AsyncOpenAI, AsyncStream
 import main as main_module
 import orchestrator.registry as registry_module
 from api.turn import OrchestratedRouting
-from config import ConfigLoadError, MCPConfig, ModelEntry, ModelsConfig, Settings
+from config import (
+    ConfigLoadError,
+    ConfigValidationError,
+    MCPConfig,
+    ModelEntry,
+    ModelsConfig,
+    Settings,
+)
 from config.errors import CredentialUnavailableError
 from llm.client import GenerationRequest, LLMClient
 from llm.tool_prompt_protocol import PromptedToolLLMClient
@@ -688,7 +696,7 @@ async def test_orchestrated_lifespan_skips_unorchestrated_client_and_closes_regi
     monkeypatch.setattr(
         main_module,
         "_try_build_orchestration",
-        lambda value: (registry, object()),
+        lambda value: (registry, object(), "trusted agent system"),
     )
 
     async with lifespan(app):
@@ -720,7 +728,7 @@ async def test_orchestration_setup_failure_builds_one_unorchestrated_client(
     monkeypatch.setattr(
         main_module,
         "_try_build_orchestration",
-        lambda value: (None, None),
+        lambda value: (None, None, None),
     )
 
     async with lifespan(FastAPI()) as _:
@@ -752,6 +760,7 @@ models:
         orchestration_enabled=True,
         models_config_path=models_path,
         orchestrator_prompt_path=prompt_path,
+        agent_prompt_path=prompt_path,
         orchestrator_model_id="",
         llm=SimpleNamespace(max_tokens=128),
         context_default_window_tokens=4096,
@@ -797,10 +806,16 @@ def _wire_failing_orchestrator_registry(
         "load_orchestrator_prompt",
         lambda path: "route requests",
     )
+    monkeypatch.setattr(
+        main_module,
+        "load_agent_prompt",
+        lambda path: "trusted agent system",
+    )
     return SimpleNamespace(
         orchestration_enabled=True,
         models_config_path="models.yaml",
         orchestrator_prompt_path="prompt.md",
+        agent_prompt_path="agent_prompt.md",
         orchestrator_model_id="",
     )
 
@@ -830,9 +845,38 @@ def test_missing_provider_credential_degrades_without_raw_error_logging(
         CredentialUnavailableError(secret),
     )
 
-    assert main_module._try_build_orchestration(settings) == (None, None)
+    assert main_module._try_build_orchestration(settings) == (None, None, None)
     assert "provider credential unavailable" in caplog.text
     assert secret not in caplog.text
+
+
+def test_missing_agent_prompt_disables_orchestration(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _wire_failing_orchestrator_registry(monkeypatch, AssertionError())
+    monkeypatch.setattr(
+        main_module,
+        "load_agent_prompt",
+        lambda path: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+
+    assert main_module._try_build_orchestration(settings) == (None, None, None)
+    assert "agent prompt not found" in caplog.text
+
+
+def test_invalid_agent_prompt_aborts_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _wire_failing_orchestrator_registry(monkeypatch, AssertionError())
+    invalid = ConfigValidationError(Path("agent_prompt.md"), "invalid agent prompt")
+    monkeypatch.setattr(
+        main_module,
+        "load_agent_prompt",
+        lambda path: (_ for _ in ()).throw(invalid),
+    )
+
+    with pytest.raises(ConfigValidationError, match="invalid agent prompt"):
+        main_module._try_build_orchestration(settings)
 
 
 async def test_tracer_startup_failure_does_not_log_raw_exception_text(
@@ -973,7 +1017,7 @@ async def test_lifespan_cancellation_during_tracer_start_closes_all_owners(
         monkeypatch.setattr(
             main_module,
             "_try_build_orchestration",
-            lambda value: (registry, object()),
+            lambda value: (registry, object(), "trusted agent system"),
         )
         monkeypatch.setattr(
             main_module,

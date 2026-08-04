@@ -133,7 +133,6 @@ class SelectingOrchestrator:
             result=OrchestrationProposal(
                 selected_model_id=self.selected_model_id,
                 selected_tools=[],
-                generated_system_prompt="routed system",
             )
         )
 

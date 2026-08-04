@@ -85,6 +85,7 @@ _SKIPPED_TOOL_DEADLINE_MESSAGE = (
 _SKIPPED_TOOL_BUDGET_MESSAGE = (
     "tool call skipped because the run token budget was exceeded"
 )
+_LLM_CALL_FAILED_MESSAGE = "LLM call failed"
 
 
 def _with_wrapup(system: str | None) -> str:
@@ -109,14 +110,12 @@ class _AgentRun:
 
     session: Session
     llm: LLMClient
-    tool_runtime: ToolRuntime
     store: SessionStore | None
     system: str | None
     visible_tools: list[dict[str, Any]]
     thinking_level: str | None
     limits: RunLimits
     context: RunContext
-    tool_policy: ToolPolicy
     stream: bool
     tool_dispatcher: ToolDispatcher
     iteration: int = 0
@@ -163,14 +162,12 @@ class _AgentRun:
         return cls(
             session=session,
             llm=llm,
-            tool_runtime=mcp,
             store=store,
             system=system,
             visible_tools=resolved_tools,
             thinking_level=thinking_level,
             limits=resolved_limits,
             context=resolved_context,
-            tool_policy=resolved_policy,
             stream=stream,
             tool_dispatcher=dispatcher,
         )
@@ -730,15 +727,13 @@ class _AgentRun:
                 )
                 yield await self.context.emit(self._done("deadline_exceeded"))
                 return
-            except Exception as exc:
+            except Exception:
                 self._clear_pending_generation()
                 self.context.logger.exception(
                     "LLM completion failed on iteration %d",
                     self.iteration,
                 )
-                yield await self.context.emit(
-                    ErrorEvent(message=f"LLM call failed: {exc}")
-                )
+                yield await self.context.emit(ErrorEvent(message=_LLM_CALL_FAILED_MESSAGE))
                 yield await self.context.emit(self._done("llm_error"))
                 return
             except (asyncio.CancelledError, GeneratorExit):

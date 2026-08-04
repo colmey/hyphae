@@ -16,6 +16,7 @@ from agent.tool_execution import (
     ToolDispatchResult,
     ToolDispatcher,
     _STALL_MESSAGE,
+    _TOOL_EXECUTION_FAILED_MESSAGE,
     make_skipped_tool_result,
 )
 from agent.tool_policy import PolicyDecision, PolicyVerdict
@@ -242,7 +243,7 @@ async def test_exact_repeat_across_batches_uses_canonical_arguments() -> None:
         (ToolCallResult("declared failure", True), "declared failure", True),
         (
             RuntimeError("transport broke"),
-            "tool execution raised: transport broke",
+            _TOOL_EXECUTION_FAILED_MESSAGE,
             True,
         ),
     ],
@@ -264,6 +265,21 @@ async def test_real_dispatch_outcomes_have_latency(
     assert dispatch.is_error is is_error
     assert isinstance(dispatch.latency_ms, float)
     assert runtime.calls == [(_TOOL_NAME, {})]
+
+
+async def test_raised_exception_uses_safe_model_message_and_keeps_log_diagnostic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "tool-backend-secret://token"
+    runtime = ScriptedRuntime([RuntimeError(sentinel)])
+    dispatcher = _dispatcher(runtime)
+    tool_use = _tool_use("call")
+
+    dispatch = await dispatcher.dispatch(ActiveToolBatch((tool_use,)), tool_use)
+
+    assert dispatch.content == _TOOL_EXECUTION_FAILED_MESSAGE
+    assert sentinel not in dispatch.content
+    assert sentinel in caplog.text
 
 
 async def test_caller_dispatches_multi_call_batch_sequentially() -> None:

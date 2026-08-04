@@ -34,6 +34,9 @@ _CANCELLED_TOOL_UNKNOWN_MESSAGE = (
 _CANCELLED_TOOL_NOT_STARTED_MESSAGE = (
     "tool call was not executed because execution was cancelled"
 )
+_TOOL_EXECUTION_FAILED_MESSAGE = (
+    "tool execution failed; try again later or use a different approach"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,9 +342,9 @@ class ToolDispatcher:
                 f"{self._limits.tool_timeout_seconds}s"
             )
             is_error = True
-        except Exception as exc:
+        except Exception:
             self._log.exception("tool execution raised for %s", tool_use.name)
-            content = f"tool execution raised: {exc}"
+            content = _TOOL_EXECUTION_FAILED_MESSAGE
             is_error = True
 
         latency_ms = round((time.perf_counter() - tool_started) * 1000, 2)

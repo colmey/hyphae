@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from agent import RunLimits, Session, TextEvent, ToolPolicy, UsageEvent
+from agent import RunLimits, Session, TextEvent, UsageEvent
 from agent.loop import _AgentRun
 from agent.tool_execution import ToolDispatcher
 from llm.client import GenerationRequest, LLMClient
@@ -60,9 +60,7 @@ def test_from_inputs_owns_resolved_defaults_and_one_dispatcher() -> None:
     )
 
     assert run.limits == RunLimits()
-    assert run.tool_runtime is runtime
     assert run.visible_tools is runtime.tools
-    assert isinstance(run.tool_policy, ToolPolicy)
     assert run.context.deadline is None
     assert isinstance(run.tool_dispatcher, ToolDispatcher)
     assert run.iteration == 0

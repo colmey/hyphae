@@ -15,7 +15,7 @@ import pytest
 
 import agent.tracing as tracing_module
 from agent import JSONLTracer, RunContext, RunLimits, Session, build_tracer, run_agent
-from agent.events import DoneEvent, ToolCallEvent, ToolResultEvent, UsageEvent
+from agent.events import DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent, UsageEvent
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from tooling import ToolCallResult
@@ -93,6 +93,16 @@ class FakeMCP:
         return ToolCallResult(content="sunny, 24C", is_error=False)
 
 
+class _FailingMCP(FakeMCP):
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
+        raise RuntimeError("tool-backend-secret://token")
+
+
+class _FailingLLM(LLMClient):
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        raise RuntimeError("provider-backend-secret://token")
+
+
 async def _drive(tracer, *, run_id: str = "run_test_123") -> list:
     session = Session()
     session.append_user("what's the weather?")
@@ -121,6 +131,76 @@ def _read_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line
     ]
+
+
+async def test_backend_exception_details_stay_out_of_events_transcripts_and_traces(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    tracer = JSONLTracer(trace_path)
+    await tracer.start()
+    session = Session()
+    session.append_user("look up weather")
+    limits = RunLimits()
+    context = RunContext.start(
+        max_run_seconds=limits.max_run_seconds,
+        base_logger=logging.getLogger(__name__),
+        tracer=tracer,
+    )
+
+    events = [
+        event
+        async for event in run_agent(
+            session=session,
+            llm=ScriptedLLM(),
+            mcp=_FailingMCP(),
+            limits=limits,
+            context=context,
+        )
+    ]
+    await tracer.aclose()
+
+    rendered = json.dumps(
+        {
+            "events": [str(event) for event in events],
+            "messages": [str(message) for message in session.messages],
+            "trace": _read_jsonl(trace_path),
+        }
+    )
+    assert "tool-backend-secret://token" not in rendered
+
+
+async def test_provider_exception_details_stay_out_of_events_and_traces(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    tracer = JSONLTracer(trace_path)
+    await tracer.start()
+    session = Session()
+    session.append_user("go")
+    limits = RunLimits()
+    context = RunContext.start(
+        max_run_seconds=limits.max_run_seconds,
+        base_logger=logging.getLogger(__name__),
+        tracer=tracer,
+    )
+
+    events = [
+        event
+        async for event in run_agent(
+            session=session,
+            llm=_FailingLLM(),
+            mcp=FakeMCP(),
+            limits=limits,
+            context=context,
+        )
+    ]
+    await tracer.aclose()
+
+    assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+        "LLM call failed"
+    ]
+    assert "provider-backend-secret://token" not in json.dumps(_read_jsonl(trace_path))
 
 
 class _RecordingSink:

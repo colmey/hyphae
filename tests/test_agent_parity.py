@@ -514,9 +514,9 @@ async def test_happy_path_public_artifacts(case: ParityCase) -> None:
             (TransientFailure("retry one"), TransientFailure("retry two")),
             "llm_error",
             2,
-            "LLM call failed: retry two",
+            "LLM call failed",
         ),
-        ((ValueError("stop"),), "llm_error", 1, "LLM call failed: stop"),
+        ((ValueError("stop"),), "llm_error", 1, "LLM call failed"),
     ],
     ids=["transient-recovery", "empty-recovery", "exhausted", "non-transient"],
 )
@@ -594,7 +594,7 @@ async def test_per_attempt_timeout_exhaustion_is_exact(stream: bool) -> None:
     ]
 
     assert normalize_events(events) == [
-        {"message": "LLM call failed: ", "type": "error"},
+        {"message": "LLM call failed", "type": "error"},
         _done_event("llm_error", multiplier=0),
     ]
     assert llm.calls == 2
@@ -797,7 +797,7 @@ async def test_preexpired_wall_clock_deadline_is_terminal_without_work() -> None
             "exception",
             _tool_call("call-raised", {"q": "boom"}),
             RuntimeError("transport broke"),
-            "tool execution raised: transport broke",
+            "tool execution failed; try again later or use a different approach",
             True,
         ),
     ],

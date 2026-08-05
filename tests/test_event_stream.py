@@ -10,7 +10,13 @@ import pytest
 
 from agent import DoneEvent
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
+from llm.schemas import (
+    AssistantMessage,
+    CanonicalStopReason,
+    CompletionUsage,
+    TextBlock,
+    ToolUseBlock,
+)
 from api.request_body import MAX_REQUEST_BODY_BYTES
 from application import TurnExecution, TurnMetadata, TurnRunner
 from tests._app_support import wired_app
@@ -20,15 +26,16 @@ pytestmark = pytest.mark.anyio
 
 
 class FakeToolLLM(LLMClient):
-    def __init__(self) -> None:
+    def __init__(self, first_stop_reason: CanonicalStopReason | None) -> None:
         self.calls = 0
+        self.first_stop_reason = first_stop_reason
 
     async def complete(self, request: GenerationRequest) -> AssistantMessage:
         self.calls += 1
         if self.calls == 1:
             return AssistantMessage(
                 content=[ToolUseBlock(id="c1", name="echo", input={"value": "hi"})],
-                stop_reason="end_turn",
+                stop_reason=self.first_stop_reason,
                 model="fake",
                 usage=CompletionUsage(total_tokens=5),
             )
@@ -123,8 +130,15 @@ async def _stream_events(client, prompt: str):
     return _parse_events(raw), headers
 
 
-async def test_tool_turn_emits_call_result_text_and_done_in_order(asgi_client) -> None:
-    with wired_app(FakeToolLLM(), mcp=FakeMCP()) as (app, _settings):
+@pytest.mark.parametrize(
+    "first_stop_reason",
+    [None, "content_filter", "provider_error", "incomplete_stream"],
+)
+async def test_tool_turn_uses_real_tool_blocks_over_inconsistent_provider_reason(
+    asgi_client,
+    first_stop_reason: CanonicalStopReason | None,
+) -> None:
+    with wired_app(FakeToolLLM(first_stop_reason), mcp=FakeMCP()) as (app, _settings):
         events, headers = await _stream_events(asgi_client(app), "echo hi please")
 
     types = [event["type"] for event in events]

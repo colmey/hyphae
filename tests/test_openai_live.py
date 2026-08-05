@@ -22,7 +22,6 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 
 from __future__ import annotations
 
-import logging
 
 import pytest
 
@@ -39,11 +38,13 @@ from llm.providers.openai_compatible import OpenAICompatibleLLMClient
 from mcp_runtime import MCPManager, TurnToolRuntime
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-)
-pytestmark = [pytest.mark.live, pytest.mark.model, pytest.mark.mcp, pytest.mark.anyio]
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.model,
+    pytest.mark.mcp,
+    pytest.mark.anyio,
+    pytest.mark.timeout(0),
+]
 
 
 def _print_response_summary(label: str, msg) -> None:

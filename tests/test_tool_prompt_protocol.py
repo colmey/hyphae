@@ -51,6 +51,8 @@ TOOL = {
 pytestmark = pytest.mark.anyio
 
 
+# TODO: Replace this legacy script-style helper with direct pytest assertions
+# when this module is next changed; preserve the diagnostic messages.
 def check(cond: bool, msg: str) -> None:
     assert cond, msg
 

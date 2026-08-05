@@ -74,9 +74,6 @@ from llm.schemas import (
 )
 from tooling import ToolCallResult
 
-logging.basicConfig(level=logging.ERROR, format="%(levelname)-5s %(name)s: %(message)s")
-
-
 def test_protocol_unit_formation_rejects_malformed_transcript() -> None:
     malformed = [
         Message.assistant([ToolUseBlock(id="call", name="tool", input={})]),
@@ -241,6 +238,8 @@ def protocol_ok(messages: list[Message] | tuple[Message, ...]) -> bool:
 pytestmark = pytest.mark.anyio
 
 
+# TODO: Replace this legacy script-style helper with direct pytest assertions
+# when this module is next changed; preserve the diagnostic messages.
 def check(cond: bool, msg: str) -> None:
     assert cond, msg
 

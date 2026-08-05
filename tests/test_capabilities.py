@@ -12,7 +12,6 @@ It exercises the intended Phase 5 interfaces:
 from __future__ import annotations
 
 import importlib.util
-import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,9 +33,6 @@ from llm.client import GenerationRequest, profile_from_entry
 
 ROOT = Path(__file__).resolve().parents[1]
 
-logging.basicConfig(
-    level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s"
-)
 pytestmark = pytest.mark.anyio
 
 
@@ -55,6 +51,8 @@ def _load_eval_fakes():
 ScriptedLLM, ScriptedMCP = _load_eval_fakes()
 
 
+# TODO: Replace this legacy script-style helper with direct pytest assertions
+# when this module is next changed; preserve the diagnostic messages.
 def check(cond: bool, msg: str) -> None:
     assert cond, msg
 

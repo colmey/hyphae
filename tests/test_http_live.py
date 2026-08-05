@@ -23,7 +23,6 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and http_server"``.
 from __future__ import annotations
 
 import json
-import logging
 
 import httpx
 import pytest
@@ -34,16 +33,13 @@ from config import reset_settings
 from main import app
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-)
 pytestmark = [
     pytest.mark.live,
     pytest.mark.model,
     pytest.mark.mcp,
     pytest.mark.http_server,
     pytest.mark.anyio,
+    pytest.mark.timeout(0),
 ]
 
 

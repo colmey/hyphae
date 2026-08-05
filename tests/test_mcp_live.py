@@ -8,7 +8,6 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and mcp"``.
 
 from __future__ import annotations
 
-import logging
 
 import pytest
 
@@ -16,11 +15,12 @@ from config import get_settings, load_mcp_config_from_settings, reset_settings
 from mcp_runtime import MCPManager
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-)
-pytestmark = [pytest.mark.live, pytest.mark.mcp, pytest.mark.anyio]
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.mcp,
+    pytest.mark.anyio,
+    pytest.mark.timeout(0),
+]
 
 
 async def test_configured_mcp_inventory() -> None:

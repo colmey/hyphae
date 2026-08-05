@@ -19,7 +19,6 @@ steering behaviors deterministically:
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import pytest
@@ -38,9 +37,6 @@ from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from tooling import ToolCallResult
 
-logging.basicConfig(
-    level=logging.WARNING, format="%(levelname)-5s %(name)s: %(message)s"
-)
 pytestmark = pytest.mark.anyio
 
 
@@ -114,6 +110,8 @@ def tool_call_response(
 # ---------------------------------------------------------------------------
 
 
+# TODO: Replace this legacy script-style helper with direct pytest assertions
+# when this module is next changed; preserve the diagnostic messages.
 def check(cond: bool, msg: str) -> None:
     assert cond, msg
 

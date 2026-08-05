@@ -26,7 +26,6 @@ Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
 
 from __future__ import annotations
 
-import logging
 from types import SimpleNamespace
 
 import pytest
@@ -40,11 +39,13 @@ from orchestrator import LLMRegistry, Orchestrator, ToolPreferences
 from orchestrator.schemas import OrchestrationProposal
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-)
-pytestmark = [pytest.mark.live, pytest.mark.model, pytest.mark.mcp, pytest.mark.anyio]
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.model,
+    pytest.mark.mcp,
+    pytest.mark.anyio,
+    pytest.mark.timeout(0),
+]
 
 
 def _check_thinking_level_parsing() -> None:

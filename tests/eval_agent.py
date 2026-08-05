@@ -45,9 +45,6 @@ from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET = ROOT / "tests" / "eval_data" / "agent_eval_v1.yaml"
 
-logging.basicConfig(level=logging.CRITICAL)
-
-
 class TransientEvalError(Exception):
     """Exception the scripted client classifies as transient."""
 
@@ -542,6 +539,7 @@ def _print_table(results: list[CaseResult]) -> None:
 
 
 async def main() -> None:
+    logging.basicConfig(level=logging.CRITICAL)
     dataset_path = Path(os.environ.get("EVAL_DATASET", DEFAULT_DATASET))
     data = _load_dataset(dataset_path)
     live_enabled = os.environ.get("EVAL_LIVE") == "1"

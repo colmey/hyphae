@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 
+from agent import DoneEvent
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from api.request_body import MAX_REQUEST_BODY_BYTES
+from application import TurnExecution, TurnMetadata, TurnRunner
 from tests._app_support import wired_app
 
 
@@ -69,6 +72,11 @@ class FakeOutcomeLLM(LLMClient):
             model="fake",
             usage=CompletionUsage(total_tokens=4),
         )
+
+
+class FailingLLM(LLMClient):
+    async def complete(self, request: GenerationRequest) -> AssistantMessage:
+        raise RuntimeError("native-private-sentinel")
 
 
 class ToolResult:
@@ -157,15 +165,98 @@ async def test_native_routes_expose_abnormal_reason_without_reasoning(
         buffered = await client.post("/chat", content="say something")
         events, _headers = await _stream_events(client, "say something else")
 
-    assert buffered.status_code == 200
-    assert buffered.headers["x-done-reason"] == stop_reason
-    assert [event["reason"] for event in events if event["type"] == "done"] == [
-        stop_reason
-    ]
+    if stop_reason in {"provider_error", "incomplete_stream"}:
+        assert buffered.status_code == 502
+        assert buffered.json() == {
+            "code": "provider_failure",
+            "message": "The model provider failed to complete the request.",
+        }
+        assert events[-1] == {
+            "type": "error",
+            "code": "provider_failure",
+            "message": "The model provider failed to complete the request.",
+        }
+        assert not any(event["type"] == "done" for event in events)
+    else:
+        assert buffered.status_code == 200
+        assert buffered.headers["x-done-reason"] == stop_reason
+        assert [event["reason"] for event in events if event["type"] == "done"] == [
+            stop_reason
+        ]
     assert not any(event["type"] == "reasoning" for event in events)
     rendered = json.dumps(events)
     assert "private-chain-of-thought" not in rendered
     assert "opaque-signature" not in rendered
+
+
+async def test_native_provider_failure_hides_private_error_detail(asgi_client) -> None:
+    with wired_app(FailingLLM(), mcp=FakeMCP()) as (app, _settings):
+        client = asgi_client(app)
+        buffered = await client.post("/chat", content="say something")
+        events, _headers = await _stream_events(client, "say something else")
+
+    expected = {
+        "code": "provider_failure",
+        "message": "The model provider failed to complete the request.",
+    }
+    assert buffered.status_code == 502
+    assert buffered.json() == expected
+    assert events == [{"type": "error", **expected}]
+    assert "native-private-sentinel" not in buffered.text
+    assert "native-private-sentinel" not in json.dumps(events)
+
+
+async def test_native_unexpected_failure_hides_private_error_detail(
+    asgi_client, monkeypatch
+) -> None:
+    @asynccontextmanager
+    async def fail_open(_self, _request):
+        raise RuntimeError("native-unexpected-sentinel")
+        yield
+
+    monkeypatch.setattr(TurnRunner, "open", fail_open)
+    with wired_app(FakePlainLLM(), mcp=FakeMCP()) as (app, _settings):
+        client = asgi_client(app)
+        buffered = await client.post("/chat", content="say something")
+        events, _headers = await _stream_events(client, "say something else")
+
+    expected = {
+        "code": "internal_error",
+        "message": "An internal server error occurred.",
+    }
+    assert buffered.status_code == 500
+    assert buffered.json() == expected
+    assert events == [{"type": "error", **expected}]
+    assert "native-unexpected-sentinel" not in buffered.text
+    assert "native-unexpected-sentinel" not in json.dumps(events)
+
+
+async def test_native_unknown_terminal_reason_is_an_execution_protocol_error(
+    asgi_client, monkeypatch
+) -> None:
+    @asynccontextmanager
+    async def unknown_open(_self, _request):
+        async def events():
+            yield DoneEvent("unknown-terminal-sentinel", 1)
+
+        yield TurnExecution(
+            metadata=TurnMetadata(run_id="test-run", model_id="test-model"),
+            events=events(),
+        )
+
+    monkeypatch.setattr(TurnRunner, "open", unknown_open)
+    with wired_app(FakePlainLLM(), mcp=FakeMCP()) as (app, _settings):
+        client = asgi_client(app)
+        buffered = await client.post("/chat", content="say something")
+        events, _headers = await _stream_events(client, "say something else")
+
+    expected = {
+        "code": "execution_protocol_error",
+        "message": "The service could not complete the request.",
+    }
+    assert buffered.status_code == 500
+    assert buffered.json() == expected
+    assert events == [{"type": "error", **expected}]
 
 
 async def test_empty_prompt_is_rejected(asgi_client) -> None:
@@ -189,21 +280,34 @@ async def test_native_routes_accept_missing_or_parameterized_plain_text(
 
 @pytest.mark.parametrize("path", ["/chat", "/chat/stream"])
 @pytest.mark.parametrize(
-    ("content", "headers", "status"),
+    ("content", "headers", "status", "code", "message"),
     [
-        (b"hello", {"Content-Type": "application/json"}, 415),
-        (b"\xff", {}, 400),
-        (b" \n\t ", {}, 400),
+        (
+            b"hello",
+            {"Content-Type": "application/json"},
+            415,
+            "unsupported_media_type",
+            "Content-Type must be text/plain.",
+        ),
+        (b"\xff", {}, 400, "invalid_request", "The request is invalid."),
+        (b" \n\t ", {}, 400, "invalid_request", "The request is invalid."),
     ],
 )
 async def test_native_body_rejections_happen_before_execution(
-    asgi_client, path: str, content: bytes, headers: dict[str, str], status: int
+    asgi_client,
+    path: str,
+    content: bytes,
+    headers: dict[str, str],
+    status: int,
+    code: str,
+    message: str,
 ) -> None:
     llm = FakePlainLLM()
     with wired_app(llm, mcp=FakeMCP()) as (app, _settings):
         response = await asgi_client(app).post(path, content=content, headers=headers)
 
     assert response.status_code == status
+    assert response.json() == {"code": code, "message": message}
     assert llm.calls == 0
 
 
@@ -218,4 +322,9 @@ async def test_native_routes_enforce_the_body_limit_before_execution(
         response = await asgi_client(app).post(path, content=content)
 
     assert response.status_code == status
+    if status == 413:
+        assert response.json() == {
+            "code": "request_too_large",
+            "message": "Request body too large.",
+        }
     assert llm.calls == (1 if status == 200 else 0)

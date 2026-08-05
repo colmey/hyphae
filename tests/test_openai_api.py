@@ -297,10 +297,10 @@ async def test_model_inventory_failure_is_sanitized(asgi_client, path: str) -> N
     assert response.status_code == 500
     assert response.json() == {
         "error": {
-            "message": "model inventory unavailable",
+            "message": "An internal server error occurred.",
             "type": "server_error",
             "param": None,
-            "code": None,
+            "code": "internal_error",
         }
     }
     assert "private registry failure" not in response.text
@@ -419,8 +419,9 @@ async def test_provider_and_incomplete_stream_errors_fail_closed(
             for frame in frames
         )
     else:
-        assert response.status_code == 500
+        assert response.status_code == 502
         assert response.json()["error"]["type"] == "server_error"
+        assert response.json()["error"]["code"] == "provider_failure"
 
 
 async def test_stream_completion_emits_deltas_finish_and_done(
@@ -474,7 +475,12 @@ async def test_openai_body_decode_and_json_failures_do_not_execute(asgi_client) 
 
     for response in (invalid_utf8, invalid_json):
         assert response.status_code == 400
-        assert response.json()["error"]["message"] == "request body must be valid JSON"
+        assert response.json()["error"] == {
+            "message": "The request is invalid.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_request",
+        }
     assert llm.complete_calls == llm.stream_calls == 0
 
 
@@ -515,7 +521,7 @@ async def test_openai_routes_enforce_body_limit_before_execution(
 
     assert accepted.status_code == 200
     assert rejected.status_code == 413
-    assert rejected.json()["error"]["message"] == "request body too large"
+    assert rejected.json()["error"]["code"] == "request_too_large"
     assert llm.stream_calls + llm.complete_calls == 1
 
 
@@ -609,7 +615,8 @@ async def test_native_admission_returns_503_while_capacity_is_claimed(
         assert blocked.status_code == 503
         assert blocked.headers["content-type"] == "application/json"
         assert blocked.json() == {
-            "detail": "session capacity temporarily unavailable"
+            "code": "session_capacity_unavailable",
+            "message": "Session capacity is temporarily unavailable.",
         }
         assert session_id not in blocked.text
         assert store.ids() == [session_id]
@@ -701,14 +708,13 @@ async def test_unknown_model_is_rejected_before_session_inventory_or_execution(
             },
         )
 
-    available = "selected, requested" if orchestrated else settings.llm.model
     assert response.status_code == 400
     assert response.json() == {
         "error": {
-            "message": f"invalid model 'bogus'; available model IDs: {available}",
+            "message": "The requested model is not available.",
             "type": "invalid_request_error",
             "param": None,
-            "code": None,
+            "code": "invalid_model",
         }
     }
     assert created_sessions == 0
@@ -952,9 +958,7 @@ async def test_trailing_assistant_is_rejected_instead_of_reordered(asgi_client) 
         )
 
     assert response.status_code == 400
-    assert response.json()["error"]["message"] == (
-        "the final conversational message must have role 'user'"
-    )
+    assert response.json()["error"]["code"] == "invalid_request"
     assert llm.complete_calls == llm.stream_calls == 0
     assert len(store) == 0
 
@@ -967,4 +971,4 @@ async def test_assistant_only_request_preserves_no_user_error(asgi_client) -> No
         )
 
     assert response.status_code == 400
-    assert response.json()["error"]["message"] == "no user message found in 'messages'"
+    assert response.json()["error"]["code"] == "invalid_request"

@@ -32,9 +32,18 @@ from agent import (
 from .dependencies import (
     get_application_runtime,
     require_api_key,
-    turn_http_exception,
 )
 from .request_body import read_request_body
+from .public_errors import (
+    PublicError,
+    execution_protocol_error,
+    invalid_request_error,
+    openai_error_body,
+    native_error_body,
+    provider_failure_error,
+    public_error_from_done_reason,
+    public_error_from_exception,
+)
 from application import ApplicationRuntime, PersistencePolicy, TurnRequest, TurnRunner
 from llm.schemas import CompletionUsage
 
@@ -119,16 +128,6 @@ def _finish_reason(done_reason: str) -> str:
         return _FINISH_REASONS[done_reason]
     except KeyError as exc:
         raise ValueError(f"unsupported completion reason: {done_reason!r}") from exc
-
-
-def _terminal_error_message(done_reason: str) -> str:
-    if done_reason == "llm_error":
-        return "LLM call failed"
-    if done_reason == "provider_error":
-        return "LLM provider terminated abnormally"
-    if done_reason == "incomplete_stream":
-        return "LLM stream ended without a terminal provider message"
-    return f"unsupported completion reason: {done_reason!r}"
 
 
 def _text_of(content: _MessageContent) -> str:
@@ -272,38 +271,34 @@ def _completion_id() -> str:
     return f"chatcmpl-{uuid.uuid4().hex}"
 
 
-def _error_payload(message: str, *, err_type: str) -> dict[str, Any]:
+def _error_payload(error: PublicError) -> dict[str, Any]:
     """Build the shared OpenAI error envelope for JSON and SSE responses."""
-    return {
-        "error": {"message": message, "type": err_type, "param": None, "code": None}
-    }
+    return openai_error_body(error)
 
 
-def _error_response(
-    message: str, *, status: int = 400, err_type: str = "invalid_request_error"
-) -> JSONResponse:
+def _error_response(error: PublicError) -> JSONResponse:
     """Return an OpenAI-style error response."""
     return JSONResponse(
-        status_code=status,
-        content=_error_payload(message, err_type=err_type),
+        status_code=error.status,
+        content=_error_payload(error),
     )
 
 
 def _http_error_response(exc: StarletteHTTPException) -> JSONResponse:
     """Preserve an HTTP exception in the OpenAI-compatible error envelope."""
-    err_type = "server_error" if exc.status_code >= 500 else "invalid_request_error"
-    return _error_response(str(exc.detail), status=exc.status_code, err_type=err_type)
+    if isinstance(exc.detail, PublicError):
+        return _error_response(exc.detail)
+    raise TypeError("_http_error_response requires a PublicError detail")
 
 
 async def openai_auth_exception_handler(request: Request, exc: Exception) -> Response:
-    """Reshape a /v1 401 into the OpenAI error envelope; delegate everything else.
-
-    Registered app-wide but scoped to /v1 401s, leaving native /chat untouched.
-    """
+    """Render matrix errors for either HTTP adapter."""
     if not isinstance(exc, StarletteHTTPException):
         raise exc
-    if exc.status_code == 401 and request.url.path.startswith("/v1"):
-        return _error_response(exc.detail, status=401, err_type="invalid_request_error")
+    if request.url.path.startswith("/v1") and isinstance(exc.detail, PublicError):
+        return _http_error_response(exc)
+    if isinstance(exc.detail, PublicError):
+        return JSONResponse(status_code=exc.detail.status, content=native_error_body(exc.detail))
     return await http_exception_handler(request, exc)
 
 
@@ -362,11 +357,12 @@ async def _stream_chat_completion(
 
     done_reason: str | None = None
     failed = False
+    error_event_seen = False
     model: str | None = None
     reasoning_tail = ""
 
-    def server_error_frame(message: str) -> dict[str, str]:
-        return {"data": json.dumps(_error_payload(message, err_type="server_error"))}
+    def error_frame(error: PublicError) -> dict[str, str]:
+        return {"data": json.dumps(_error_payload(error))}
 
     def track_reasoning_text(text: str) -> None:
         nonlocal reasoning_tail
@@ -398,6 +394,16 @@ async def _stream_chat_completion(
             }
             async for event in execution.events:
                 if failed:
+                    continue
+                if error_event_seen:
+                    if isinstance(event, DoneEvent):
+                        error = (
+                            public_error_from_done_reason(event.reason)
+                            or provider_failure_error()
+                        )
+                        failed = True
+                        yield error_frame(error)
+                        break
                     continue
                 if isinstance(event, TextEvent):
                     yield {
@@ -466,25 +472,30 @@ async def _stream_chat_completion(
                             )
                         }
                 elif isinstance(event, ErrorEvent):
-                    failed = True
-                    yield server_error_frame(event.message)
+                    error_event_seen = True
                 elif isinstance(event, DoneEvent):
                     done_reason = event.reason
+                    terminal_error = public_error_from_done_reason(done_reason)
+                    if terminal_error is not None:
+                        failed = True
+                        yield error_frame(terminal_error)
+                        break
                     try:
                         _finish_reason(done_reason)
                     except ValueError:
                         failed = True
-                        yield server_error_frame(_terminal_error_message(done_reason))
+                        yield error_frame(execution_protocol_error())
+                        break
     except Exception as e:  # noqa: BLE001 -- the stream is already open; surface, don't crash.
         logger.exception("error during /v1 stream")
         if not failed:
             failed = True
-            yield server_error_frame(str(e) or "error during completion stream")
+            yield error_frame(public_error_from_exception(e))
 
     if not failed:
         if done_reason is None:
             failed = True
-            yield server_error_frame("completion stream ended without a terminal event")
+            yield error_frame(execution_protocol_error())
         else:
             assert model is not None
             yield {
@@ -509,25 +520,22 @@ async def chat_completions(
     except StarletteHTTPException as exc:
         return _http_error_response(exc)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return _error_response("request body must be valid JSON")
+        return _error_response(invalid_request_error())
 
     try:
         req = _ChatCompletionRequest.model_validate(payload)
-    except ValidationError as e:
-        return _error_response(f"invalid request: {e}")
+    except ValidationError:
+        return _error_response(invalid_request_error())
 
     try:
         prepared = _prepare_chat_request(req.messages)
-    except _InvalidChatRequest as exc:
-        return _error_response(str(exc))
+    except _InvalidChatRequest:
+        return _error_response(invalid_request_error())
 
     try:
         runner.validate_model_id(req.model)
     except Exception as exc:
-        mapped = turn_http_exception(exc)
-        if mapped is None:
-            raise
-        return _http_error_response(mapped)
+        return _error_response(public_error_from_exception(exc))
 
     # Fresh ephemeral session per request; the client owns durable history.
     session = Session()
@@ -560,20 +568,16 @@ async def chat_completions(
     try:
         result = await runner.run(turn)
     except Exception as exc:
-        mapped = turn_http_exception(exc)
-        if mapped is not None:
-            return _http_error_response(mapped)
         logger.exception("error handling /v1/chat/completions")
-        return _error_response(str(exc), status=500, err_type="server_error")
+        return _error_response(public_error_from_exception(exc))
 
+    error = public_error_from_done_reason(result.done_reason)
+    if error is not None:
+        return _error_response(error)
     try:
         _finish_reason(result.done_reason)
     except ValueError:
-        return _error_response(
-            _terminal_error_message(result.done_reason),
-            status=500,
-            err_type="server_error",
-        )
+        return _error_response(execution_protocol_error())
 
     return JSONResponse(
         _completion_body(
@@ -593,10 +597,8 @@ async def list_models(
     try:
         ids = runner.available_model_ids()
     except Exception as exc:
-        mapped = turn_http_exception(exc)
-        if mapped is None:
-            raise
-        return _http_error_response(mapped)
+        logger.exception("error handling /v1/models")
+        return _error_response(public_error_from_exception(exc))
     created = int(time.time())
     data = [
         {"id": mid, "object": "model", "created": created, "owned_by": "hyphae"}

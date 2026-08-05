@@ -5,13 +5,10 @@ from __future__ import annotations
 import secrets
 from fastapi import Depends, HTTPException, Request
 
-from agent import SessionBusyError, SessionCapacityError
-from application import (
-    ApplicationRuntime,
-    ExecutionProtocolError,
-    InvalidModelError,
-    ModelInventoryError,
-    RuntimeConfigurationError,
+from application import ApplicationRuntime
+from .public_errors import (
+    authentication_failed_error,
+    public_error_from_exception,
 )
 
 
@@ -23,22 +20,10 @@ async def get_application_runtime(request: Request) -> ApplicationRuntime:
     return runtime
 
 
-def turn_http_exception(exc: Exception) -> HTTPException | None:
-    """Map the small set of application errors owned by the HTTP adapter."""
-    if isinstance(exc, InvalidModelError):
-        return HTTPException(status_code=400, detail=str(exc))
-    if isinstance(exc, ModelInventoryError):
-        return HTTPException(status_code=500, detail=str(exc))
-    if isinstance(exc, SessionBusyError):
-        return HTTPException(
-            status_code=409,
-            detail=f"session {exc.args[0]!r} is processing another request",
-        )
-    if isinstance(exc, SessionCapacityError):
-        return HTTPException(status_code=503, detail=str(exc))
-    if isinstance(exc, (ExecutionProtocolError, RuntimeConfigurationError)):
-        return HTTPException(status_code=500, detail=str(exc))
-    return None
+def turn_http_exception(exc: Exception) -> HTTPException:
+    """Adapt an application outcome to the shared public-error handler."""
+    error = public_error_from_exception(exc)
+    return HTTPException(status_code=error.status, detail=error)
 
 
 def _presented_api_key(request: Request) -> str | None:
@@ -68,4 +53,5 @@ async def require_api_key(
     if presented is None or not secrets.compare_digest(
         presented.encode("utf-8"), configured.encode("utf-8")
     ):
-        raise HTTPException(status_code=401, detail="invalid or missing API key")
+        error = authentication_failed_error()
+        raise HTTPException(status_code=error.status, detail=error)

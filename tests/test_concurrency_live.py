@@ -135,7 +135,10 @@ async def test_configured_request_concurrency() -> None:
             assert n_ok >= 1, "expected at least one 200 to win the claim"
             for r in overlapping:
                 if r.status_code == 409:
-                    assert "processing another request" in r.json()["detail"]
+                    assert r.json() == {
+                        "code": "session_busy",
+                        "message": "Session is processing another request.",
+                    }
                 else:
                     assert r.headers["X-Session-Id"] == session_id
                     assert r.headers["X-Done-Reason"] == "end_turn"

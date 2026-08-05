@@ -9,11 +9,13 @@ import logging
 from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from sse_starlette.sse import EventSourceResponse
 
 from agent import (
     ReasoningEvent,
+    DoneEvent,
+    ErrorEvent,
     Session,
     SessionCapacityError,
     SessionNotFoundError,
@@ -27,6 +29,15 @@ from .dependencies import (
     turn_http_exception,
 )
 from .request_body import read_request_body
+from .public_errors import (
+    invalid_request_error,
+    native_error_body,
+    native_sse_error_body,
+    execution_protocol_error,
+    public_error_from_done_reason,
+    public_error_from_exception,
+    unsupported_media_type_error,
+)
 from .schemas import HealthResponse, MCPServerHealth
 from application import (
     ApplicationRuntime,
@@ -45,15 +56,16 @@ async def _prompt_from_body(request: Request) -> str:
     """Read the native plain-text prompt body, rejecting empty requests."""
     content_type = request.headers.get("content-type")
     if content_type is not None and content_type.split(";", 1)[0].strip().lower() != "text/plain":
-        raise HTTPException(status_code=415, detail="content type must be text/plain")
+        error = unsupported_media_type_error()
+        raise HTTPException(status_code=error.status, detail=error)
     try:
         prompt = (await read_request_body(request)).decode("utf-8").strip()
     except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=400, detail="request body must be valid UTF-8") from exc
+        error = invalid_request_error()
+        raise HTTPException(status_code=error.status, detail=error) from exc
     if not prompt:
-        raise HTTPException(
-            status_code=400, detail="empty body; send the prompt as plain text"
-        )
+        error = invalid_request_error()
+        raise HTTPException(status_code=error.status, detail=error)
     return prompt
 
 
@@ -65,12 +77,12 @@ async def _session_from_header(request: Request, runner: TurnRunner) -> Session:
             return await runner.create_session()
         except SessionCapacityError as exc:
             mapped = turn_http_exception(exc)
-            assert mapped is not None
             raise mapped from exc
     try:
         return await runner.store.get(session_id)
     except SessionNotFoundError:
-        raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
+        error = public_error_from_exception(SessionNotFoundError(session_id))
+        raise HTTPException(status_code=error.status, detail=error) from None
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -124,7 +136,7 @@ async def health(
 async def chat(
     request: Request,
     runtime: ApplicationRuntime = Depends(get_application_runtime),
-) -> PlainTextResponse:
+) -> Response:
     # Resolve before routing so follow-up turns include conversation history.
     prompt = await _prompt_from_body(request)
     runner = runtime.turn_runner()
@@ -139,10 +151,15 @@ async def chat(
             )
         )
     except Exception as exc:
-        mapped = turn_http_exception(exc)
-        if mapped is None:
-            raise
-        raise mapped from exc
+        logger.exception("error during /chat")
+        error = public_error_from_exception(exc)
+        return JSONResponse(status_code=error.status, content=native_error_body(error))
+    terminal_error = public_error_from_done_reason(result.done_reason)
+    if terminal_error is not None:
+        return JSONResponse(
+            status_code=terminal_error.status,
+            content=native_error_body(terminal_error),
+        )
     return PlainTextResponse(
         result.answer,
         headers={
@@ -169,6 +186,7 @@ async def chat_stream(
 
     async def _events() -> AsyncIterator[_SSEFrame]:
         step = 0
+        error_event_seen = False
         try:
             turn = TurnRequest(
                 prompt=prompt,
@@ -178,8 +196,26 @@ async def chat_stream(
             )
             async with runner.open(turn) as execution:
                 async for event in execution.events:
+                    if error_event_seen:
+                        if isinstance(event, DoneEvent):
+                            error = (
+                                public_error_from_done_reason(event.reason)
+                                or public_error_from_done_reason("provider_error")
+                            )
+                            assert error is not None
+                            yield {"data": json.dumps(native_sse_error_body(error))}
+                            return
+                        continue
                     if isinstance(event, ReasoningEvent):
                         continue
+                    if isinstance(event, ErrorEvent):
+                        error_event_seen = True
+                        continue
+                    if isinstance(event, DoneEvent):
+                        error = public_error_from_done_reason(event.reason)
+                        if error is not None:
+                            yield {"data": json.dumps(native_sse_error_body(error))}
+                            return
                     step += 1
                     yield {
                         "data": json.dumps(
@@ -188,17 +224,12 @@ async def chat_stream(
                             )
                         )
                     }
+                if error_event_seen:
+                    error = execution_protocol_error()
+                    yield {"data": json.dumps(native_sse_error_body(error))}
         except Exception as exc:
-            mapped = turn_http_exception(exc)
-            if mapped is not None:
-                # The stream is already 200, so send mapped failures as error frames.
-                yield {
-                    "data": json.dumps(
-                        {"type": "error", "message": str(mapped.detail)}
-                    )
-                }
-            else:
-                logger.exception("error during /chat/stream")
-                yield {"data": json.dumps({"type": "error", "message": str(exc)})}
+            logger.exception("error during /chat/stream")
+            error = public_error_from_exception(exc)
+            yield {"data": json.dumps(native_sse_error_body(error))}
 
     return EventSourceResponse(_events(), headers={"X-Session-Id": session.session_id})

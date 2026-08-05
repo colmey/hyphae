@@ -69,6 +69,20 @@ async def test_auth_enabled_rejects_invalid_credentials(
         else:
             response = await client.post(route, content="hello", headers=headers)
         assert response.status_code == 401
+        if route.startswith("/v1"):
+            assert response.json() == {
+                "error": {
+                    "message": "Invalid or missing API key.",
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": "authentication_failed",
+                }
+            }
+        else:
+            assert response.json() == {
+                "code": "authentication_failed",
+                "message": "Invalid or missing API key.",
+            }
 
 
 @pytest.mark.parametrize(
@@ -104,6 +118,19 @@ async def test_health_remains_open_when_auth_enabled(asgi_client) -> None:
         _settings,
     ):
         assert (await asgi_client(app).get("/health")).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status"),
+    [("get", "/v1/not-a-route", 404), ("post", "/v1/models", 405)],
+)
+async def test_unrelated_openai_http_errors_preserve_their_status(
+    asgi_client, method: str, path: str, status: int
+) -> None:
+    with wired_app(FakeLLM()) as (app, _settings):
+        response = await getattr(asgi_client(app), method)(path)
+
+    assert response.status_code == status
 
 
 @pytest.mark.parametrize("route", ["/chat", "/chat/stream", "/v1/chat/completions"])

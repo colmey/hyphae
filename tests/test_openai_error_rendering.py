@@ -10,7 +10,16 @@ from types import SimpleNamespace
 import pytest
 from starlette.requests import ClientDisconnect
 
-from agent import DoneEvent, ErrorEvent, Session, SessionBusyError, TextEvent
+from agent import (
+    DoneEvent,
+    ErrorEvent,
+    Session,
+    SessionBusyError,
+    SessionCapacityError,
+    SessionHistoryLimitExceeded,
+    SessionNotFoundError,
+    TextEvent,
+)
 from api.openai_compatible import (
     _FINISH_REASONS,
     _finish_reason,
@@ -18,14 +27,19 @@ from api.openai_compatible import (
     chat_completions,
 )
 from application import (
+    ExecutionProtocolError,
     InvalidModelError,
+    ModelInventoryError,
     PersistencePolicy,
+    RuntimeConfigurationError,
     TurnExecution,
     TurnMetadata,
     TurnRequest,
     TurnResult,
 )
+from api.public_errors import native_error_body, openai_error_body, public_error_from_exception
 from llm.schemas import CompletionUsage
+from orchestrator import ModelUnavailableError
 
 
 class _EventsRunner:
@@ -183,10 +197,10 @@ def test_sse_error_event_is_terminal_and_emitted_once(events) -> None:
     assert errors == [
         {
             "error": {
-                "message": "backend unavailable",
+                "message": "The model provider failed to complete the request.",
                 "type": "server_error",
                 "param": None,
-                "code": None,
+                "code": "provider_failure",
             }
         }
     ]
@@ -224,10 +238,10 @@ def test_sse_renderer_exception_uses_error_envelope_and_done_sentinel() -> None:
 
     assert frames[-2] == {
         "error": {
-            "message": "boom",
+            "message": "An internal server error occurred.",
             "type": "server_error",
             "param": None,
-            "code": None,
+            "code": "internal_error",
         }
     }
     assert frames[-1] == "[DONE]"
@@ -238,12 +252,55 @@ def test_sse_missing_terminal_event_fails_instead_of_defaulting_to_stop() -> Non
 
     assert frames[-2] == {
         "error": {
-            "message": "completion stream ended without a terminal event",
+            "message": "The service could not complete the request.",
             "type": "server_error",
             "param": None,
-            "code": None,
+            "code": "execution_protocol_error",
         }
     }
+    assert frames[-1] == "[DONE]"
+
+
+def test_sse_defers_an_error_event_to_the_history_limit_terminal_reason() -> None:
+    frames = _decoded(
+        _collect_stream(
+            _EventsRunner(
+                [
+                    ErrorEvent("raw-history-limit-sentinel"),
+                    DoneEvent("session_history_limit", 1),
+                ]
+            )
+        )
+    )
+
+    assert frames[-2] == {
+        "error": {
+            "message": "Session history limit reached; start a new session.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "session_history_limit",
+        }
+    }
+    assert "raw-history-limit-sentinel" not in repr(frames)
+    assert frames[-1] == "[DONE]"
+
+
+def test_sse_error_event_with_unknown_terminal_reason_is_a_protocol_error() -> None:
+    frames = _decoded(
+        _collect_stream(
+            _EventsRunner(
+                [ErrorEvent("raw-error-sentinel"), DoneEvent("unknown-reason", 1)]
+            )
+        )
+    )
+
+    assert frames[-2]["error"] == {
+        "message": "The service could not complete the request.",
+        "type": "server_error",
+        "param": None,
+        "code": "execution_protocol_error",
+    }
+    assert "raw-error-sentinel" not in repr(frames)
     assert frames[-1] == "[DONE]"
 
 
@@ -258,11 +315,16 @@ def test_nonstream_invalid_done_reason_returns_openai_500(reason: str) -> None:
         )
     )
 
-    assert response.status_code == 500
+    expected_status = 502 if reason in {"llm_error", "provider_error", "incomplete_stream"} else 500
+    assert response.status_code == expected_status
     body = json.loads(response.body)
     assert body["error"]["type"] == "server_error"
     assert body["error"]["param"] is None
-    assert body["error"]["code"] is None
+    assert body["error"]["code"] == (
+        "provider_failure"
+        if reason in {"llm_error", "provider_error", "incomplete_stream"}
+        else "execution_protocol_error"
+    )
 
 
 def test_nonstream_http_exception_preserves_status_and_openai_envelope() -> None:
@@ -276,10 +338,10 @@ def test_nonstream_http_exception_preserves_status_and_openai_envelope() -> None
     assert response.status_code == 409
     assert json.loads(response.body) == {
         "error": {
-            "message": "session 'test-session' is processing another request",
+            "message": "Session is processing another request.",
             "type": "invalid_request_error",
             "param": None,
-            "code": None,
+            "code": "session_busy",
         }
     }
 
@@ -292,3 +354,30 @@ def test_openai_endpoint_propagates_client_disconnect() -> None:
                 runtime=_runtime(_RunRunner("end_turn")),
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("exc", "status", "code", "message"),
+    [
+        (InvalidModelError("raw-invalid-model", []), 400, "invalid_model", "The requested model is not available."),
+        (ModelUnavailableError("raw-unavailable-model"), 503, "model_unavailable", "The requested model is temporarily unavailable."),
+        (ModelInventoryError(), 500, "internal_error", "An internal server error occurred."),
+        (RuntimeConfigurationError("raw-runtime-config"), 500, "internal_error", "An internal server error occurred."),
+        (ExecutionProtocolError("raw-protocol"), 500, "execution_protocol_error", "The service could not complete the request."),
+        (SessionNotFoundError("raw-session"), 404, "session_not_found", "Session not found."),
+        (SessionBusyError("raw-session"), 409, "session_busy", "Session is processing another request."),
+        (SessionCapacityError(), 503, "session_capacity_unavailable", "Session capacity is temporarily unavailable."),
+        (SessionHistoryLimitExceeded(), 409, "session_history_limit", "Session history limit reached; start a new session."),
+        (RuntimeError("raw-unexpected-sentinel"), 500, "internal_error", "An internal server error occurred."),
+    ],
+)
+def test_public_error_matrix_hides_private_exception_detail(
+    exc: Exception, status: int, code: str, message: str
+) -> None:
+    error = public_error_from_exception(exc)
+
+    assert (error.status, error.code, error.message) == (status, code, message)
+    assert native_error_body(error) == {"code": code, "message": message}
+    assert openai_error_body(error)["error"]["code"] == code
+    assert "raw-" not in repr(native_error_body(error))
+    assert "raw-" not in repr(openai_error_body(error))

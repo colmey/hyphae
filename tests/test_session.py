@@ -6,7 +6,13 @@ from datetime import timedelta
 
 import pytest
 
-from agent import InMemorySessionStore, Session, SessionBusyError, SessionGuard
+from agent import (
+    InMemorySessionStore,
+    Session,
+    SessionBusyError,
+    SessionCapacityError,
+    SessionGuard,
+)
 from agent.session import (
     SessionHistoryLimitExceeded,
     SessionNotFoundError,
@@ -128,6 +134,95 @@ async def test_store_evicts_stale_session_by_ttl() -> None:
     with pytest.raises(SessionNotFoundError):
         await store.get(stale.session_id)
     assert await store.get(fresh.session_id) == fresh
+
+
+async def test_store_capacity_keeps_claimed_session_and_evicts_unclaimed_lru() -> None:
+    guard = SessionGuard()
+    store = InMemorySessionStore(max_count=2)
+    claimed = await store.create()
+    unclaimed = await store.create()
+    store._sessions[claimed.session_id].updated_at -= timedelta(seconds=2)
+    store._sessions[unclaimed.session_id].updated_at -= timedelta(seconds=1)
+
+    async with guard.claim(claimed.session_id):
+        admitted = await store.create(protected_session_ids=guard.claimed_session_ids)
+
+    assert set(store.ids()) == {claimed.session_id, admitted.session_id}
+    with pytest.raises(SessionNotFoundError):
+        await store.get(unclaimed.session_id)
+
+
+async def test_store_ttl_and_capacity_keep_claimed_stale_session() -> None:
+    guard = SessionGuard()
+    store = InMemorySessionStore(ttl_seconds=1, max_count=2)
+    claimed = await store.create()
+    unclaimed = await store.create()
+    store._sessions[claimed.session_id].updated_at -= timedelta(seconds=2)
+
+    async with guard.claim(claimed.session_id):
+        admitted = await store.create(protected_session_ids=guard.claimed_session_ids)
+
+    assert set(store.ids()) == {claimed.session_id, admitted.session_id}
+    with pytest.raises(SessionNotFoundError):
+        await store.get(unclaimed.session_id)
+
+
+async def test_existing_save_leaves_unrelated_stale_session_until_admission() -> None:
+    store = InMemorySessionStore(ttl_seconds=1)
+    existing = await store.create()
+    stale = await store.create()
+    store._sessions[stale.session_id].updated_at -= timedelta(seconds=2)
+
+    await store.save(existing)
+
+    assert set(store.ids()) == {existing.session_id, stale.session_id}
+
+
+async def test_admission_supplier_failure_is_atomic() -> None:
+    store = InMemorySessionStore(ttl_seconds=1, max_count=1)
+    existing = await store.create()
+    store._sessions[existing.session_id].updated_at -= timedelta(seconds=2)
+
+    def unavailable_snapshot() -> frozenset[str]:
+        raise RuntimeError("claim snapshot unavailable")
+
+    with pytest.raises(RuntimeError, match="claim snapshot unavailable"):
+        await store.create(protected_session_ids=unavailable_snapshot)
+
+    assert store.ids() == [existing.session_id]
+
+
+async def test_store_all_claimed_capacity_failure_is_atomic() -> None:
+    guard = SessionGuard()
+    store = InMemorySessionStore(max_count=2)
+    first = await store.create()
+    second = await store.create()
+
+    async with guard.claim(first.session_id), guard.claim(second.session_id):
+        with pytest.raises(SessionCapacityError, match="capacity temporarily unavailable"):
+            await store.create(protected_session_ids=guard.claimed_session_ids)
+
+    assert store.ids() == [first.session_id, second.session_id]
+    assert len(store) == 2
+
+
+async def test_missing_save_at_capacity_only_admits_when_an_unclaimed_victim_exists() -> None:
+    guard = SessionGuard()
+    store = InMemorySessionStore(max_count=2)
+    claimed = await store.create()
+    unclaimed = await store.create()
+    replacement = Session()
+
+    async with guard.claim(claimed.session_id), guard.claim(unclaimed.session_id):
+        with pytest.raises(SessionCapacityError):
+            await store.save(replacement, protected_session_ids=guard.claimed_session_ids)
+
+    assert store.ids() == [claimed.session_id, unclaimed.session_id]
+    async with guard.claim(claimed.session_id):
+        await store.save(replacement, protected_session_ids=guard.claimed_session_ids)
+
+    assert set(store.ids()) == {claimed.session_id, replacement.session_id}
+    assert len(store) == 2
 
 
 def test_transcript_validator_accepts_ordinary_and_complete_multi_tool_history() -> (
@@ -306,3 +401,4 @@ async def test_session_guard_rejects_same_id_and_releases_claim() -> None:
     assert guard.in_flight() == set()
     async with guard.claim("sess_x"):
         assert guard.in_flight() == {"sess_x"}
+        assert guard.claimed_session_ids() == frozenset({"sess_x"})

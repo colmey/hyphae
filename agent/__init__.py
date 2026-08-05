@@ -3,7 +3,7 @@
 Public surface used by main.py and api/routes.py:
   - Session, SessionStore, InMemorySessionStore, SessionNotFoundError,
     SessionHistoryLimitExceeded
-  - SessionGuard, SessionBusyError
+  - SessionGuard, SessionBusyError, SessionCapacityError
   - All event types
   - run_agent
 """
@@ -26,6 +26,7 @@ from .session import (
     InMemorySessionStore,
     Session,
     SessionBusyError,
+    SessionCapacityError,
     SessionGuard,
     SessionHistoryLimitExceeded,
     SessionNotFoundError,
@@ -47,6 +48,7 @@ __all__ = [
     "RunLimits",
     "Session",
     "SessionBusyError",
+    "SessionCapacityError",
     "SessionGuard",
     "SessionHistoryLimitExceeded",
     "SessionNotFoundError",

@@ -481,6 +481,34 @@ async def test_v1_traffic_cannot_evict_native_session_at_capacity(asgi_client) -
         assert len((await store.get(session_id)).messages) == 4
 
 
+@pytest.mark.parametrize("path", ["/chat", "/chat/stream"])
+async def test_native_admission_returns_503_while_capacity_is_claimed(
+    asgi_client,
+    path: str,
+) -> None:
+    store = InMemorySessionStore(max_count=1)
+    with wired_app(FakeLLM(), store=store) as (app, _settings):
+        client = asgi_client(app)
+        existing = await client.post("/chat", content="existing")
+        existing.raise_for_status()
+        session_id = existing.headers["X-Session-Id"]
+        runtime = runtime_of(app)
+
+        async with runtime.guard.claim(session_id):
+            blocked = await client.post(path, content="new session")
+
+        assert blocked.status_code == 503
+        assert blocked.headers["content-type"] == "application/json"
+        assert blocked.json() == {
+            "detail": "session capacity temporarily unavailable"
+        }
+        assert session_id not in blocked.text
+        assert store.ids() == [session_id]
+        admitted = await client.post("/chat", content="after release")
+        admitted.raise_for_status()
+        assert admitted.headers["X-Session-Id"] != session_id
+
+
 @pytest.mark.parametrize(
     ("requested_model", "expected_model"),
     [("requested", "requested"), (None, "selected")],

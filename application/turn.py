@@ -261,6 +261,12 @@ class TurnRunner:
     policy: ToolPolicy | None
     tracer: Tracer | None
 
+    async def create_session(self) -> Session:
+        """Create a persistent session while preserving active checkpoints."""
+        return await self.store.create(
+            protected_session_ids=self.guard.claimed_session_ids
+        )
+
     def available_model_ids(self) -> list[str]:
         """Return the model IDs accepted by the OpenAI-compatible boundary."""
         try:
@@ -411,6 +417,11 @@ class TurnRunner:
             llm=routing.llm,
             mcp=tool_runtime,
             store=store,
+            protected_session_ids=(
+                self.guard.claimed_session_ids
+                if request.persistence is PersistencePolicy.PERSISTENT
+                else None
+            ),
             system=routing.system_prompt,
             tools=routing.tools,
             thinking_level=routing.thinking_level,

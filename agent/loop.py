@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -111,6 +111,7 @@ class _AgentRun:
     session: Session
     llm: LLMClient
     store: SessionStore | None
+    protected_session_ids: Callable[[], frozenset[str]] | None
     system: str | None
     visible_tools: list[dict[str, Any]]
     thinking_level: str | None
@@ -135,6 +136,7 @@ class _AgentRun:
         mcp: ToolRuntime,
         *,
         store: SessionStore | None = None,
+        protected_session_ids: Callable[[], frozenset[str]] | None = None,
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         thinking_level: str | None = None,
@@ -164,6 +166,7 @@ class _AgentRun:
             session=session,
             llm=llm,
             store=store,
+            protected_session_ids=protected_session_ids,
             system=system,
             visible_tools=resolved_tools,
             thinking_level=thinking_level,
@@ -432,7 +435,10 @@ class _AgentRun:
     async def _publish_checkpoint(self, *, continue_work: bool) -> None:
         """Publish only protocol-safe state and detach before continuing."""
         if self.store is not None:
-            await self.store.save(self.session)
+            await self.store.save(
+                self.session,
+                protected_session_ids=self.protected_session_ids,
+            )
         if continue_work:
             self.session = self.session.staged_copy()
 
@@ -845,6 +851,7 @@ async def run_agent(
     mcp: ToolRuntime,
     *,
     store: SessionStore | None = None,
+    protected_session_ids: Callable[[], frozenset[str]] | None = None,
     system: str | None = None,
     tools: list[dict[str, Any]] | None = None,
     thinking_level: str | None = None,
@@ -870,6 +877,7 @@ async def run_agent(
         llm,
         mcp,
         store=store,
+        protected_session_ids=protected_session_ids,
         system=system,
         tools=tools,
         thinking_level=thinking_level,

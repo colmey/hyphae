@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import pytest
 
@@ -55,13 +55,26 @@ class CountingStore(InMemorySessionStore):
         super().__init__(session_history_max_chars=session_history_max_chars)
         self.save_count = 0
 
-    async def save(self, session: Session) -> None:
+    async def save(
+        self,
+        session: Session,
+        *,
+        protected_session_ids: Callable[[], frozenset[str]] | None = None,
+    ) -> None:
         self.save_count += 1
-        await super().save(session)
+        await super().save(
+            session,
+            protected_session_ids=protected_session_ids,
+        )
 
 
 class FailingSaveStore(CountingStore):
-    async def save(self, session: Session) -> None:
+    async def save(
+        self,
+        session: Session,
+        *,
+        protected_session_ids: Callable[[], frozenset[str]] | None = None,
+    ) -> None:
         self.save_count += 1
         raise RuntimeError("checkpoint unavailable")
 

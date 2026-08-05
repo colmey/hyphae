@@ -206,11 +206,19 @@ class RecordingStore(InMemorySessionStore):
         self.saved_sessions: list[Session] = []
         self.saved_messages: list[list[dict[str, object]]] = []
 
-    async def save(self, session: Session) -> None:
+    async def save(
+        self,
+        session: Session,
+        *,
+        protected_session_ids: Callable[[], frozenset[str]] | None = None,
+    ) -> None:
         self.save_count += 1
         self.saved_sessions.append(session)
         self.saved_messages.append(normalize_messages(session.messages))
-        await super().save(session)
+        await super().save(
+            session,
+            protected_session_ids=protected_session_ids,
+        )
 
 
 def normalize_event(event: Event) -> dict[str, object]:
@@ -439,6 +447,7 @@ def test_public_imports_and_run_agent_calling_contract() -> None:
         ("llm", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
         ("mcp", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
         ("store", inspect.Parameter.KEYWORD_ONLY, None),
+        ("protected_session_ids", inspect.Parameter.KEYWORD_ONLY, None),
         ("system", inspect.Parameter.KEYWORD_ONLY, None),
         ("tools", inspect.Parameter.KEYWORD_ONLY, None),
         ("thinking_level", inspect.Parameter.KEYWORD_ONLY, None),

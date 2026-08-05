@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 from fastapi import Depends, HTTPException, Request
 
-from agent import SessionBusyError
+from agent import SessionBusyError, SessionCapacityError
 from application import (
     ApplicationRuntime,
     ExecutionProtocolError,
@@ -34,6 +34,8 @@ def turn_http_exception(exc: Exception) -> HTTPException | None:
             status_code=409,
             detail=f"session {exc.args[0]!r} is processing another request",
         )
+    if isinstance(exc, SessionCapacityError):
+        return HTTPException(status_code=503, detail=str(exc))
     if isinstance(exc, (ExecutionProtocolError, RuntimeConfigurationError)):
         return HTTPException(status_code=500, detail=str(exc))
     return None

@@ -15,6 +15,7 @@ from sse_starlette.sse import EventSourceResponse
 from agent import (
     ReasoningEvent,
     Session,
+    SessionCapacityError,
     SessionNotFoundError,
 )
 from agent.tracing import event_record
@@ -53,7 +54,12 @@ async def _session_from_header(request: Request, runner: TurnRunner) -> Session:
     """Resolve or create the native session named by X-Session-Id."""
     session_id = request.headers.get("X-Session-Id")
     if not session_id:
-        return await runner.store.create()
+        try:
+            return await runner.create_session()
+        except SessionCapacityError as exc:
+            mapped = turn_http_exception(exc)
+            assert mapped is not None
+            raise mapped from exc
     try:
         return await runner.store.get(session_id)
     except SessionNotFoundError:

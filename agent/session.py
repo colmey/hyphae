@@ -24,8 +24,8 @@ Design notes:
     doesn't need it. This keeps the call sites unchanged when we swap to a
     real DB.
   - `InMemorySessionStore` evicts on TTL + max-size and rejects retained
-    transcripts over its positive character bound. Eviction is lazy (swept
-    on create), not a background task.
+    transcripts over its positive character bound. Eviction is lazy (swept on
+    admission), not a background task.
   - `SessionGuard` is an in-process reject-if-busy guard. It is lock-free: on
     the single-threaded asyncio loop a check-then-add with no `await` between
     is atomic. Switching to wait-semantics later means swapping the in-flight
@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -268,7 +268,12 @@ class SessionStore(ABC):
     """
 
     @abstractmethod
-    async def create(self, metadata: dict[str, Any] | None = None) -> Session:
+    async def create(
+        self,
+        metadata: dict[str, Any] | None = None,
+        *,
+        protected_session_ids: Callable[[], frozenset[str]] | None = None,
+    ) -> Session:
         """Create and persist a new Session, return it."""
         ...
 
@@ -278,7 +283,12 @@ class SessionStore(ABC):
         ...
 
     @abstractmethod
-    async def save(self, session: Session) -> None:
+    async def save(
+        self,
+        session: Session,
+        *,
+        protected_session_ids: Callable[[], frozenset[str]] | None = None,
+    ) -> None:
         """Persist (or re-persist) the given session."""
         ...
 
@@ -294,15 +304,13 @@ class InMemorySessionStore(SessionStore):
 
     Because the harness keeps no durable copy, an unbounded dict would leak
     under many users. Eviction keeps memory flat:
-      - ttl_seconds: sessions idle longer than this are dropped. Active
-        sessions stay young (save() bumps updated_at every turn), so an
-        in-flight session is never TTL-evicted.
-      - max_count: if over the cap, the least-recently-updated sessions are
-        dropped first. In-flight sessions are recently updated, so they are
-        not realistic eviction victims.
+      - ttl_seconds: sessions idle longer than this are dropped unless their
+        active claim protects them.
+      - max_count: if over the cap, the least-recently-updated unprotected
+        sessions are dropped first.
 
-    Eviction is lazy: it runs on create() (the only operation that grows the
-    store), avoiding a background sweeper and the lifecycle that comes with it.
+    Eviction is lazy: it runs on new-session admission, including a missing-ID
+    save, avoiding a background sweeper and the lifecycle that comes with it.
     ttl_seconds <= 0 or max_count <= 0 (the defaults) disables that dimension;
     production bounds are injected from Settings in main.py.
     """
@@ -330,28 +338,52 @@ class InMemorySessionStore(SessionStore):
             raise SessionHistoryLimitExceeded
         return deepcopy(session)
 
-    def _evict(self) -> None:
-        """Drop expired then surplus sessions. Cheap; called on create()."""
-        if self._ttl_seconds > 0:
-            cutoff = _utc_now() - timedelta(seconds=self._ttl_seconds)
-            expired = [
-                sid for sid, s in self._sessions.items() if s.updated_at < cutoff
-            ]
-            for sid in expired:
-                del self._sessions[sid]
+    def _admit(self, protected_session_ids: frozenset[str]) -> None:
+        """Make room for one session without disturbing active claims."""
+        cutoff = (
+            _utc_now() - timedelta(seconds=self._ttl_seconds)
+            if self._ttl_seconds > 0
+            else None
+        )
+        expired = [
+            sid
+            for sid, stored in self._sessions.items()
+            if sid not in protected_session_ids
+            and cutoff is not None
+            and stored.updated_at < cutoff
+        ]
+        remaining = {
+            sid: stored for sid, stored in self._sessions.items() if sid not in expired
+        }
+        victims: list[str] = []
+        if self._max_count > 0:
+            needed = len(remaining) - self._max_count + 1
+            if needed > 0:
+                eligible = sorted(
+                    (
+                        stored
+                        for sid, stored in remaining.items()
+                        if sid not in protected_session_ids
+                    ),
+                    key=lambda stored: stored.updated_at,
+                )
+                if len(eligible) < needed:
+                    raise SessionCapacityError()
+                victims = [stored.session_id for stored in eligible[:needed]]
+        for sid in [*expired, *victims]:
+            del self._sessions[sid]
 
-        if self._max_count > 0 and len(self._sessions) >= self._max_count:
-            # Oldest-updated first; trim down to (max_count - 1) to leave room
-            # for the session about to be created.
-            ordered = sorted(self._sessions.values(), key=lambda s: s.updated_at)
-            surplus = len(self._sessions) - (self._max_count - 1)
-            for s in ordered[:surplus]:
-                del self._sessions[s.session_id]
-
-    async def create(self, metadata: dict[str, Any] | None = None) -> Session:
-        self._evict()
+    async def create(
+        self,
+        metadata: dict[str, Any] | None = None,
+        *,
+        protected_session_ids: Callable[[], frozenset[str]] | None = None,
+    ) -> Session:
         session = Session(metadata=dict(metadata) if metadata else {})
-        self._sessions[session.session_id] = self._validated_snapshot(session)
+        snapshot = self._validated_snapshot(session)
+        protected = protected_session_ids() if protected_session_ids is not None else frozenset()
+        self._admit(protected)
+        self._sessions[session.session_id] = snapshot
         return session
 
     async def get(self, session_id: str) -> Session:
@@ -361,9 +393,21 @@ class InMemorySessionStore(SessionStore):
             raise SessionNotFoundError(session_id) from e
         return self._validated_snapshot(stored)
 
-    async def save(self, session: Session) -> None:
+    async def save(
+        self,
+        session: Session,
+        *,
+        protected_session_ids: Callable[[], frozenset[str]] | None = None,
+    ) -> None:
         snapshot = self._validated_snapshot(session)
         snapshot.updated_at = _utc_now()
+        protected = (
+            protected_session_ids()
+            if protected_session_ids is not None
+            else frozenset()
+        )
+        if session.session_id not in self._sessions:
+            self._admit(protected)
         self._sessions[session.session_id] = snapshot
 
     # ----- convenience for tests / debugging -----
@@ -382,6 +426,15 @@ class InMemorySessionStore(SessionStore):
 
 class SessionBusyError(Exception):
     """Raised when a session already has a request in flight."""
+
+
+class SessionCapacityError(Exception):
+    """Raised when active sessions leave no safe store capacity."""
+
+    code = "session_capacity_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("session capacity temporarily unavailable")
 
 
 class SessionGuard:
@@ -414,3 +467,7 @@ class SessionGuard:
 
     def in_flight(self) -> set[str]:
         return set(self._in_flight)
+
+    def claimed_session_ids(self) -> frozenset[str]:
+        """Return an immutable snapshot of currently active session claims."""
+        return frozenset(self._in_flight)

@@ -13,7 +13,7 @@ from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import pytest
 from fastapi import FastAPI, Request
@@ -30,6 +30,7 @@ from agent import (
     RunLimits,
     Session,
     SessionBusyError,
+    SessionCapacityError,
     SessionGuard,
     Tracer,
     ToolPolicy,
@@ -296,6 +297,64 @@ async def test_busy_session_rejects_before_inventory_or_routing() -> None:
 
     assert orchestrator.calls == 1
     assert mcp.inventory_reads == 1
+
+
+async def test_active_session_blocks_admission_then_checkpoint_completes() -> None:
+    class BlockingAnswerLLM(AnswerLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def complete(self, request: GenerationRequest) -> AssistantMessage:
+            self.started.set()
+            await self.release.wait()
+            return await super().complete(request)
+
+    class SaveSnapshotStore(InMemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__(max_count=1)
+            self.save_snapshots: list[frozenset[str]] = []
+
+        async def save(
+            self,
+            session: Session,
+            *,
+            protected_session_ids: Callable[[], frozenset[str]] | None = None,
+        ) -> None:
+            assert protected_session_ids is not None
+            self.save_snapshots.append(protected_session_ids())
+            await super().save(
+                session,
+                protected_session_ids=protected_session_ids,
+            )
+
+    mcp = CountingMCP()
+    agent = BlockingAnswerLLM()
+    runner = _runner(
+        agent=agent,
+        mcp=mcp,
+        settings=_settings(orchestration_enabled=False),
+    )
+    store = SaveSnapshotStore()
+    runner = replace(runner, store=store)
+    session = await runner.create_session()
+    run = asyncio.create_task(
+        runner.run(TurnRequest("finish", session, PersistencePolicy.PERSISTENT))
+    )
+    await agent.started.wait()
+
+    assert runner.guard.claimed_session_ids() == frozenset({session.session_id})
+    with pytest.raises(SessionCapacityError):
+        await runner.create_session()
+    assert store.ids() == [session.session_id]
+
+    agent.release.set()
+    await run
+
+    assert store.save_snapshots == [frozenset({session.session_id})]
+    assert store.ids() == [session.session_id]
+    assert len(store) == 1
 
 
 async def test_distinct_sessions_execute_concurrently() -> None:
@@ -679,7 +738,8 @@ async def test_guard_releases_when_stream_is_closed_early() -> None:
     runner = _runner(
         agent=agent, mcp=CountingMCP(), settings=_settings(orchestration_enabled=False)
     )
-    session = await runner.store.create()
+    runner = replace(runner, store=InMemorySessionStore(max_count=1))
+    session = await runner.create_session()
 
     async with runner.open(
         TurnRequest("stream", session, PersistencePolicy.PERSISTENT, stream=True)
@@ -691,6 +751,8 @@ async def test_guard_releases_when_stream_is_closed_early() -> None:
     assert agent.closed is True
     assert runner.mcp.active_turns == 0  # type: ignore[attr-defined]
     assert runner.mcp.turn_entries == runner.mcp.turn_exits == 1  # type: ignore[attr-defined]
+    admitted = await runner.create_session()
+    assert runner.store.ids() == [admitted.session_id]  # type: ignore[attr-defined]
 
 
 async def test_early_generator_close_after_tool_dispatch_closes_turn_lease() -> None:

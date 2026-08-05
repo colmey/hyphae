@@ -472,6 +472,30 @@ async def test_mid_batch_abort_preserves_tool_call_result_pairing() -> None:
     )
 
 
+async def test_initial_routing_usage_blocks_downstream_call_at_run_token_limit() -> None:
+    llm = ScriptedLLM([text_response("must not run")])
+    mcp = ScriptedMCP(schema=_QTOOL_SCHEMA)
+    session = Session()
+    session.append_user("go")
+    events = [
+        event
+        async for event in run_agent(
+            session=session,
+            llm=llm,
+            mcp=mcp,
+            limits=RunLimits(max_run_tokens=5),
+            initial_usage=CompletionUsage(
+                input_tokens=3, output_tokens=2, total_tokens=5
+            ),
+        )
+    ]
+
+    assert llm.calls == 0
+    assert isinstance(events[-1], DoneEvent)
+    assert events[-1].reason == "budget_exceeded"
+    assert events[-1].total_tokens == 5
+
+
 @pytest.mark.parametrize(
     "reason", ["budget_exceeded", "deadline_exceeded", "no_progress"]
 )

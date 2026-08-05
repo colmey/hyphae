@@ -415,6 +415,7 @@ async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> 
     assert result.metadata.orchestration is not None
     assert result.metadata.orchestration.tools == ["srv__one"]
     assert [tool["name"] for tool in agent.requests_seen[0].tools or []] == ["srv__one"]
+    assert result.usage.total_tokens == 3
     assert agent.requests_seen[0].max_tokens == 256
     model_limits = runner.limits.for_model(registry.get_entry("agent"))
     assert model_limits.max_tokens == 256

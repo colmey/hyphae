@@ -89,6 +89,15 @@ class OrchestrationDecisionEvent:
     model_id: str
     tools: list[str]
     fallback_used: bool = False
+    fallback_reason: str | None = None
+    corrections: tuple[str, ...] = ()
+    control_model_id: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    thinking_tokens: int = 0
+    cached_tokens: int = 0
+    latency_ms: float = 0.0
     thinking_level: str | None = None
     type: Literal["orchestration"] = "orchestration"
 

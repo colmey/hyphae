@@ -525,6 +525,15 @@ def event_record(event: Event, *, run_id: str | None, step: int) -> TraceRecord:
         rec["model_id"] = event.model_id
         rec["tools"] = event.tools
         rec["fallback_used"] = event.fallback_used
+        rec["fallback_reason"] = event.fallback_reason
+        rec["corrections"] = event.corrections
+        rec["control_model_id"] = event.control_model_id
+        rec["input_tokens"] = event.input_tokens
+        rec["output_tokens"] = event.output_tokens
+        rec["total_tokens"] = event.total_tokens
+        rec["thinking_tokens"] = event.thinking_tokens
+        rec["cached_tokens"] = event.cached_tokens
+        rec["latency_ms"] = event.latency_ms
         rec["thinking_level"] = event.thinking_level
     elif isinstance(event, DoneEvent):
         rec["reason"] = event.reason

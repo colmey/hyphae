@@ -9,9 +9,10 @@ from typing import Any
 
 import pytest
 
+import orchestrator.orchestrator as orchestrator_module
 from agent.runtime import ModelLimits
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, Message, TextBlock
+from llm.schemas import AssistantMessage, CompletionUsage, Message, TextBlock
 from tooling import ToolSnapshot
 from orchestrator import Orchestrator, ToolPreferences
 from orchestrator.schemas import OrchestrationProposal
@@ -76,6 +77,7 @@ class _RecordingLLM(LLMClient):
         return AssistantMessage(
             content=[TextBlock('{"selected_model_id":"model"}')],
             stop_reason="end_turn",
+            usage=CompletionUsage(input_tokens=3, output_tokens=2, total_tokens=5),
         )
 
 
@@ -87,9 +89,13 @@ async def test_orchestration_constructs_structured_generation_request() -> None:
     )
     llm = _RecordingLLM()
 
-    raw = await orchestrator._call_orchestrator_llm(llm, "choose a model")
+    raw, usage, latency_ms = await orchestrator._call_orchestrator_llm(
+        llm, "choose a model"
+    )
 
     assert raw == '{"selected_model_id":"model"}'
+    assert usage == CompletionUsage(input_tokens=3, output_tokens=2, total_tokens=5)
+    assert latency_ms >= 0
     request = llm.requests[0]
     assert request.messages == [Message.user("choose a model")]
     assert request.tools is None
@@ -223,6 +229,8 @@ async def test_invalid_router_output_uses_safe_diagnostics(
     assert decision.fallback_reason == "invalid_control_output"
     assert decision.result.selected_model_id == "model"
     assert decision.result.selected_tools == []
+    assert decision.usage.total_tokens > 0
+    assert decision.control_model_id == "model"
     assert "secret router output" not in caplog.text
     assert "sha256=" in caplog.text
 
@@ -235,6 +243,7 @@ class _FailingLLM(LLMClient):
 @pytest.mark.anyio
 async def test_control_client_failure_uses_safe_diagnostics(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Registry(_RegistryStub):
         def get(self, model_id: str) -> LLMClient:
@@ -242,6 +251,8 @@ async def test_control_client_failure_uses_safe_diagnostics(
 
     orchestrator = Orchestrator(registry=Registry(), system_prompt="route")
     caplog.set_level(logging.WARNING)
+    ticks = iter((10.0, 11.0, 16.5))
+    monkeypatch.setattr(orchestrator_module, "perf_counter", lambda: next(ticks))
 
     decision = await orchestrator.decide("hello", ToolSnapshot())
 
@@ -251,3 +262,53 @@ async def test_control_client_failure_uses_safe_diagnostics(
     assert decision.result.selected_tools == []
     assert "secret control-client failure" not in caplog.text
     assert "RuntimeError" in caplog.text
+    assert decision.usage == CompletionUsage()
+    assert decision.latency_ms == 6_500.0
+
+
+def test_sanitization_reports_stable_safe_corrections_and_deduplicates() -> None:
+    orchestrator = Orchestrator(registry=_RegistryStub(), system_prompt="route")
+    tools = ToolSnapshot.from_llm_tools(
+        [
+            {
+                "name": "server__first",
+                "description": "first",
+                "input_schema": {"type": "object"},
+            },
+            {
+                "name": "server__second",
+                "description": "second",
+                "input_schema": {"type": "object"},
+            },
+        ]
+    )
+
+    proposal, corrections = orchestrator._sanitize_proposal(
+        OrchestrationProposal(
+            selected_model_id="unknown",
+            selected_tools=["server__first", "server__first", "missing"],
+        ),
+        tools,
+    )
+
+    assert proposal.selected_model_id == "model"
+    assert proposal.selected_tools == ["server__first"]
+    assert corrections == (
+        "unknown_model_id",
+        "unknown_tool_id",
+        "duplicate_tool_id",
+    )
+
+
+def test_tool_preferences_are_immutable_and_tolerate_missing_tools() -> None:
+    preferences = ToolPreferences.from_request(
+        [
+            SimpleNamespace(name="empty", tools=None),
+            SimpleNamespace(name="search", tools={"query": ["q"]}),
+        ]
+    )
+
+    assert preferences.preferred_tools == ("search__query",)
+    assert preferences.tool_arg_hints["search__query"] == ("q",)
+    with pytest.raises(TypeError):
+        preferences.tool_arg_hints["search__query"] = ()  # type: ignore[index]

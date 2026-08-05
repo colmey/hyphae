@@ -446,6 +446,7 @@ def test_public_imports_and_run_agent_calling_contract() -> None:
         ("context", inspect.Parameter.KEYWORD_ONLY, None),
         ("policy", inspect.Parameter.KEYWORD_ONLY, None),
         ("stream", inspect.Parameter.KEYWORD_ONLY, False),
+        ("initial_usage", inspect.Parameter.KEYWORD_ONLY, None),
     ]
 
 

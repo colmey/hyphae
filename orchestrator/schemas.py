@@ -8,11 +8,20 @@ Typed file-config (ModelEntry/ModelsConfig) lives in the config package.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Literal
+from types import MappingProxyType
+from typing import Iterable, Literal, Mapping, Protocol
 
 from pydantic import BaseModel, Field, field_validator
 
 from tooling import NAMESPACE_SEP
+from llm.schemas import CompletionUsage
+
+
+class _ToolPreferenceInput(Protocol):
+    """The direct-caller preference shape accepted by ``from_request``."""
+
+    name: str
+    tools: Mapping[str, Iterable[str] | None] | None
 
 
 class OrchestrationProposal(BaseModel):
@@ -51,36 +60,54 @@ class OrchestrationProposal(BaseModel):
         return "medium"
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class OrchestrationDecision:
-    """Orchestrator output plus fallback metadata."""
+    """Orchestrator output plus safe fallback and control-call telemetry."""
 
     result: OrchestrationProposal
     fallback_used: bool = False
     fallback_reason: str | None = None
+    corrections: tuple[str, ...] = ()
+    usage: CompletionUsage = field(default_factory=CompletionUsage)
+    latency_ms: float = 0.0
+    control_model_id: str = ""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ToolPreferences:
     """Normalized caller hints about which tools to prioritize.
 
     This is a soft hint, not a filter; other tools remain available.
     """
 
-    preferred_tools: list[str] = field(default_factory=list)
-    tool_arg_hints: dict[str, list[str]] = field(default_factory=dict)
+    preferred_tools: tuple[str, ...] = ()
+    tool_arg_hints: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "preferred_tools", tuple(self.preferred_tools))
+        object.__setattr__(
+            self,
+            "tool_arg_hints",
+            MappingProxyType(
+                {name: tuple(args) for name, args in self.tool_arg_hints.items()}
+            ),
+        )
 
     def __bool__(self) -> bool:
         return bool(self.preferred_tools)
 
     @classmethod
-    def from_request(cls, prefs: Iterable[Any]) -> "ToolPreferences":
+    def from_request(
+        cls, prefs: Iterable[_ToolPreferenceInput] | None
+    ) -> "ToolPreferences":
         """Normalize direct-caller server preferences into namespaced tools."""
         preferred: list[str] = []
-        arg_hints: dict[str, list[str]] = {}
-        for server in prefs or []:
+        arg_hints: dict[str, tuple[str, ...]] = {}
+        for server in prefs or ():
             for tool_name, args in (server.tools or {}).items():
                 namespaced = f"{server.name}{NAMESPACE_SEP}{tool_name}"
                 preferred.append(namespaced)
-                arg_hints[namespaced] = list(args or [])
-        return cls(preferred_tools=preferred, tool_arg_hints=arg_hints)
+                arg_hints[namespaced] = tuple(args or ())
+        return cls(preferred_tools=tuple(preferred), tool_arg_hints=arg_hints)

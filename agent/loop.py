@@ -142,6 +142,7 @@ class _AgentRun:
         context: RunContext | None = None,
         policy: ToolPolicy | None = None,
         stream: bool = False,
+        initial_usage: CompletionUsage | None = None,
     ) -> "_AgentRun":
         """Resolve defaults and construct exactly one run-scoped dispatcher."""
         resolved_limits = limits or RunLimits()
@@ -170,6 +171,7 @@ class _AgentRun:
             context=resolved_context,
             stream=stream,
             tool_dispatcher=dispatcher,
+            cumulative_usage=initial_usage or CompletionUsage(),
         )
 
     def _done(self, reason: str) -> DoneEvent:
@@ -850,6 +852,7 @@ async def run_agent(
     context: RunContext | None = None,
     policy: ToolPolicy | None = None,
     stream: bool = False,
+    initial_usage: CompletionUsage | None = None,
 ) -> AsyncGenerator[Event, None]:
     """Drive a conversation to completion, yielding events along the way.
 
@@ -858,7 +861,9 @@ async def run_agent(
 
     ``limits`` is immutable policy; ``context`` carries the original turn
     deadline, run identity, and trace sequence. Direct callers may omit them
-    to use defaults, while TurnRunner always supplies both.
+    to use defaults, while TurnRunner always supplies both. ``initial_usage``
+    seeds one already-completed auxiliary operation into terminal totals and
+    preflight token bounds without emitting a second usage event.
     """
     run = _AgentRun.from_inputs(
         session,
@@ -872,6 +877,7 @@ async def run_agent(
         context=context,
         policy=policy,
         stream=stream,
+        initial_usage=initial_usage,
     )
     events = run.events()
     async with aclosing(events):

@@ -31,6 +31,7 @@ from agent import (
 from agent.session import session_history_chars
 from agent.runtime import ModelLimits
 from llm.client import LLMClient
+from llm.schemas import CompletionUsage
 from orchestrator import ModelUnavailableError
 from orchestrator.contracts import ModelRegistry, RoutingService
 from tooling import ToolRuntime, ToolSnapshot
@@ -254,6 +255,15 @@ class TurnRunner:
             model_id=resolved_id,
             tools=[tool.name for tool in selected_tools.tools],
             fallback_used=decision.fallback_used,
+            fallback_reason=decision.fallback_reason,
+            corrections=decision.corrections,
+            control_model_id=decision.control_model_id,
+            input_tokens=decision.usage.input_tokens,
+            output_tokens=decision.usage.output_tokens,
+            total_tokens=decision.usage.total_tokens,
+            thinking_tokens=decision.usage.thinking_tokens,
+            cached_tokens=decision.usage.cached_tokens,
+            latency_ms=decision.latency_ms,
             thinking_level=proposal.thinking_level,
         )
         context.logger.info(
@@ -293,7 +303,18 @@ class TurnRunner:
                 context.elapsed_seconds(),
             )
             yield await context.emit(
-                DoneEvent(reason="deadline_exceeded", iterations=0)
+                DoneEvent(
+                    reason="deadline_exceeded",
+                    iterations=0,
+                    total_tokens=routing.orchestration.total_tokens
+                    if routing.orchestration is not None else 0,
+                    input_tokens=routing.orchestration.input_tokens
+                    if routing.orchestration is not None else 0,
+                    output_tokens=routing.orchestration.output_tokens
+                    if routing.orchestration is not None else 0,
+                    thinking_tokens=routing.orchestration.thinking_tokens
+                    if routing.orchestration is not None else 0,
+                )
             )
             return
 
@@ -316,6 +337,17 @@ class TurnRunner:
             context=context,
             policy=self.policy,
             stream=request.stream,
+            initial_usage=(
+                CompletionUsage(
+                    input_tokens=routing.orchestration.input_tokens,
+                    output_tokens=routing.orchestration.output_tokens,
+                    total_tokens=routing.orchestration.total_tokens,
+                    thinking_tokens=routing.orchestration.thinking_tokens,
+                    cached_tokens=routing.orchestration.cached_tokens,
+                )
+                if routing.orchestration is not None
+                else None
+            ),
         )
         try:
             async for event in agent_events:

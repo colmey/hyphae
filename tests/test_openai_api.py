@@ -124,8 +124,13 @@ class BrokenRegistry:
 
 
 class SelectingOrchestrator:
-    def __init__(self, selected_model_id: str = "selected") -> None:
+    def __init__(
+        self,
+        selected_model_id: str = "selected",
+        usage: CompletionUsage | None = None,
+    ) -> None:
         self.selected_model_id = selected_model_id
+        self.usage = usage or CompletionUsage()
         self.calls = 0
 
     async def decide(
@@ -136,7 +141,9 @@ class SelectingOrchestrator:
             result=OrchestrationProposal(
                 selected_model_id=self.selected_model_id,
                 selected_tools=[],
-            )
+            ),
+            usage=self.usage,
+            control_model_id="control",
         )
 
 
@@ -282,6 +289,30 @@ async def test_non_stream_completion_shape_and_usage(asgi_client) -> None:
         "total_tokens": 14,
     }
     assert llm.complete_calls == 1
+
+
+async def test_non_stream_completion_includes_routing_usage(asgi_client) -> None:
+    selected = FakeLLM()
+    registry = RegistryStub({"selected": selected, "requested": selected})
+    orchestrator = SelectingOrchestrator(
+        usage=CompletionUsage(input_tokens=2, output_tokens=1, total_tokens=3)
+    )
+    with wired_app(
+        selected,
+        registry=registry,
+        orchestrator=orchestrator,
+    ) as (app, _settings):
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "route me"}]},
+        )
+
+    response.raise_for_status()
+    assert response.json()["usage"] == {
+        "prompt_tokens": 13,
+        "completion_tokens": 4,
+        "total_tokens": 17,
+    }
 
 
 @pytest.mark.parametrize("stop_reason", ["content_filter", "refusal"])

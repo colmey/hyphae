@@ -2,9 +2,9 @@
 
 Public API:
   - Orchestrator: the LLM-backed router (call .decide() per request).
-  - LLMRegistry: lazy cache of LLMClient instances keyed by model_id.
+  - LLMRegistry: configured catalog plus structurally-ready LLMClient identities.
   - OrchestrationDecision: per-call return value from Orchestrator.decide()
-                           (wraps result + fallback_used + fallback_reason).
+                           (wraps selection, safe fallback facts, and telemetry).
   - OrchestrationProposal: the structured-output schema the LLM produces.
 
 Config types and loaders (ModelEntry, ModelsConfig, load_models_config,

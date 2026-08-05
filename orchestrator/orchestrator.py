@@ -8,11 +8,13 @@ import asyncio
 import hashlib
 import json
 import logging
+from time import perf_counter
 
 from pydantic import ValidationError
 
 from llm.client import GenerationRequest, LLMClient
-from llm.schemas import Message, Role, TextBlock
+from llm.schemas import CompletionUsage, Message, Role, TextBlock
+from agent.context import estimate_usage_tokens
 from tooling import ToolSnapshot
 
 from .contracts import ModelRegistry
@@ -55,6 +57,7 @@ class Orchestrator:
         """
         decision_log = log or logger
         prompt = self._build_prompt(user_message, tools, preferences, history)
+        started = perf_counter()
 
         try:
             if timeout is not None and timeout <= 0:
@@ -62,16 +65,23 @@ class Orchestrator:
             orch_llm = self._registry.get(self._orch_model_id)
             if timeout is not None:
                 async with asyncio.timeout(timeout):
-                    raw = await self._call_orchestrator_llm(orch_llm, prompt)
+                    raw, usage, latency_ms = await self._call_orchestrator_llm(
+                        orch_llm, prompt
+                    )
             else:
-                raw = await self._call_orchestrator_llm(orch_llm, prompt)
+                raw, usage, latency_ms = await self._call_orchestrator_llm(
+                    orch_llm, prompt
+                )
         except Exception as exc:
             reason = "control_call_failed"
             decision_log.warning(
                 "orchestrator control call failed (%s); using fallback",
                 type(exc).__name__,
             )
-            return self._fallback_decision(reason)
+            return self._fallback_decision(
+                reason,
+                latency_ms=(perf_counter() - started) * 1000,
+            )
 
         try:
             proposal = self._parse_proposal(raw)
@@ -84,14 +94,18 @@ class Orchestrator:
                 len(raw),
                 hashlib.sha256(raw.encode("utf-8")).hexdigest(),
             )
-            return self._fallback_decision(reason)
+            return self._fallback_decision(reason, usage=usage, latency_ms=latency_ms)
 
-        sanitized_proposal = self._sanitize_proposal(
+        sanitized_proposal, corrections = self._sanitize_proposal(
             proposal, tools, preferences, log=decision_log
         )
         return OrchestrationDecision(
             result=sanitized_proposal,
             fallback_used=False,
+            corrections=corrections,
+            usage=usage,
+            latency_ms=latency_ms,
+            control_model_id=self._orch_model_id,
         )
 
     def _build_prompt(
@@ -156,7 +170,7 @@ class Orchestrator:
         for name in preferences.preferred_tools:
             if name not in tools.names:
                 continue
-            args = preferences.tool_arg_hints.get(name) or []
+            args: tuple[str, ...] = preferences.tool_arg_hints.get(name, ())
             if args:
                 lines.append(f"- {name} (intended arguments: {', '.join(args)})")
             else:
@@ -183,20 +197,30 @@ class Orchestrator:
             lines.append(f"- {name}\n    {first_line}")
         return "\n".join(lines)
 
-    async def _call_orchestrator_llm(self, llm: LLMClient, prompt: str) -> str:
-        """Run the LLM call and return raw text; no tools are exposed."""
+    async def _call_orchestrator_llm(
+        self, llm: LLMClient, prompt: str
+    ) -> tuple[str, CompletionUsage, float]:
+        """Return raw text, canonical usage, and elapsed milliseconds; no tools."""
         request = GenerationRequest(
             messages=[Message.user(prompt)],
             system=self._system_prompt,
             response_schema=OrchestrationProposal,
         )
+        started = perf_counter()
         response = await llm.complete(request)
+        latency_ms = (perf_counter() - started) * 1000
 
         parts: list[str] = []
         for block in response.text_blocks():
             if block.text:
                 parts.append(block.text)
-        return "".join(parts).strip()
+        raw = "".join(parts).strip()
+        return raw, estimate_usage_tokens(
+            response.usage,
+            messages=list(request.messages),
+            system=request.system,
+            response=response,
+        ), latency_ms
 
     def _parse_proposal(self, raw: str) -> OrchestrationProposal:
         """Parse raw text into OrchestrationProposal, accepting fenced JSON."""
@@ -220,26 +244,33 @@ class Orchestrator:
         preferences: ToolPreferences | None = None,
         *,
         log: logging.Logger | logging.LoggerAdapter[logging.Logger] = logger,
-    ) -> OrchestrationProposal:
+    ) -> tuple[OrchestrationProposal, tuple[str, ...]]:
         """Coerce the orchestrator's decision to known-valid values.
 
         Unknown models fall back to default; unknown tools are dropped. Valid
         preferred tools are unioned in without marking the decision as fallback.
         """
+        unknown_model = False
+        unknown_tool = False
+        duplicate_tool = False
         known_models = set(self._registry.model_ids)
         if proposal.selected_model_id not in known_models:
-            log.warning("orchestrator selected an unknown model; using default")
             model_id = self._registry.default_id()
+            unknown_model = True
         else:
             model_id = proposal.selected_model_id
 
         known_tools = tools.names
         valid_tools: list[str] = []
+        seen_tools: set[str] = set()
         for t in proposal.selected_tools:
-            if t in known_tools:
-                valid_tools.append(t)
+            if t not in known_tools:
+                unknown_tool = True
+            elif t in seen_tools:
+                duplicate_tool = True
             else:
-                log.warning("orchestrator selected an unknown tool; dropping it")
+                valid_tools.append(t)
+                seen_tools.add(t)
 
         # Keep the caller's valid preferred tools visible.
         if preferences:
@@ -249,13 +280,35 @@ class Orchestrator:
                 elif t not in valid_tools:
                     valid_tools.append(t)
 
+        corrections = tuple(
+            code
+            for code, present in (
+                ("unknown_model_id", unknown_model),
+                ("unknown_tool_id", unknown_tool),
+                ("duplicate_tool_id", duplicate_tool),
+            )
+            if present
+        )
+        if corrections:
+            log.warning(
+                "orchestrator selection corrected (codes=%s count=%d)",
+                ",".join(corrections),
+                len(corrections),
+            )
+
         return OrchestrationProposal(
             selected_model_id=model_id,
             selected_tools=valid_tools,
             thinking_level=proposal.thinking_level,
-        )
+        ), corrections
 
-    def _fallback_decision(self, reason: str) -> OrchestrationDecision:
+    def _fallback_decision(
+        self,
+        reason: str,
+        *,
+        usage: CompletionUsage | None = None,
+        latency_ms: float = 0.0,
+    ) -> OrchestrationDecision:
         """Safe default-model/no-tools decision for orchestration failures."""
         proposal = OrchestrationProposal(
             selected_model_id=self._registry.default_id(),
@@ -265,4 +318,7 @@ class Orchestrator:
             result=proposal,
             fallback_used=True,
             fallback_reason=reason,
+            usage=usage or CompletionUsage(),
+            latency_ms=latency_ms,
+            control_model_id=self._orch_model_id,
         )

@@ -15,7 +15,14 @@ import pytest
 
 import agent.tracing as tracing_module
 from agent import JSONLTracer, RunContext, RunLimits, Session, build_tracer, run_agent
-from agent.events import DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent, UsageEvent
+from agent.events import (
+    DoneEvent,
+    ErrorEvent,
+    OrchestrationDecisionEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    UsageEvent,
+)
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
 from tooling import ToolCallResult
@@ -54,6 +61,34 @@ def test_done_event_trace_shape_is_byte_for_byte_stable(
         "output_tokens": 7,
         "thinking_tokens": 5,
     }
+
+
+def test_orchestration_trace_records_routing_telemetry_once() -> None:
+    record = tracing_module.event_record(
+        OrchestrationDecisionEvent(
+            model_id="agent",
+            tools=["server__tool"],
+            fallback_used=True,
+            fallback_reason="control_call_failed",
+            corrections=("unknown_tool_id",),
+            control_model_id="control",
+            input_tokens=8,
+            output_tokens=3,
+            total_tokens=11,
+            thinking_tokens=1,
+            cached_tokens=2,
+            latency_ms=12.5,
+        ),
+        run_id="routing-run",
+        step=1,
+    )
+
+    assert record["type"] == "orchestration"
+    assert record["control_model_id"] == "control"
+    assert record["fallback_reason"] == "control_call_failed"
+    assert record["corrections"] == ("unknown_tool_id",)
+    assert record["total_tokens"] == 11
+    assert record["latency_ms"] == 12.5
 
 
 class ScriptedLLM(LLMClient):

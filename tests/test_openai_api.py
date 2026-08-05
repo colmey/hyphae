@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
@@ -9,6 +10,7 @@ import pytest
 
 from agent import InMemorySessionStore, Session
 from api import openai_compatible
+from api.request_body import MAX_REQUEST_BODY_BYTES
 from application import OrchestratedRouting, UnorchestratedRouting
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
@@ -145,6 +147,46 @@ class SelectingOrchestrator:
             usage=self.usage,
             control_model_id="control",
         )
+
+
+async def _raw_asgi_post(app, path: str, chunks: list[bytes]) -> int:
+    """Send deliberately split body frames without relying on httpx buffering."""
+    frames = iter(
+        {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": index < len(chunks) - 1,
+        }
+        for index, chunk in enumerate(chunks)
+    )
+    responses: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return next(frames)
+
+    async def send(message: dict[str, object]) -> None:
+        responses.append(message)
+
+    await app(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        },
+        receive,
+        send,
+    )
+    start = next(message for message in responses if message["type"] == "http.response.start")
+    return int(start["status"])
 
 
 def _registry(settings) -> LLMRegistry:
@@ -421,6 +463,73 @@ async def test_empty_messages_returns_openai_error(asgi_client) -> None:
 
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+async def test_openai_body_decode_and_json_failures_do_not_execute(asgi_client) -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, _settings):
+        client = asgi_client(app)
+        invalid_utf8 = await client.post("/v1/chat/completions", content=b"\xff")
+        invalid_json = await client.post("/v1/chat/completions", content=b"{")
+
+    for response in (invalid_utf8, invalid_json):
+        assert response.status_code == 400
+        assert response.json()["error"]["message"] == "request body must be valid JSON"
+    assert llm.complete_calls == llm.stream_calls == 0
+
+
+async def test_openai_keeps_its_existing_content_type_compatibility(asgi_client) -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, _settings):
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            content=b'{"messages":[{"role":"user","content":"hello"}]}',
+            headers={"Content-Type": "text/plain"},
+        )
+
+    assert response.status_code == 200
+    assert llm.complete_calls == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_openai_routes_enforce_body_limit_before_execution(
+    asgi_client, stream: bool
+) -> None:
+    llm = FakeLLM()
+    base = json.dumps(
+        {"messages": [{"role": "user", "content": "hello"}], "stream": stream},
+        separators=(",", ":"),
+    ).encode()
+    padding_prefix = b',"padding":"'
+    exact = (
+        base[:-1]
+        + padding_prefix
+        + b"x" * (MAX_REQUEST_BODY_BYTES - len(base) - len(padding_prefix) - 1)
+        + b'"}'
+    )
+    assert len(exact) == MAX_REQUEST_BODY_BYTES
+    with wired_app(llm) as (app, _settings):
+        client = asgi_client(app)
+        accepted = await client.post("/v1/chat/completions", content=exact)
+        rejected = await client.post("/v1/chat/completions", content=exact + b"x")
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 413
+    assert rejected.json()["error"]["message"] == "request body too large"
+    assert llm.stream_calls + llm.complete_calls == 1
+
+
+async def test_openai_rejects_a_multiframe_over_limit_body_before_execution() -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, _settings):
+        status = await _raw_asgi_post(
+            app,
+            "/v1/chat/completions",
+            [b"{" + b"x" * (MAX_REQUEST_BODY_BYTES - 1), b"x"],
+        )
+
+    assert status == 413
+    assert llm.complete_calls == llm.stream_calls == 0
 
 
 @pytest.mark.parametrize("stream", [False, True])

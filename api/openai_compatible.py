@@ -34,6 +34,7 @@ from .dependencies import (
     require_api_key,
     turn_http_exception,
 )
+from .request_body import read_request_body
 from application import ApplicationRuntime, PersistencePolicy, TurnRequest, TurnRunner
 from llm.schemas import CompletionUsage
 
@@ -483,8 +484,10 @@ async def chat_completions(
     settings = runtime.settings
     runner = runtime.turn_runner()
     try:
-        payload = await request.json()
-    except Exception:
+        payload = json.loads((await read_request_body(request)).decode("utf-8"))
+    except StarletteHTTPException as exc:
+        return _http_error_response(exc)
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return _error_response("request body must be valid JSON")
 
     try:

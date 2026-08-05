@@ -6,6 +6,7 @@ import pytest
 
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import AssistantMessage, TextBlock, CompletionUsage
+from api.request_body import MAX_REQUEST_BODY_BYTES
 from tests._app_support import wired_app
 
 
@@ -103,3 +104,17 @@ async def test_health_remains_open_when_auth_enabled(asgi_client) -> None:
         _settings,
     ):
         assert (await asgi_client(app).get("/health")).status_code == 200
+
+
+@pytest.mark.parametrize("route", ["/chat", "/chat/stream", "/v1/chat/completions"])
+async def test_auth_rejection_precedes_body_materialization(asgi_client, route: str) -> None:
+    with wired_app(FakeLLM(), settings_overrides={"hyphae_api_key": API_KEY}) as (
+        app,
+        _settings,
+    ):
+        response = await asgi_client(app).post(
+            route,
+            content=b"x" * (MAX_REQUEST_BODY_BYTES + 1),
+        )
+
+    assert response.status_code == 401

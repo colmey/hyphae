@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from starlette.requests import ClientDisconnect
 
 from agent import DoneEvent, ErrorEvent, Session, SessionBusyError, TextEvent
 from api.openai_compatible import (
@@ -83,8 +84,18 @@ class _HTTPErrorRunner(_RunRunner):
 
 
 class _Request:
-    async def json(self):
-        return {"messages": [{"role": "user", "content": "hello"}]}
+    headers: dict[str, str] = {}
+
+    async def stream(self):
+        yield b'{"messages":[{"role":"user","content":"hello"}]}'
+
+
+class _DisconnectingRequest:
+    headers: dict[str, str] = {}
+
+    async def stream(self):
+        raise ClientDisconnect()
+        yield b""
 
 
 def _collect_stream(runner: _EventsRunner) -> list[dict]:
@@ -271,3 +282,13 @@ def test_nonstream_http_exception_preserves_status_and_openai_envelope() -> None
             "code": None,
         }
     }
+
+
+def test_openai_endpoint_propagates_client_disconnect() -> None:
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(
+            chat_completions(
+                _DisconnectingRequest(),
+                runtime=_runtime(_RunRunner("end_turn")),
+            )
+        )

@@ -26,6 +26,7 @@ from .dependencies import (
     require_api_key,
     turn_http_exception,
 )
+from .request_body import read_request_body
 from .schemas import HealthResponse, MCPServerHealth
 from application import (
     ApplicationRuntime,
@@ -42,7 +43,13 @@ type _SSEFrame = dict[str, str]
 
 async def _prompt_from_body(request: Request) -> str:
     """Read the native plain-text prompt body, rejecting empty requests."""
-    prompt = (await request.body()).decode("utf-8").strip()
+    content_type = request.headers.get("content-type")
+    if content_type is not None and content_type.split(";", 1)[0].strip().lower() != "text/plain":
+        raise HTTPException(status_code=415, detail="content type must be text/plain")
+    try:
+        prompt = (await read_request_body(request)).decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="request body must be valid UTF-8") from exc
     if not prompt:
         raise HTTPException(
             status_code=400, detail="empty body; send the prompt as plain text"

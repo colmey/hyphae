@@ -57,6 +57,7 @@ strict = true
 files = [
     "agent",
     "api",
+    "application",
     "config",
     "llm",
     "mcp_runtime",

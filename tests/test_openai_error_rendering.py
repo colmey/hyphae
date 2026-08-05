@@ -8,23 +8,23 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 
-from agent import DoneEvent, ErrorEvent, Session, TextEvent
+from agent import DoneEvent, ErrorEvent, Session, SessionBusyError, TextEvent
 from api.openai_compatible import (
     _FINISH_REASONS,
     _finish_reason,
     _stream_chat_completion,
     chat_completions,
 )
-from api.schemas import TokenUsage
-from api.turn import (
+from application import (
+    InvalidModelError,
     PersistencePolicy,
     TurnExecution,
     TurnMetadata,
     TurnRequest,
     TurnResult,
 )
+from llm.schemas import CompletionUsage
 
 
 class _EventsRunner:
@@ -55,13 +55,13 @@ class _RunRunner:
 
     def validate_model_id(self, model_id: str | None) -> None:
         if model_id is not None and model_id not in self.available_model_ids():
-            raise HTTPException(status_code=400, detail="invalid model")
+            raise InvalidModelError(model_id, self.available_model_ids())
 
     async def run(self, _turn):
         return TurnResult(
             answer="partial answer",
             done_reason=self.done_reason,
-            usage=TokenUsage(total_tokens=3),
+            usage=CompletionUsage(total_tokens=3),
             metadata=TurnMetadata(run_id="test-run", model_id="test-model"),
         )
 
@@ -79,7 +79,7 @@ def _runtime(runner):
 
 class _HTTPErrorRunner(_RunRunner):
     async def run(self, _turn):
-        raise HTTPException(status_code=409, detail="turn is busy")
+        raise SessionBusyError("test-session")
 
 
 class _Request:
@@ -265,7 +265,7 @@ def test_nonstream_http_exception_preserves_status_and_openai_envelope() -> None
     assert response.status_code == 409
     assert json.loads(response.body) == {
         "error": {
-            "message": "turn is busy",
+            "message": "session 'test-session' is processing another request",
             "type": "invalid_request_error",
             "param": None,
             "code": None,

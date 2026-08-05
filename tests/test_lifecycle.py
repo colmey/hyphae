@@ -17,7 +17,7 @@ from openai import AsyncOpenAI, AsyncStream
 
 import main as main_module
 import orchestrator.registry as registry_module
-from api.turn import OrchestratedRouting
+from application import OrchestratedRouting
 from config import (
     ConfigLoadError,
     ConfigValidationError,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import inspect
 import json
 import logging
@@ -10,35 +11,45 @@ import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
 import pytest
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 
 import api.schemas as api_schemas
 import api.dependencies as api_dependencies
 import main as main_module
 from agent import (
     DoneEvent,
+    ErrorEvent,
+    Event,
     InMemorySessionStore,
     OrchestrationDecisionEvent,
     RunLimits,
     Session,
+    SessionBusyError,
     SessionGuard,
     Tracer,
     ToolPolicy,
+    TextEvent,
 )
 from api.dependencies import get_application_runtime
 from agent.runtime import ModelLimits
 from api.schemas import TokenUsage
-from api.turn import (
+from application import (
+    ExecutionProtocolError,
+    InvalidModelError,
     OrchestratedRouting,
     PersistencePolicy,
+    RuntimeConfigurationError,
     TurnRequest,
     TurnRunner,
+    TurnMetadata,
     UnorchestratedRouting,
 )
+from application.turn import _collect
 from config import Settings
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
@@ -278,11 +289,10 @@ async def test_busy_session_rejects_before_inventory_or_routing() -> None:
     session = await runner.store.create()
 
     async with runner.open(TurnRequest("first", session, PersistencePolicy.PERSISTENT)):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(SessionBusyError):
             await runner.run(
                 TurnRequest("second", session, PersistencePolicy.PERSISTENT)
             )
-        assert exc_info.value.status_code == 409
 
     assert orchestrator.calls == 1
     assert mcp.inventory_reads == 1
@@ -928,7 +938,7 @@ async def test_explicit_unknown_model_is_rejected_before_turn_setup() -> None:
         registry=RegistryStub(agent),
     )
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(InvalidModelError) as exc_info:
         await runner.run(
             TurnRequest(
                 "hello",
@@ -938,7 +948,7 @@ async def test_explicit_unknown_model_is_rejected_before_turn_setup() -> None:
             )
         )
 
-    assert exc_info.value.status_code == 400
+    assert exc_info.value.code == "invalid_model"
     assert mcp.inventory_reads == 0
     assert orchestrator.calls == 0
     assert agent.calls == 0
@@ -990,6 +1000,70 @@ def test_fixed_unorchestrated_routing_advertises_only_executable_default() -> No
     )
 
     assert fixed.available_model_ids() == ["agent"]
+
+
+def test_routing_construction_accepts_only_complete_runtime_forms() -> None:
+    llm = AnswerLLM()
+    registry = RegistryStub(llm)
+
+    direct = UnorchestratedRouting(llm=llm, model_id="agent")
+    assert direct.inventory is None
+
+    with pytest.raises(RuntimeConfigurationError, match="executable client"):
+        UnorchestratedRouting(  # type: ignore[arg-type]
+            llm=None, model_id="agent"
+        )
+    with pytest.raises(RuntimeConfigurationError, match="fixed degraded"):
+        UnorchestratedRouting(llm=llm, model_id="agent", inventory=registry)
+    with pytest.raises(RuntimeConfigurationError, match="fixed degraded"):
+        UnorchestratedRouting(
+            llm=llm,
+            model_id="agent",
+            inventory=registry,
+            advertised_model_ids=("other",),
+        )
+    fixed = UnorchestratedRouting(
+        llm=llm,
+        model_id="agent",
+        inventory=registry,
+        advertised_model_ids=("agent",),
+    )
+    assert fixed.advertised_model_ids == ("agent",)
+
+    with pytest.raises(RuntimeConfigurationError, match="both orchestrator and registry"):
+        OrchestratedRouting(  # type: ignore[arg-type]
+            orchestrator=None,
+            registry=registry,
+            agent_system_prompt="trusted",
+        )
+    with pytest.raises(RuntimeConfigurationError, match="both orchestrator and registry"):
+        OrchestratedRouting(  # type: ignore[arg-type]
+            orchestrator=FakeOrchestrator(),
+            registry=None,
+            agent_system_prompt="trusted",
+        )
+
+
+def test_application_production_import_boundary_and_removed_api_turn() -> None:
+    root = Path(__file__).parents[1]
+    application_dir = root / "application"
+    forbidden = {"fastapi", "starlette", "sse_starlette", "api.schemas", "api.turn"}
+
+    for path in application_dir.glob("*.py"):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported = {name.name for name in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported = {node.module}
+            else:
+                continue
+            assert not any(
+                name == blocked or name.startswith(f"{blocked}.")
+                for name in imported
+                for blocked in forbidden
+            ), path
+    assert not (root / "api" / "turn.py").exists()
 
 
 async def test_ephemeral_turn_does_not_publish_session_to_store() -> None:
@@ -1079,3 +1153,32 @@ def test_token_usage_conversion_preserves_every_done_field() -> None:
 
 def test_obsolete_orchestration_schema_is_removed() -> None:
     assert not hasattr(api_schemas, "OrchestrationInfo")
+
+
+async def test_buffered_collection_requires_one_final_done_event() -> None:
+    metadata = TurnMetadata(run_id="run", model_id="model")
+
+    async def events(*items: Event) -> AsyncIterator[Event]:
+        for item in items:
+            yield item
+
+    for items in (
+        (TextEvent("partial"),),
+        (DoneEvent("end_turn", 1), DoneEvent("end_turn", 1)),
+        (DoneEvent("end_turn", 1), TextEvent("late")),
+    ):
+        with pytest.raises(ExecutionProtocolError):
+            await _collect(events(*items), metadata)
+
+
+async def test_buffered_collection_allows_error_before_final_done_event() -> None:
+    metadata = TurnMetadata(run_id="run", model_id="model")
+
+    async def events() -> AsyncIterator[Event]:
+        yield ErrorEvent("provider failed")
+        yield DoneEvent("llm_error", 0, total_tokens=3)
+
+    result = await _collect(events(), metadata)
+
+    assert result.done_reason == "llm_error"
+    assert result.usage == CompletionUsage(total_tokens=3)

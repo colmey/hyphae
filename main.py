@@ -20,9 +20,9 @@ from agent import (
     build_tracer,
 )
 from api import router
-from api.dependencies import ApplicationRuntime
+from application import ApplicationRuntime
 from api.openai_compatible import openai_auth_exception_handler
-from api.turn import OrchestratedRouting, RoutingRuntime, UnorchestratedRouting
+from application import OrchestratedRouting, RoutingRuntime, UnorchestratedRouting
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from llm import LLMClient, build_llm_client
 from mcp_runtime import MCPManager
@@ -288,6 +288,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
         if routing is None:
+            assert unorchestrated_llm is not None
             routing = UnorchestratedRouting(
                 llm=unorchestrated_llm,
                 model_id=settings.llm.model,

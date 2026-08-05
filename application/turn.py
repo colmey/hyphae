@@ -1,4 +1,4 @@
-"""Guarded turn execution shared by native and OpenAI-compatible routes."""
+"""Framework-neutral execution of one accepted user turn."""
 
 from __future__ import annotations
 
@@ -7,9 +7,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, AsyncContextManager, Protocol
-
-from fastapi import HTTPException
+from typing import Any, AsyncContextManager, Protocol, runtime_checkable
 
 from agent import (
     DoneEvent,
@@ -18,7 +16,6 @@ from agent import (
     RunContext,
     RunLimits,
     Session,
-    SessionBusyError,
     SessionGuard,
     SessionHistoryLimitExceeded,
     SessionStore,
@@ -32,11 +29,12 @@ from agent.session import session_history_chars
 from agent.runtime import ModelLimits
 from llm.client import LLMClient
 from llm.schemas import CompletionUsage
+from mcp_runtime import MCPServerStatus, Tool
 from orchestrator import ModelUnavailableError
 from orchestrator.contracts import ModelRegistry, RoutingService
 from tooling import ToolRuntime, ToolSnapshot
 
-from .schemas import TokenUsage
+from config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +44,41 @@ class PersistencePolicy(Enum):
 
     PERSISTENT = "persistent"
     EPHEMERAL = "ephemeral"
+
+
+class InvalidModelError(ValueError):
+    """An explicit model ID is not executable in this runtime."""
+
+    code = "invalid_model"
+
+    def __init__(self, model_id: str, available_model_ids: list[str]) -> None:
+        self.model_id = model_id
+        self.available_model_ids = tuple(available_model_ids)
+        super().__init__(
+            f"invalid model {model_id!r}; available model IDs: "
+            f"{', '.join(available_model_ids)}"
+        )
+
+
+class ModelInventoryError(RuntimeError):
+    """The runtime cannot safely read its executable model inventory."""
+
+    code = "model_inventory_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("model inventory unavailable")
+
+
+class ExecutionProtocolError(RuntimeError):
+    """A buffered event sequence did not contain one final terminal event."""
+
+    code = "execution_protocol_error"
+
+
+class RuntimeConfigurationError(RuntimeError):
+    """Application composition contains an impossible routing arrangement."""
+
+    code = "runtime_configuration_error"
 
 
 @dataclass(frozen=True)
@@ -87,7 +120,7 @@ class TurnResult:
 
     answer: str
     done_reason: str
-    usage: TokenUsage
+    usage: CompletionUsage
     metadata: TurnMetadata
 
 
@@ -95,10 +128,24 @@ class TurnResult:
 class UnorchestratedRouting:
     """Fixed client and model used when no routing service is active."""
 
-    llm: LLMClient | None
+    llm: LLMClient
     model_id: str
     inventory: ModelRegistry | None = None
     advertised_model_ids: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.llm is None:
+            raise RuntimeConfigurationError("direct routing requires an executable client")
+        if self.inventory is None:
+            if self.advertised_model_ids is not None:
+                raise RuntimeConfigurationError(
+                    "direct routing cannot advertise a separate inventory"
+                )
+            return
+        if self.advertised_model_ids != (self.model_id,):
+            raise RuntimeConfigurationError(
+                "fixed degraded routing must advertise only its executable default"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +155,12 @@ class OrchestratedRouting:
     orchestrator: RoutingService
     registry: ModelRegistry
     agent_system_prompt: str
+
+    def __post_init__(self) -> None:
+        if self.orchestrator is None or self.registry is None:
+            raise RuntimeConfigurationError(
+                "orchestrated routing requires both orchestrator and registry"
+            )
 
 
 type RoutingRuntime = UnorchestratedRouting | OrchestratedRouting
@@ -123,6 +176,43 @@ class TurnToolProvider(Protocol):
     ) -> AsyncContextManager[ToolRuntime]: ...
 
 
+@runtime_checkable
+class ApplicationMCP(TurnToolProvider, Protocol):
+    """Turn ownership plus the HTTP health/catalog views of one MCP owner."""
+
+    @property
+    def connected_servers(self) -> list[str]: ...
+
+    def status_snapshot(self) -> tuple[MCPServerStatus, ...]: ...
+
+    def list_tools(self) -> list[tuple[str, Tool]]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationRuntime:
+    """Process-lifetime composition from which requests derive a TurnRunner."""
+
+    settings: Settings
+    routing: RoutingRuntime
+    limits: RunLimits
+    mcp: ApplicationMCP
+    store: SessionStore
+    guard: SessionGuard
+    policy: ToolPolicy | None
+    tracer: Tracer | None
+
+    def turn_runner(self) -> "TurnRunner":
+        return TurnRunner(
+            routing=self.routing,
+            limits=self.limits,
+            mcp=self.mcp,
+            store=self.store,
+            guard=self.guard,
+            policy=self.policy,
+            tracer=self.tracer,
+        )
+
+
 @dataclass(frozen=True)
 class _ResolvedRouting:
     llm: LLMClient
@@ -136,18 +226,25 @@ class _ResolvedRouting:
 
 async def _collect(events: AsyncIterator[Event], metadata: TurnMetadata) -> TurnResult:
     text_parts: list[str] = []
-    done_reason = "unknown"
-    usage = TokenUsage()
+    terminal: DoneEvent | None = None
     async for event in events:
+        if terminal is not None:
+            raise ExecutionProtocolError("event received after terminal event")
         if isinstance(event, TextEvent):
             text_parts.append(event.text)
         elif isinstance(event, DoneEvent):
-            done_reason = event.reason
-            usage = TokenUsage.from_done_event(event)
+            terminal = event
+    if terminal is None:
+        raise ExecutionProtocolError("event stream ended without a terminal event")
     return TurnResult(
         answer="".join(text_parts).strip(),
-        done_reason=done_reason,
-        usage=usage,
+        done_reason=terminal.reason,
+        usage=CompletionUsage(
+            input_tokens=terminal.input_tokens,
+            output_tokens=terminal.output_tokens,
+            total_tokens=terminal.total_tokens,
+            thinking_tokens=terminal.thinking_tokens,
+        ),
         metadata=metadata,
     )
 
@@ -171,15 +268,10 @@ class TurnRunner:
                 return self.routing.registry.model_ids
             if self.routing.advertised_model_ids is not None:
                 return list(self.routing.advertised_model_ids)
-            if self.routing.inventory is not None:
-                return self.routing.inventory.model_ids
             return [self.routing.model_id]
         except Exception as exc:
             logger.exception("failed to read model inventory")
-            raise HTTPException(
-                status_code=500,
-                detail="model inventory unavailable",
-            ) from exc
+            raise ModelInventoryError() from exc
 
     def validate_model_id(self, model_id: str | None) -> None:
         """Reject an explicit model ID that this runner cannot execute."""
@@ -194,13 +286,7 @@ class TurnRunner:
             )
             if registry is not None and registry.is_configured(model_id):
                 raise ModelUnavailableError(model_id)
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"invalid model {model_id!r}; available model IDs: "
-                    f"{', '.join(available)}"
-                ),
-            )
+            raise InvalidModelError(model_id, available)
 
     async def _resolve_routing(
         self,
@@ -209,8 +295,6 @@ class TurnRunner:
         context: RunContext,
     ) -> _ResolvedRouting:
         if isinstance(self.routing, UnorchestratedRouting):
-            if self.routing.llm is None:
-                raise RuntimeError("unorchestrated LLM client is unavailable")
             context.logger.info("chat: unorchestrated mode, tools=%d", len(tools.tools))
             return _ResolvedRouting(
                 llm=self.routing.llm,
@@ -240,10 +324,7 @@ class TurnRunner:
             resolved_id, selected_llm = self.routing.registry.get_or_default(
                 proposal.selected_model_id
             )
-        try:
-            model_entry = self.routing.registry.get_entry(resolved_id)
-        except (AttributeError, KeyError):
-            model_entry = None
+        model_entry = self.routing.registry.get_entry(resolved_id)
 
         selected_tools = tools.select(proposal.selected_tools)
         system_prompt = (
@@ -367,70 +448,54 @@ class TurnRunner:
     async def open(self, request: TurnRequest) -> AsyncIterator[TurnExecution]:
         """Claim a session and hold it through routing, iteration, and cleanup."""
         self.validate_model_id(request.model_id)
-        try:
-            async with self.guard.claim(request.session.session_id):
-                context = RunContext.start(
-                    max_run_seconds=self.limits.max_run_seconds,
-                    base_logger=logger,
-                    tracer=self.tracer,
-                )
-                if request.persistence is PersistencePolicy.PERSISTENT:
-                    source_session = await self.store.get(request.session.session_id)
-                    prospective = source_session.staged_copy()
-                    prospective.append_user(request.prompt)
-                    if (
-                        session_history_chars(prospective.messages)
-                        > self.store.session_history_max_chars
-                    ):
-                        raise SessionHistoryLimitExceeded
-                elif request.persistence is PersistencePolicy.EPHEMERAL:
-                    source_session = request.session
-                else:  # Defensive against future enum members.
-                    raise ValueError(
-                        f"unsupported persistence policy: {request.persistence!r}"
-                    )
-                async with self.mcp.open_turn(
-                    timeout_seconds=context.remaining_seconds()
-                ) as tool_runtime:
-                    tool_snapshot = ToolSnapshot.from_llm_tools(
-                        tool_runtime.get_tools_for_llm()
-                    )
-                    policy = self.policy or ToolPolicy()
-                    visible_tools = ToolSnapshot(
-                        tool
-                        for tool in tool_snapshot.tools
-                        if policy.check(tool.name).verdict is PolicyVerdict.ALLOW
-                    )
-                    staged_request = replace(
-                        request,
-                        session=source_session.staged_copy(),
-                    )
-                    routing = await self._resolve_routing(
-                        staged_request, visible_tools, context
-                    )
-                    limits = self.limits.for_model(routing.model_entry)
-                    metadata = TurnMetadata(
-                        run_id=context.run_id,
-                        model_id=routing.model_id,
-                        orchestration=routing.orchestration,
-                    )
-                    events = self._events(
-                        request=staged_request,
-                        routing=routing,
-                        limits=limits,
-                        context=context,
-                        tool_runtime=tool_runtime,
-                    )
-                    try:
-                        yield TurnExecution(metadata=metadata, events=events)
-                    finally:
-                        await events.aclose()
-        except SessionBusyError:
-            raise HTTPException(
-                status_code=409,
-                detail=f"session {request.session.session_id!r} is processing another request",
+        async with self.guard.claim(request.session.session_id):
+            context = RunContext.start(
+                max_run_seconds=self.limits.max_run_seconds,
+                base_logger=logger,
+                tracer=self.tracer,
             )
-
+            if request.persistence is PersistencePolicy.PERSISTENT:
+                source_session = await self.store.get(request.session.session_id)
+                prospective = source_session.staged_copy()
+                prospective.append_user(request.prompt)
+                if (
+                    session_history_chars(prospective.messages)
+                    > self.store.session_history_max_chars
+                ):
+                    raise SessionHistoryLimitExceeded
+            elif request.persistence is PersistencePolicy.EPHEMERAL:
+                source_session = request.session
+            else:  # Defensive against future enum members.
+                raise ValueError(f"unsupported persistence policy: {request.persistence!r}")
+            async with self.mcp.open_turn(
+                timeout_seconds=context.remaining_seconds()
+            ) as tool_runtime:
+                tool_snapshot = ToolSnapshot.from_llm_tools(tool_runtime.get_tools_for_llm())
+                policy = self.policy or ToolPolicy()
+                visible_tools = ToolSnapshot(
+                    tool
+                    for tool in tool_snapshot.tools
+                    if policy.check(tool.name).verdict is PolicyVerdict.ALLOW
+                )
+                staged_request = replace(request, session=source_session.staged_copy())
+                routing = await self._resolve_routing(staged_request, visible_tools, context)
+                limits = self.limits.for_model(routing.model_entry)
+                metadata = TurnMetadata(
+                    run_id=context.run_id,
+                    model_id=routing.model_id,
+                    orchestration=routing.orchestration,
+                )
+                events = self._events(
+                    request=staged_request,
+                    routing=routing,
+                    limits=limits,
+                    context=context,
+                    tool_runtime=tool_runtime,
+                )
+                try:
+                    yield TurnExecution(metadata=metadata, events=events)
+                finally:
+                    await events.aclose()
     async def run(self, request: TurnRequest) -> TurnResult:
         """Buffer one turn while preserving the same guarded execution envelope."""
         async with self.open(request) as execution:

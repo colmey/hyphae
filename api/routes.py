@@ -21,12 +21,18 @@ from agent.tracing import event_record
 from mcp_runtime import MCPServerState
 
 from .dependencies import (
-    ApplicationRuntime,
     get_application_runtime,
     require_api_key,
+    turn_http_exception,
 )
 from .schemas import HealthResponse, MCPServerHealth
-from .turn import OrchestratedRouting, PersistencePolicy, TurnRequest, TurnRunner
+from application import (
+    ApplicationRuntime,
+    OrchestratedRouting,
+    PersistencePolicy,
+    TurnRequest,
+    TurnRunner,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -111,13 +117,19 @@ async def chat(
     runner = runtime.turn_runner()
     session = await _session_from_header(request, runner)
 
-    result = await runner.run(
-        TurnRequest(
-            prompt=prompt,
-            session=session,
-            persistence=PersistencePolicy.PERSISTENT,
+    try:
+        result = await runner.run(
+            TurnRequest(
+                prompt=prompt,
+                session=session,
+                persistence=PersistencePolicy.PERSISTENT,
+            )
         )
-    )
+    except Exception as exc:
+        mapped = turn_http_exception(exc)
+        if mapped is None:
+            raise
+        raise mapped from exc
     return PlainTextResponse(
         result.answer,
         headers={
@@ -163,11 +175,17 @@ async def chat_stream(
                             )
                         )
                     }
-        except HTTPException as exc:
-            # The stream is already 200, so send guard failures as error frames.
-            yield {"data": json.dumps({"type": "error", "message": str(exc.detail)})}
-        except Exception as exc:  # noqa: BLE001 - stream is open; surface, don't crash.
-            logger.exception("error during /chat/stream")
-            yield {"data": json.dumps({"type": "error", "message": str(exc)})}
+        except Exception as exc:
+            mapped = turn_http_exception(exc)
+            if mapped is not None:
+                # The stream is already 200, so send mapped failures as error frames.
+                yield {
+                    "data": json.dumps(
+                        {"type": "error", "message": str(mapped.detail)}
+                    )
+                }
+            else:
+                logger.exception("error during /chat/stream")
+                yield {"data": json.dumps({"type": "error", "message": str(exc)})}
 
     return EventSourceResponse(_events(), headers={"X-Session-Id": session.session_id})

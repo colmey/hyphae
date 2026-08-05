@@ -16,8 +16,13 @@ from agent import (
     SessionStore,
     Tracer,
 )
-from api.dependencies import ApplicationMCP, ApplicationRuntime
-from api.turn import OrchestratedRouting, RoutingRuntime, UnorchestratedRouting
+from application import (
+    ApplicationMCP,
+    ApplicationRuntime,
+    OrchestratedRouting,
+    RoutingRuntime,
+    UnorchestratedRouting,
+)
 from config import Settings
 from llm.client import LLMClient
 from mcp_runtime import MCPServerStatus, Tool
@@ -74,7 +79,7 @@ class _StaticApplicationMCP:
 
 @contextmanager
 def wired_app(
-    llm: LLMClient | None,
+    llm: LLMClient,
     *,
     mcp: ApplicationMCP | ToolRuntime | None = None,
     registry: ModelRegistry | None = None,
@@ -109,7 +114,6 @@ def wired_app(
         else UnorchestratedRouting(
             llm=llm,
             model_id=settings.llm.model,
-            inventory=registry,
         )
     )
     app.state.runtime = ApplicationRuntime(

@@ -3,54 +3,16 @@
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
-
 from fastapi import Depends, HTTPException, Request
 
-from agent import RunLimits, SessionGuard, SessionStore, ToolPolicy, Tracer
-from config import Settings
-from mcp_runtime import MCPServerStatus, Tool
-
-from .turn import RoutingRuntime, TurnRunner, TurnToolProvider
-
-
-@runtime_checkable
-class ApplicationMCP(TurnToolProvider, Protocol):
-    """MCP turn ownership and health views consumed by the HTTP application."""
-
-    @property
-    def connected_servers(self) -> list[str]: ...
-
-    def status_snapshot(self) -> tuple[MCPServerStatus, ...]: ...
-
-    def list_tools(self) -> list[tuple[str, Tool]]: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ApplicationRuntime:
-    """Process-owned dependencies published atomically to the HTTP application."""
-
-    settings: Settings
-    routing: RoutingRuntime
-    limits: RunLimits
-    mcp: ApplicationMCP
-    store: SessionStore
-    guard: SessionGuard
-    policy: ToolPolicy | None
-    tracer: Tracer | None
-
-    def turn_runner(self) -> TurnRunner:
-        """Derive one coherent accepted-turn owner from this composition."""
-        return TurnRunner(
-            routing=self.routing,
-            limits=self.limits,
-            mcp=self.mcp,
-            store=self.store,
-            guard=self.guard,
-            policy=self.policy,
-            tracer=self.tracer,
-        )
+from agent import SessionBusyError
+from application import (
+    ApplicationRuntime,
+    ExecutionProtocolError,
+    InvalidModelError,
+    ModelInventoryError,
+    RuntimeConfigurationError,
+)
 
 
 async def get_application_runtime(request: Request) -> ApplicationRuntime:
@@ -59,6 +21,22 @@ async def get_application_runtime(request: Request) -> ApplicationRuntime:
     if not isinstance(runtime, ApplicationRuntime):
         raise RuntimeError("application runtime is unavailable")
     return runtime
+
+
+def turn_http_exception(exc: Exception) -> HTTPException | None:
+    """Map the small set of application errors owned by the HTTP adapter."""
+    if isinstance(exc, InvalidModelError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, ModelInventoryError):
+        return HTTPException(status_code=500, detail=str(exc))
+    if isinstance(exc, SessionBusyError):
+        return HTTPException(
+            status_code=409,
+            detail=f"session {exc.args[0]!r} is processing another request",
+        )
+    if isinstance(exc, (ExecutionProtocolError, RuntimeConfigurationError)):
+        return HTTPException(status_code=500, detail=str(exc))
+    return None
 
 
 def _presented_api_key(request: Request) -> str | None:

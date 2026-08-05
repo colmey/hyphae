@@ -30,12 +30,12 @@ from agent import (
     ToolResultEvent,
 )
 from .dependencies import (
-    ApplicationRuntime,
     get_application_runtime,
     require_api_key,
+    turn_http_exception,
 )
-from .schemas import TokenUsage
-from .turn import PersistencePolicy, TurnRequest, TurnRunner
+from application import ApplicationRuntime, PersistencePolicy, TurnRequest, TurnRunner
+from llm.schemas import CompletionUsage
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -286,7 +286,7 @@ async def openai_auth_exception_handler(request: Request, exc: Exception) -> Res
 
 
 def _completion_body(
-    answer: str, model: str, usage: TokenUsage, done_reason: str
+    answer: str, model: str, usage: CompletionUsage, done_reason: str
 ) -> _OpenAIPayload:
     return {
         "id": _completion_id(),
@@ -497,8 +497,11 @@ async def chat_completions(
 
     try:
         runner.validate_model_id(req.model)
-    except StarletteHTTPException as exc:
-        return _http_error_response(exc)
+    except Exception as exc:
+        mapped = turn_http_exception(exc)
+        if mapped is None:
+            raise
+        return _http_error_response(mapped)
 
     try:
         prepared = _prepare_chat_request(req.messages)
@@ -535,11 +538,12 @@ async def chat_completions(
 
     try:
         result = await runner.run(turn)
-    except StarletteHTTPException as exc:
-        return _http_error_response(exc)
-    except Exception as e:  # noqa: BLE001 -- never leak a stack trace to the client.
+    except Exception as exc:
+        mapped = turn_http_exception(exc)
+        if mapped is not None:
+            return _http_error_response(mapped)
         logger.exception("error handling /v1/chat/completions")
-        return _error_response(str(e), status=500, err_type="server_error")
+        return _error_response(str(exc), status=500, err_type="server_error")
 
     try:
         _finish_reason(result.done_reason)
@@ -567,8 +571,11 @@ async def list_models(
     runner = runtime.turn_runner()
     try:
         ids = runner.available_model_ids()
-    except StarletteHTTPException as exc:
-        return _http_error_response(exc)
+    except Exception as exc:
+        mapped = turn_http_exception(exc)
+        if mapped is None:
+            raise
+        return _http_error_response(mapped)
     created = int(time.time())
     data = [
         {"id": mid, "object": "model", "created": created, "owned_by": "hyphae"}

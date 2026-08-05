@@ -9,7 +9,7 @@ import pytest
 
 from agent import InMemorySessionStore, Session
 from api import openai_compatible
-from api.turn import UnorchestratedRouting
+from application import OrchestratedRouting, UnorchestratedRouting
 from llm.client import GenerationRequest, LLMClient
 from llm.schemas import (
     AssistantMessage,
@@ -159,10 +159,10 @@ async def test_models_returns_registry_in_openai_list_shape(asgi_client) -> None
             registry._clients[model_id] = llm
         replace_routing(
             app,
-            UnorchestratedRouting(
-                llm=llm,
-                model_id=settings.llm.model,
-                inventory=registry,
+            OrchestratedRouting(
+                orchestrator=SelectingOrchestrator(),
+                registry=registry,
+                agent_system_prompt="trusted agent system",
             ),
         )
         response = await asgi_client(app).get("/v1/models")
@@ -237,7 +237,9 @@ async def test_direct_health_remains_unorchestrated_without_model_inventory(
 
 @pytest.mark.parametrize("path", ["/v1/models", "/v1/chat/completions"])
 async def test_model_inventory_failure_is_sanitized(asgi_client, path: str) -> None:
-    with wired_app(FakeLLM(), registry=BrokenRegistry()) as (app, _settings):
+    with wired_app(
+        FakeLLM(), registry=BrokenRegistry(), orchestrator=SelectingOrchestrator()
+    ) as (app, _settings):
         client = asgi_client(app)
         if path.endswith("completions"):
             response = await client.post(

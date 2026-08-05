@@ -18,8 +18,10 @@ from agent import (
     ToolResultEvent,
 )
 from api.openai_compatible import (
-    _ChatMessage,
+    _AssistantMessage,
     _InvalidChatRequest,
+    _SystemMessage,
+    _UserMessage,
     _format_tool_call_activity,
     _format_tool_result_activity,
     _prepare_chat_request,
@@ -188,10 +190,10 @@ def test_prepare_strips_legacy_assistant_history_but_not_user_content() -> None:
     block = _legacy_block()
     user_text = f"user-authored block stays{block}after"
     messages = [
-        _ChatMessage(role="system", content="be terse"),
-        _ChatMessage(role="user", content=user_text),
-        _ChatMessage(role="assistant", content=f"I checked.{block}Done."),
-        _ChatMessage(role="user", content="follow-up question"),
+        _SystemMessage(role="system", content="be terse"),
+        _UserMessage(role="user", content=user_text),
+        _AssistantMessage(role="assistant", content=f"I checked.{block}Done."),
+        _UserMessage(role="user", content="follow-up question"),
     ]
 
     prepared = _prepare_chat_request(messages)
@@ -207,11 +209,11 @@ def test_prepare_strips_legacy_assistant_history_but_not_user_content() -> None:
 def test_prepare_preserves_order_and_combines_system_messages() -> None:
     prepared = _prepare_chat_request(
         [
-            _ChatMessage(role="system", content="first system"),
-            _ChatMessage(role="user", content="first user"),
-            _ChatMessage(role="assistant", content="first answer"),
-            _ChatMessage(role="system", content="second system"),
-            _ChatMessage(role="user", content="active prompt"),
+            _SystemMessage(role="system", content="first system"),
+            _UserMessage(role="user", content="first user"),
+            _AssistantMessage(role="assistant", content="first answer"),
+            _SystemMessage(role="system", content="second system"),
+            _UserMessage(role="user", content="active prompt"),
         ]
     )
 
@@ -228,18 +230,18 @@ def test_prepare_preserves_order_and_combines_system_messages() -> None:
     [
         ([], "no user message found in 'messages'"),
         (
-            [_ChatMessage(role="assistant", content="prefill")],
+            [_AssistantMessage(role="assistant", content="prefill")],
             "no user message found in 'messages'",
         ),
         (
             [
-                _ChatMessage(role="user", content="question"),
-                _ChatMessage(role="assistant", content="prefill"),
+                _UserMessage(role="user", content="question"),
+                _AssistantMessage(role="assistant", content="prefill"),
             ],
             "the final conversational message must have role 'user'",
         ),
         (
-            [_ChatMessage(role="user", content="")],
+            [_UserMessage(role="user", content="")],
             "no user message found in 'messages'",
         ),
     ],

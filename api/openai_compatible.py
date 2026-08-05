@@ -10,12 +10,12 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Literal, Optional
+from typing import Annotated, Any, AsyncIterator, Literal
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, ValidationError
 from sse_starlette.sse import EventSourceResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -48,17 +48,46 @@ class _InvalidChatRequest(ValueError):
     """Client-owned conversation content cannot form an executable turn."""
 
 
-class _ChatMessage(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    role: str
-    content: Any = None
+class _TextPart(BaseModel):
+    """The sole OpenAI content-part shape this adapter can replay."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["text"]
+    text: StrictStr
+
+
+type _MessageContent = StrictStr | Annotated[list[_TextPart], Field(min_length=1)]
+
+
+class _SystemMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: Literal["system"]
+    content: _MessageContent
+
+
+class _UserMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: Literal["user"]
+    content: _MessageContent
+
+
+class _AssistantMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: Literal["assistant"]
+    content: _MessageContent
+
+
+type _ChatMessage = Annotated[
+    _SystemMessage | _UserMessage | _AssistantMessage,
+    Field(discriminator="role"),
+]
 
 
 class _ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    messages: list[_ChatMessage] = Field(default_factory=list)
-    model: Optional[str] = None
-    stream: bool = False
+    messages: list[_ChatMessage] = Field(min_length=1)
+    model: StrictStr | None = None
+    stream: StrictBool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,23 +131,11 @@ def _terminal_error_message(done_reason: str) -> str:
     return f"unsupported completion reason: {done_reason!r}"
 
 
-def _text_of(content: Any) -> str:
-    """Flatten an OpenAI message `content` (string or list of parts) to text."""
-    if content is None:
-        return ""
+def _text_of(content: _MessageContent) -> str:
+    """Flatten a validated OpenAI text message to its replayable text."""
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for p in content:
-            if isinstance(p, dict):
-                text = p.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-            elif isinstance(p, str):
-                parts.append(p)
-        return "".join(parts)
-    return str(content)
+    return "".join(part.text for part in content)
 
 
 # Legacy tool-call presentation cleanup for conversations saved before tool
@@ -214,14 +231,18 @@ def _prepare_chat_request(
     The final user message is the active prompt; earlier user/assistant turns
     seed an ephemeral session. Rendered tool blocks are removed from history.
     """
-    systems = [t for m in messages if m.role == "system" and (t := _text_of(m.content))]
+    systems = [
+        text
+        for message in messages
+        if message.role == "system" and (text := _text_of(message.content))
+    ]
     system_override = "\n\n".join(systems) if systems else None
 
     convo: list[tuple[str, str]] = []
-    for m in messages:
-        if m.role not in ("user", "assistant"):
+    for message in messages:
+        if message.role == "system":
             continue
-        convo.append((m.role, _text_of(m.content)))
+        convo.append((message.role, _text_of(message.content)))
 
     if not any(role == "user" for role, _text in convo):
         raise _InvalidChatRequest("no user message found in 'messages'")
@@ -495,8 +516,10 @@ async def chat_completions(
     except ValidationError as e:
         return _error_response(f"invalid request: {e}")
 
-    if not req.messages:
-        return _error_response("'messages' must be a non-empty array")
+    try:
+        prepared = _prepare_chat_request(req.messages)
+    except _InvalidChatRequest as exc:
+        return _error_response(str(exc))
 
     try:
         runner.validate_model_id(req.model)
@@ -505,11 +528,6 @@ async def chat_completions(
         if mapped is None:
             raise
         return _http_error_response(mapped)
-
-    try:
-        prepared = _prepare_chat_request(req.messages)
-    except _InvalidChatRequest as exc:
-        return _error_response(str(exc))
 
     # Fresh ephemeral session per request; the client owns durable history.
     session = Session()

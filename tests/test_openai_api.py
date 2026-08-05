@@ -735,7 +735,6 @@ async def test_ordered_history_replays_without_altering_user_content(
                     {"role": "system", "content": "system one"},
                     {"role": "user", "content": user_text},
                     {"role": "assistant", "content": f"checked{tool_block}done"},
-                    {"role": "tool", "content": "ignored unsupported role"},
                     {"role": "system", "content": "system two"},
                     {"role": "user", "content": "active prompt"},
                 ]
@@ -749,6 +748,192 @@ async def test_ordered_history_replays_without_altering_user_content(
     assert seen[1].content[0].text == "checkeddone"
     assert seen[2].content[0].text == "active prompt"
     assert llm.requests_seen[0].system == "system one\n\nsystem two"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_openai_accepts_text_parts_and_ignores_top_level_extras(
+    asgi_client, stream: bool
+) -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, _settings):
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {"type": "text", "text": "first"},
+                            {"type": "text", "text": " system"},
+                        ],
+                    },
+                    {"role": "user", "content": ""},
+                    {"role": "assistant", "content": ""},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "active "},
+                            {"type": "text", "text": "prompt"},
+                        ],
+                    },
+                ],
+                "stream": stream,
+                "client_compatibility_option": {"ignored": True},
+            },
+        )
+
+    assert response.status_code == 200
+    assert llm.requests_seen[0].system == "first system"
+    assert [message.content[0].text for message in llm.requests_seen[0].messages] == [
+        "",
+        "",
+        "active prompt",
+    ]
+    assert llm.requests_seen[0].messages[-1].content[0].text == "active prompt"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        "not an object",
+        {},
+        {"messages": None},
+        {"messages": {}},
+        {"messages": []},
+        {"messages": [{"role": "user"}]},
+        {"messages": [{"role": "user", "content": None}]},
+        {"messages": [{"role": "user", "content": 1}]},
+        {"messages": [{"role": "user", "content": True}]},
+        {"messages": [{"role": "user", "content": {}}]},
+        {"messages": [{"role": "user", "content": []}]},
+        {"messages": [{"role": "user", "content": ["bare text"]}]},
+        {
+            "messages": [
+                {"role": "user", "content": [{"type": "image", "text": "x"}]}
+            ]
+        },
+        {"messages": [{"role": "user", "content": [{"type": "text"}]}]},
+        {
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": 1}]}
+            ]
+        },
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "x", "extra": True}],
+                }
+            ]
+        },
+        {"messages": [{"role": "user", "content": "x", "extra": True}]},
+        {"messages": [{"role": "tool", "content": "x"}]},
+        {"messages": [{"role": "function", "content": "x"}]},
+        {"messages": [{"role": "developer", "content": "x"}]},
+        {"messages": [{"role": "arbitrary", "content": "x"}]},
+        {"messages": [{"role": "user", "content": "x"}], "model": 1},
+        {"messages": [{"role": "user", "content": "x"}], "model": True},
+        {"messages": [{"role": "user", "content": "x"}], "stream": 1},
+        {"messages": [{"role": "user", "content": "x"}], "stream": "true"},
+    ],
+    ids=[
+        "top_level_array",
+        "top_level_scalar",
+        "messages_missing",
+        "messages_null",
+        "messages_object",
+        "messages_empty",
+        "content_missing",
+        "content_null",
+        "content_scalar",
+        "content_bool",
+        "content_object",
+        "parts_empty",
+        "parts_bare_string",
+        "parts_non_text",
+        "parts_missing_text",
+        "parts_non_string_text",
+        "parts_extra",
+        "message_extra",
+        "tool_role",
+        "function_role",
+        "developer_role",
+        "arbitrary_role",
+        "model_int",
+        "model_bool",
+        "stream_int",
+        "stream_string",
+    ],
+)
+async def test_openai_rejects_unsupported_request_shapes_before_execution(
+    asgi_client, payload: Any
+) -> None:
+    llm = FakeLLM()
+    mcp = CountingMCP()
+    with wired_app(llm, mcp=mcp) as (app, _settings):
+        store = runtime_of(app).store
+        initial_ids = store.ids()
+        response = await asgi_client(app).post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert llm.complete_calls == llm.stream_calls == 0
+    assert mcp.inventory_reads == 0
+    assert store.ids() == initial_ids
+
+
+async def test_whitespace_only_final_user_content_remains_valid(asgi_client) -> None:
+    llm = FakeLLM()
+    with wired_app(llm) as (app, _settings):
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": " \t "}]},
+        )
+
+    assert response.status_code == 200
+    assert llm.requests_seen[0].messages[-1].content[0].text == " \t "
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_unsupported_role_rejects_before_session_routing_or_tools(
+    asgi_client, monkeypatch: pytest.MonkeyPatch, stream: bool
+) -> None:
+    llm = FakeLLM()
+    mcp = CountingMCP()
+    created_sessions = 0
+    real_session = Session
+
+    def counting_session() -> Session:
+        nonlocal created_sessions
+        created_sessions += 1
+        return real_session()
+
+    monkeypatch.setattr(openai_compatible, "Session", counting_session)
+    orchestrator = SelectingOrchestrator()
+    registry = RegistryStub({"selected": llm, "requested": llm})
+    with wired_app(llm, mcp=mcp, registry=registry, orchestrator=orchestrator) as (
+        app,
+        _settings,
+    ):
+        response = await asgi_client(app).post(
+            "/v1/chat/completions",
+            json={
+                "model": "requested",
+                "stream": stream,
+                "messages": [
+                    {"role": "user", "content": "context that must not run"},
+                    {"role": "tool", "content": "unsupported"},
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert created_sessions == 0
+    assert mcp.inventory_reads == 0
+    assert orchestrator.calls == 0
+    assert llm.complete_calls == llm.stream_calls == 0
 
 
 async def test_trailing_assistant_is_rejected_instead_of_reordered(asgi_client) -> None:

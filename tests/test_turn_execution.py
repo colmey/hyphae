@@ -27,6 +27,7 @@ from agent import (
     Session,
     SessionGuard,
     Tracer,
+    ToolPolicy,
 )
 from api.dependencies import get_application_runtime
 from agent.runtime import ModelLimits
@@ -49,10 +50,14 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from tooling import ToolCallResult
+from tooling import ToolCallResult, ToolSnapshot
 from orchestrator import ModelUnavailableError, Orchestrator
 from orchestrator.contracts import ModelRegistry, RoutingService
-from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
+from orchestrator.schemas import (
+    OrchestrationDecision,
+    OrchestrationProposal,
+    ToolPreferences,
+)
 from tests._app_support import runtime_of, wired_app
 
 pytestmark = pytest.mark.anyio
@@ -236,6 +241,7 @@ def _runner(
     orchestrator: RoutingService | None = None,
     registry: ModelRegistry | None = None,
     tracer: Tracer | None = None,
+    policy: ToolPolicy | None = None,
 ) -> TurnRunner:
     from agent import InMemorySessionStore
 
@@ -258,7 +264,7 @@ def _runner(
         mcp=mcp,
         store=store,
         guard=SessionGuard(),
-        policy=None,
+        policy=policy,
         tracer=tracer,
     )
 
@@ -346,7 +352,7 @@ async def test_routing_timeout_falls_back_while_turn_budget_remains() -> None:
     assert result.answer == "done"
     assert result.metadata.orchestration is not None
     assert result.metadata.orchestration.fallback_used is True
-    assert result.metadata.orchestration.tools == ["srv__one"]
+    assert result.metadata.orchestration.tools == []
     assert router.calls == 1 and agent.calls == 1
     assert mcp.inventory_reads == 1
     assert elapsed < 0.15
@@ -413,6 +419,159 @@ async def test_one_inventory_snapshot_drives_prompt_sanitize_and_filtering() -> 
     model_limits = runner.limits.for_model(registry.get_entry("agent"))
     assert model_limits.max_tokens == 256
     assert model_limits.context_window == 4096
+
+
+async def test_policy_hidden_tools_never_reach_router_or_downstream_model() -> None:
+    agent = AnswerLLM()
+    router = RoutingLLM(
+        {
+            "selected_model_id": "agent",
+            "selected_tools": ["srv__allowed", "srv__hidden"],
+        },
+        delay=0,
+    )
+    registry = RegistryStub(agent, router)
+    orchestrator = Orchestrator(
+        registry=registry,
+        system_prompt="route",
+        model_id="router",
+    )
+    hidden_description = "HIDDEN DESCRIPTION"
+    hidden_schema_marker = "hidden_schema_marker"
+    mcp = CountingMCP(
+        [
+            {
+                "name": "srv__allowed",
+                "description": "Allowed tool.",
+                "input_schema": {"type": "object"},
+            },
+            {
+                "name": "srv__hidden",
+                "description": hidden_description,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {hidden_schema_marker: {"type": "string"}},
+                },
+            },
+        ]
+    )
+    runner = _runner(
+        agent=agent,
+        mcp=mcp,
+        orchestrator=orchestrator,
+        registry=registry,
+        policy=ToolPolicy(mode="allow_list", allow=["srv__allowed"]),
+    )
+    session = await runner.store.create()
+
+    result = await runner.run(
+        TurnRequest("use a tool", session, PersistencePolicy.PERSISTENT)
+    )
+
+    assert mcp.inventory_reads == 1
+    assert "srv__allowed" in router.prompt
+    assert "srv__hidden" not in router.prompt
+    assert hidden_description not in router.prompt
+    assert hidden_schema_marker not in router.prompt
+    assert result.metadata.orchestration is not None
+    assert result.metadata.orchestration.tools == ["srv__allowed"]
+    assert [tool["name"] for tool in agent.requests_seen[0].tools or []] == [
+        "srv__allowed"
+    ]
+
+
+async def test_policy_projection_applies_to_unorchestrated_downstream_model() -> None:
+    agent = AnswerLLM()
+    hidden_name = "srv__hidden"
+    runner = _runner(
+        agent=agent,
+        mcp=CountingMCP(
+            [
+                {
+                    "name": "srv__allowed",
+                    "description": "Allowed tool.",
+                    "input_schema": {"type": "object"},
+                },
+                {
+                    "name": hidden_name,
+                    "description": "Hidden tool.",
+                    "input_schema": {"type": "object"},
+                },
+            ]
+        ),
+        settings=_settings(orchestration_enabled=False),
+        policy=ToolPolicy(mode="allow_list", allow=["srv__allowed"]),
+    )
+    session = await runner.store.create()
+
+    await runner.run(TurnRequest("use a tool", session, PersistencePolicy.PERSISTENT))
+
+    assert [tool["name"] for tool in agent.requests_seen[0].tools or []] == [
+        "srv__allowed"
+    ]
+
+
+async def test_preferred_hidden_tools_cannot_reenter_visible_snapshot() -> None:
+    agent = AnswerLLM()
+    router = RoutingLLM(
+        {"selected_model_id": "agent", "selected_tools": []}, delay=0
+    )
+    registry = RegistryStub(agent, router)
+    orchestrator = Orchestrator(
+        registry=registry,
+        system_prompt="route",
+        model_id="router",
+    )
+    snapshot = ToolSnapshot.from_llm_tools(
+        [
+            {
+                "name": "srv__allowed",
+                "description": "Allowed tool.",
+                "input_schema": {"type": "object"},
+            }
+        ]
+    )
+
+    decision = await orchestrator.decide(
+        "use a tool",
+        snapshot,
+        preferences=ToolPreferences(
+            preferred_tools=["srv__hidden"],
+            tool_arg_hints={"srv__hidden": ["secret"]},
+        ),
+    )
+
+    assert "srv__hidden" not in router.prompt
+    assert "PREFERRED TOOLS" not in router.prompt
+    assert decision.result.selected_tools == []
+
+
+async def test_control_failure_uses_ready_default_with_no_tools() -> None:
+    agent = AnswerLLM()
+    router = RoutingLLM({}, delay=None)
+    registry = RegistryStub(agent, router)
+    runner = _runner(
+        agent=agent,
+        mcp=CountingMCP(),
+        settings=_settings(llm={"timeout_seconds": 0.01}, run_max_seconds=0.2),
+        orchestrator=Orchestrator(
+            registry=registry,
+            system_prompt="route",
+            model_id="router",
+        ),
+        registry=registry,
+    )
+    session = await runner.store.create()
+
+    result = await runner.run(
+        TurnRequest("hello", session, PersistencePolicy.PERSISTENT)
+    )
+
+    assert result.metadata.model_id == "agent"
+    assert result.metadata.orchestration is not None
+    assert result.metadata.orchestration.fallback_used is True
+    assert result.metadata.orchestration.tools == []
+    assert not agent.requests_seen[0].tools
 
 
 async def test_untrusted_routing_data_cannot_author_downstream_system_prompt() -> None:

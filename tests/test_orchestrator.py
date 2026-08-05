@@ -221,6 +221,8 @@ async def test_invalid_router_output_uses_safe_diagnostics(
 
     assert decision.fallback_used is True
     assert decision.fallback_reason == "invalid_control_output"
+    assert decision.result.selected_model_id == "model"
+    assert decision.result.selected_tools == []
     assert "secret router output" not in caplog.text
     assert "sha256=" in caplog.text
 
@@ -245,5 +247,7 @@ async def test_control_client_failure_uses_safe_diagnostics(
 
     assert decision.fallback_used is True
     assert decision.fallback_reason == "control_call_failed"
+    assert decision.result.selected_model_id == "model"
+    assert decision.result.selected_tools == []
     assert "secret control-client failure" not in caplog.text
     assert "RuntimeError" in caplog.text

@@ -23,6 +23,7 @@ from agent import (
     SessionHistoryLimitExceeded,
     SessionStore,
     TextEvent,
+    PolicyVerdict,
     ToolPolicy,
     Tracer,
     run_agent,
@@ -362,12 +363,18 @@ class TurnRunner:
                     tool_snapshot = ToolSnapshot.from_llm_tools(
                         tool_runtime.get_tools_for_llm()
                     )
+                    policy = self.policy or ToolPolicy()
+                    visible_tools = ToolSnapshot(
+                        tool
+                        for tool in tool_snapshot.tools
+                        if policy.check(tool.name).verdict is PolicyVerdict.ALLOW
+                    )
                     staged_request = replace(
                         request,
                         session=source_session.staged_copy(),
                     )
                     routing = await self._resolve_routing(
-                        staged_request, tool_snapshot, context
+                        staged_request, visible_tools, context
                     )
                     limits = self.limits.for_model(routing.model_entry)
                     metadata = TurnMetadata(

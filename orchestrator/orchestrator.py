@@ -71,7 +71,7 @@ class Orchestrator:
                 "orchestrator control call failed (%s); using fallback",
                 type(exc).__name__,
             )
-            return self._fallback_decision(reason, tools)
+            return self._fallback_decision(reason)
 
         try:
             proposal = self._parse_proposal(raw)
@@ -84,7 +84,7 @@ class Orchestrator:
                 len(raw),
                 hashlib.sha256(raw.encode("utf-8")).hexdigest(),
             )
-            return self._fallback_decision(reason, tools)
+            return self._fallback_decision(reason)
 
         sanitized_proposal = self._sanitize_proposal(
             proposal, tools, preferences, log=decision_log
@@ -104,7 +104,7 @@ class Orchestrator:
         """Compose the full user-turn prompt."""
         models_block = self._registry.describe_for_prompt()
         tools_block = self._describe_tools_for_prompt(tools)
-        preferred_block = self._describe_preferences_for_prompt(preferences)
+        preferred_block = self._describe_preferences_for_prompt(preferences, tools)
         history_block = self._describe_history_for_prompt(history)
 
         return (
@@ -146,7 +146,7 @@ class Orchestrator:
         )
 
     def _describe_preferences_for_prompt(
-        self, preferences: ToolPreferences | None
+        self, preferences: ToolPreferences | None, tools: ToolSnapshot
     ) -> str:
         """Render caller tool preferences, or "" when there are none."""
         if not preferences:
@@ -154,11 +154,15 @@ class Orchestrator:
 
         lines: list[str] = []
         for name in preferences.preferred_tools:
+            if name not in tools.names:
+                continue
             args = preferences.tool_arg_hints.get(name) or []
             if args:
                 lines.append(f"- {name} (intended arguments: {', '.join(args)})")
             else:
                 lines.append(f"- {name}")
+        if not lines:
+            return ""
         return (
             "PREFERRED TOOLS (favor these; other tools remain available):\n"
             f"{chr(10).join(lines)}\n\n"
@@ -251,14 +255,11 @@ class Orchestrator:
             thinking_level=proposal.thinking_level,
         )
 
-    def _fallback_decision(
-        self, reason: str, tools: ToolSnapshot
-    ) -> OrchestrationDecision:
-        """Safe default-model/all-tools decision for orchestration failures."""
-        all_tools = [tool.name for tool in tools.tools]
+    def _fallback_decision(self, reason: str) -> OrchestrationDecision:
+        """Safe default-model/no-tools decision for orchestration failures."""
         proposal = OrchestrationProposal(
             selected_model_id=self._registry.default_id(),
-            selected_tools=all_tools,
+            selected_tools=[],
         )
         return OrchestrationDecision(
             result=proposal,

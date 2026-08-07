@@ -12,11 +12,4 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-FINDINGS_*
-audit/
 AGENTS.md
-docs/remediation
-docs/refactoring/
-docs/refactoring-policy.md
-INTERFACE_APPROACH.md
-OPENAI_COMPATIBLE_TOOL_ACTIVITY.md

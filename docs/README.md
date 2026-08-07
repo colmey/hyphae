@@ -13,5 +13,8 @@ the reference that owns the detail you need.
 | How do I deploy, observe, and troubleshoot Hyphae? | [Operations](operations.md) |
 | How do I run hermetic, live, and evaluation checks? | [Test guide](../tests/README.md) |
 
-The references describe the current implementation. Temporary refactoring
-plans are intentionally not part of this permanent documentation set.
+The references describe the current implementation.
+
+Deferred product work is recorded separately from current behavior:
+
+- [Progressive tool discovery](tool-discovery.future.md)

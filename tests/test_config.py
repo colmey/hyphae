@@ -64,6 +64,16 @@ def _setting_value(settings: Settings, field_path: str):
     return value
 
 
+def test_all_settings_fields_have_descriptions() -> None:
+    for settings_type in (Settings, LLMSettings):
+        missing = [
+            name
+            for name, field in settings_type.model_fields.items()
+            if not (field.description or "").strip()
+        ]
+        assert missing == [], settings_type.__name__
+
+
 @pytest.mark.parametrize(
     ("model", "payload"),
     [

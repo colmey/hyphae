@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request
 
 import api.schemas as api_schemas
 import api.dependencies as api_dependencies
+import application as application_package
 import main as main_module
 from agent import (
     DoneEvent,
@@ -40,6 +41,7 @@ from api.dependencies import get_application_runtime
 from agent.runtime import ModelLimits
 from api.schemas import TokenUsage
 from application import (
+    ApplicationRuntime,
     ExecutionProtocolError,
     InvalidModelError,
     OrchestratedRouting,
@@ -1126,6 +1128,13 @@ def test_application_production_import_boundary_and_removed_api_turn() -> None:
                 for blocked in forbidden
             ), path
     assert not (root / "api" / "turn.py").exists()
+
+
+def test_application_publishes_the_supported_runtime_entry_points() -> None:
+    assert application_package.ApplicationRuntime is ApplicationRuntime
+    assert application_package.TurnRunner is TurnRunner
+    assert "ApplicationRuntime" in application_package.__all__
+    assert "TurnRunner" in application_package.__all__
 
 
 async def test_ephemeral_turn_does_not_publish_session_to_store() -> None:

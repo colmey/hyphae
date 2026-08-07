@@ -1,708 +1,178 @@
-# hyphae — Operations & Extending
+# Operations
 
-How to run the harness, read its logs, diagnose failures, run its tests,
-and extend it along its designed seams. Plus the known v1
-limitations and their extension paths.
+This guide covers installation, process operation, health, tracing, and common
+failures. See the root [README](../README.md) for the only quick start,
+[Configuration](configuration.md) for every input, and [Tests](../tests/README.md)
+for verification commands.
 
-> See also: [README.md](README.md) (overview + quick start),
-> [architecture.md](architecture.md) (subsystems & design decisions),
-> [configuration.md](configuration.md) (env vars and config files),
-> [api.md](api.md) (HTTP contract).
+## Install and run
 
-## Contents
-
-1. [Extending the Harness](#extending-the-harness)
-2. [Operations](#operations)
-3. [Tests](#tests)
-4. [Eval Suite](#eval-suite)
-5. [Known Limitations](#known-limitations)
-
----
-
-## Extending the Harness
-
-### Adding a routable model
-
-If the provider is already registered in `llm/client.py`'s `_PROVIDERS`
-(implementation under `llm/providers/`), adding a new model is
-**configuration-only**:
-
-1. Open `config/models.yaml`.
-2. Add an entry:
-   ```yaml
-   models:
-     # ... existing entries ...
-     qwen3-local:
-       provider: openai_compatible
-       model: qwen3.6-35b-a3b
-       description: >
-         Local Qwen3.6 model; strong for agentic coding and deliberate
-         tool-using workflows.
-       context_window: 65536
-       max_tokens: 16384
-       supports_native_tools: true
-       thinking: think-tags
-       sampling:
-         temperature: 0.6
-         top_p: 0.95
-         top_k: 20
-   ```
-3. Restart the harness. The orchestrator can now route to it.
-
-The orchestrator's selection criteria are governed entirely by what's in
-the `description` field — write a description that explains when this
-model should win. Capability-profile fields (`supports_native_tools`,
-`thinking`, and `sampling`) describe how the provider should call the served
-model; they do not replace the description used for routing.
-
-### Adding a new LLM provider
-
-Two steps — the harness is provider-blind everywhere else:
-
-1. **Write `llm/providers/<name>.py`** with a class that subclasses
-   `LLMClient` and implements `async complete(request: GenerationRequest)`
-   (handle `request.response_schema` if you want orchestrator support, and
-   `request.thinking_level` if the provider has a deliberation control —
-   ignore it if not). Translate the request's internal `Message` sequence to the
-   provider's request format and the response back to `AssistantMessage`
-   with `TextBlock`s / `ToolUseBlock`s. If the provider has opaque
-   round-trip state (signatures, reasoning traces, etc.), stash it in
-   `TextBlock.provider_metadata` / `ToolUseBlock.provider_metadata` on
-   parse and re-attach it on the next request. Override `is_transient_error`
-   for the provider's retryable failures. Keep the provider SDK import inside
-   this file only. If native streaming is implemented, accept the same request
-   and reject a non-`None` `response_schema` before calling the SDK.
-2. **Register it** in `llm/client.py`: add a small lazy builder (3 lines,
-   `from llm.providers.<name> import ...` inside the function) and one entry
-   to `_PROVIDERS`.
-
-That's it. `models.yaml` accepts the new provider automatically (validated
-against `supported_providers()`), credentials resolve via the typed
-`<provider>_api_key` field or the `<PROVIDER>_API_KEY` env var fallback (or
-not at all, for a key-less local provider). Optionally add a typed key field
-in `Settings`, set `LLM_PROVIDER=...` as the legacy default, and/or add
-`models.yaml` entries to route specific requests to it.
-
-### Connecting a local Ollama (OpenAI-compatible) model
-
-The `openai_compatible` provider (`llm/providers/openai_compatible/`) speaks
-the OpenAI wire protocol, so it drives real OpenAI and compatible servers —
-including a local Ollama instance — by pointing it at the desired endpoint.
-The old `openai` provider ID remains a supported compatibility alias.
-
-1. Export `OPENAI_COMPAT_BASE_URL=http://localhost:11434/v1` and `OPENAI_API_KEY=<key>`
-   (Ollama may ignore the key, but the SDK requires a non-empty value).
-2. Add a `models.yaml` entry with `provider: openai_compatible` and a `model` matching an
-   `ollama list` tag, e.g. `qwen3.6-35b-a3b`.
-3. Restart the harness.
-
-Caveats: tool calling only works with tools-capable models. Reasoning models
-(e.g. Qwen3) may inline a leading `<think>...</think>` block; declare
-`thinking: think-tags` so the OpenAI-compatible client removes it from visible
-answer text. The inner reasoning is not replayed into model history; `/v1`
-streaming can display it through `delta.reasoning_content`. Endpoints that
-accept a request hint such as `reasoning_effort` should use
-`thinking: hint-param`.
-See [configuration.md](configuration.md) for the env vars and profile fields.
-
-`/v1/chat/completions` with `stream:true` uses the provider's native token
-stream when the selected OpenAI-compatible model client supports it. The
-existing `LLM_TIMEOUT_SECONDS` caps each incremental provider read for this
-path, so the idle timeout resets after every chunk while `RUN_MAX_SECONDS`
-continues shrinking absolutely. After the first text delta is emitted, the
-harness does not retry or resume a broken stream. Before answer text begins,
-reasoning-only output remains provisional: an eligible retry is separated from
-the abandoned reasoning by a visible interruption marker. A later provider
-failure is surfaced as partial text followed by an error event and
-`done_reason=llm_error`.
-
-Local harness verification:
+Hyphae requires Python 3.12 and uses the committed `uv.lock`.
 
 ```bash
-./runscript.sh -m uvicorn main:app --host 127.0.0.1 --port 8000
-curl -N http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -d '{"model":"gpt-oss-20b","stream":true,"messages":[{"role":"user","content":"Write three short sentences slowly."}]}'
-```
-
-If OpenWebUI reaches the harness through Nginx Proxy Manager, proxy buffering
-can make correct harness-local token streaming appear all-at-once. Disable
-buffering for the proxy host (`proxy_buffering off` / `X-Accel-Buffering: no`)
-before treating an end-to-end OpenWebUI test as authoritative.
-
-### Connecting a weak prose-only tool model
-
-If a served model cannot reliably emit native OpenAI/Gemini tool calls but can
-follow JSON-in-prose instructions, keep the same provider and add a model row
-with `supports_native_tools: false`:
-
-```yaml
-models:
-  weak-local-prompted:
-    provider: openai_compatible
-    model: small-local-model
-    description: >
-      Local prose-only model with no reliable native tool calling. Use for
-      lightweight tasks where prompted JSON tool actions are acceptable.
-    supports_native_tools: false
-    thinking: none
-    context_window: 32768
-    max_tokens: 4096
-```
-
-No provider code or loop changes are required. The registry builds the normal
-provider client, wraps it with the prompted-tool adapter, renders the
-orchestrator-selected tools into the system prompt, and parses one JSON action
-back into the same `ToolUseBlock` shape native models produce. Do not use a
-prompted-only row as the orchestrator control model; startup will log a warning
-and disable orchestration because the control path depends on structured output.
-
-### Adding persistence
-
-Not needed for the current use case — LibreChat is the system of record and
-re-feeds conversation context, so server-side sessions are short-lived
-scratchpads. The `SessionStore` ABC is kept solely as the seam for if that
-ever changes. To add a durable backend:
-
-1. Write a new class in `agent/session.py` (or a new file) that
-   implements `SessionStore.create / get / save` and the positive
-   `session_history_max_chars` policy against a real backend (SQLite, Postgres,
-   Redis). Note `provider_metadata` holds raw **bytes**
-   (Gemini's `thought_signature`), so the serializer needs base64/binary
-   handling, not naive JSON.
-2. Replace `InMemorySessionStore(...)` in `main.py`'s lifespan with the new
-   class.
-3. For a multi-process / multi-host deployment, promote `SessionGuard` from
-   its in-process `set` to a DB/Redis-level claim (or use optimistic
-   versioning) so the same-session guard holds across workers. Single
-   process needs no change — the existing guard already covers it.
-
-That's it. No other code changes.
-
-### Streaming
-
-Streaming is implemented on the OpenAI-compatible adapter: `POST
-/v1/chat/completions` with `stream: true` returns an SSE stream of
-`chat.completion.chunk` frames terminated by `data: [DONE]` (see
-[api.md](api.md#post-v1chatcompletions)). It is built on `sse-starlette`'s
-`EventSourceResponse` and opens the shared `TurnRunner` event iterator, mapping
-each `TextEvent` to `delta.content`. `TurnRunner.open()` resolves routing and
-the actual model under the session guard before the first role frame is emitted.
-
-For a *live activity feed* — seeing the agent's tool calls and results as they
-happen, not just the final answer — use the native **`POST /chat/stream`** route
-(`api/routes.py`). Same dumb-pipe contract as `/chat` (plain-text body = prompt,
-optional `X-Session-Id`), but instead of collecting the events it forwards the
-loop's typed events over SSE as they occur: `text`, `tool_call`, `tool_result`,
-`usage`, `orchestration`, `done`, `error` (see [api.md](api.md#post-chatstream)).
-It is the same kind of thin renderer as the `/v1` SSE branch — it opens the
-shared turn and serializes each event with the bytes-safe
-`event_record` mapping (the same one the tracer uses; never `dataclasses.asdict`,
-since `provider_metadata` can hold bytes — events don't carry it, but reusing the
-explicit mapping keeps one source of truth). Provider reasoning is filtered
-from the native routes; `/v1` can expose sanitized reasoning through its
-optional `reasoning_content` channel. No orchestration or loop logic is duplicated;
-the sanitized orchestration decision is emitted first when routing is active.
-
-This is the design seam for *any* live-update consumer: a custom dashboard, a
-voice assistant, or an OpenWebUI **pipe** (a plug-in that lives inside OpenWebUI,
-not the harness) that renders `tool_call`/`tool_result` as status updates. The
-harness stays a dumb event source; each consumer is a renderer at the edge.
-
-Providers with native streaming produce incremental `text` events on both SSE
-surfaces. Complete-only providers use the `LLMClient.stream()` fallback and emit
-coarse final text blocks. Every provider stream has explicit cleanup ownership;
-after visible answer text, a broken stream is never replayed. Reasoning-only
-retries carry an explicit interruption marker between attempts.
-
-### Choosing a context strategy (`naive` vs `compaction`)
-
-The agent loop shapes each LLM call's message view through `agent/context.py`
-(see [architecture.md](architecture.md), *Context assembly*). Which strategy
-to run:
-
-- **`naive`** (default) — pass-through, behavior-preserving. Right for
-  large-window cloud models and short conversations. Over budget it only
-  warns (`context over budget under 'naive'`), so watch the logs.
-- **`compaction`** — opt in (`CONTEXT_STRATEGY=compaction`) when runs are
-  long/tool-heavy on a small-window model (the local-Qwen/gpt-oss case).
-  Over-budget history is summarized once per LLM call by the same selected
-  model.
-
-What compaction **preserves**: the system prompt (never in history), the
-first user message verbatim (the task header), the last
-`CONTEXT_RECENT_MESSAGES` protocol-safe units verbatim, tool-use/tool-result
-pairing (never split), and — via the summary — decisions, constraints, facts
-learned, failed approaches, and open questions.
-
-What it does **not** preserve: verbatim middle-of-conversation text, full
-tool outputs already superseded, and provider-specific `provider_metadata` on
-summarized (dropped) messages. The summary is only as good as the selected
-model's summarization; raise `CONTEXT_SUMMARY_MAX_TOKENS` if it's dropping
-detail.
-
-Failure behavior: any compaction failure (summarizer error/empty, malformed
-history, history too short) logs a warning and sends the full history —
-requests are never failed by the context layer. Costs: one extra LLM call per
-over-budget iteration. Session history is never rewritten; continuing a
-session sees the original messages.
-
-### Adding new loop strategies
-
-Drop a new file in `agent/` (e.g. `planner_loop.py`) with its own
-`run_*` function. The route layer picks which loop to use (via a
-request field, a config setting, etc.). No changes to existing code.
-The orchestrator's decision can include a hint about which loop to use
-if you add that field to `OrchestrationProposal`.
-
-### Observability (run tracing)
-
-The loop already keeps an append-only event log as its run state; tracing
-**serializes that log to disk** rather than running a parallel logging
-subsystem. Set `TRACE_ENABLED=true` (and optionally `TRACE_JSONL_PATH`, default
-`traces/harness.jsonl`) and every run appends one JSON record per event:
-
-```jsonl
-{"run_id":"a1b2…","step":1,"ts":"2026-06-18T…","type":"usage","input_tokens":10,"output_tokens":5,"total_tokens":15,"latency_ms":812.4,"iteration":1}
-{"run_id":"a1b2…","step":2,"ts":"…","type":"reasoning","reasoning":"..."}
-{"run_id":"a1b2…","step":3,"ts":"…","type":"tool_call","tool_use_id":"call_1","name":"toolbox__lookup","args":{…}}
-{"run_id":"a1b2…","step":4,"ts":"…","type":"tool_result","name":"toolbox__lookup","is_error":false,"latency_ms":41.0,"content":"…"}
-{"run_id":"a1b2…","step":8,"ts":"…","type":"done","reason":"end_turn","iterations":2,"total_tokens":39}
-```
-
-Each record carries the per-request `run_id` (minted once in the `RunContext`,
-so it covers native and `/v1` rendering), a monotonic `step` index, an ISO `ts`, and
-`latency_ms` on the LLM (`usage`) and `tool_result` records. The same `run_id`
-prefixes every log line for that turn (`[run a1b2…] chat: …`), so a log line
-points straight at its trace. Grep one run with `grep '"run_id":"a1b2…"'`.
-
-The seam is `agent/tracing.py`: a `Tracer` ABC with async `start()` / `aclose()`
-and synchronous `emit(record)`, a `NoOpTracer`, and the `JSONLTracer`. Lifespan
-starts the tracer before atomically publishing the complete
-`ApplicationRuntime` as `app.state.runtime`; a routine open failure publishes a
-runtime whose `tracer` is `None`. **Tracing is optional and best-effort:**
-disabled (the default) creates no queue, task, directory, or file.
-
-An enabled tracer serializes each event before submitting it to a bounded queue;
-`emit()` never waits or performs filesystem I/O. Policy is fixed at a 4096-record
-queue, batches of at most 100, and a 250 ms deadline from the first record in a
-partial batch. One writer task appends and flushes each batch off the event-loop
-thread, preserving submission order. If the queue fills, the newest submission
-is dropped so older queued records retain their order; the warning is emitted
-immediately and then at most once every 60 seconds.
-
-Retention is application-owned and fixed: before a complete UTF-8 JSONL record
-would take the active file beyond 10 MiB, the same writer rotates
-`harness.jsonl` to `harness.jsonl.1`, shifts older backups through `.3`, and
-deletes the previous `.3`. Thus the active file plus three backups are retained,
-with `.1` newest and `.3` oldest. Records are never split or truncated for
-rotation; a single serialized record larger than 10 MiB is treated as a writer
-failure and disables tracing through the normal nonfatal failure path. Do not
-configure a second external rotation owner for this file.
-
-`TRACE_ENABLED=false` remains the default and complete off switch. When off,
-Hyphae creates no trace queue, worker, directory, active file, or backups. When
-enabled, restrict the trace directory and every numbered backup to the harness
-operator: all retained files may contain full prompts, reasoning, tool arguments,
-and tool results.
-
-The read-only counters mean:
-
-- `accepted`: records successfully placed on the queue;
-- `written`: records in completely successful append-and-flush batches;
-- `dropped`: rejected submissions plus accepted records lost to writer failure;
-- `writer_failures`: the first append/flush failure that permanently disabled
-  the sink.
-
-Shutdown logs all four counters. A healthy graceful shutdown stops acceptance,
-drains every accepted record, flushes, and closes the file. A process crash or
-hard kill can lose queued records; JSONL tracing does not provide crash-durable
-delivery. After the first filesystem write/flush failure, the tracer drops the
-failed batch and backlog, rejects later records, and performs no further writes,
-preventing repeated disk-error spinning while requests continue normally.
-
-Events map to JSON **explicitly** (never `dataclasses.asdict`) and the JSONL
-writer base64-encodes any stray `bytes` (e.g. a provider's `thought_signature`)
-so the serializer can't crash. **Sensitivity:** the trace captures full prompt
-text, tool args, and tool results by default — appropriate for the single-
-operator dev harness, but treat the file as sensitive. The harness endpoints can
-now be gated with `HYPHAE_API_KEY`, but the trace **file** is not covered by
-that — guard it at the filesystem level. A metadata-only mode (names + usage +
-latency, bodies omitted) is the natural next toggle once the harness is
-multi-tenant.
-
-For per-request orchestration visibility without a trace, set `LOG_LEVEL=DEBUG`
-— the route emits the orchestrator's full generated system prompt and selected
-tool list at DEBUG.
-
-### Parallel tool execution
-
-In `agent/loop.py`, replace the sequential `for tu in tool_uses` block
-with:
-
-```python
-results = await asyncio.gather(*(
-    _execute_one(tu, mcp) for tu in tool_uses
-), return_exceptions=False)
-```
-
-where `_execute_one` does the yield + call_tool + result block. Be aware:
-events come out in completion order, not call order, which may confuse
-streaming UIs.
-
-### Tuning orchestration behavior
-
-Three knobs, all configuration-only:
-
-1. **Add or remove models** in `config/models.yaml`. Update descriptions
-   to nudge the orchestrator toward / away from a given model.
-2. **Rewrite `config/orchestrator_prompt.md`** to change selection
-   heuristics globally. The file is loaded at startup; restart to pick
-   up edits.
-3. **Override the orchestrator's own model** via
-   `ORCHESTRATOR_MODEL_ID` if the default is too cheap (orchestration
-   making poor decisions) or too expensive (orchestration costing more
-   than the work it routes).
-
-### Disabling orchestration
-
-Two ways:
-
-1. Set `ORCHESTRATION_ENABLED=false`. The harness logs the disable and
-   runs in legacy mode: default LLM + all tools + an optional `/v1` system
-   override. Useful for dev environments or when comparing orchestrated
-   vs. unorchestrated behavior.
-2. Don't ship `config/models.yaml`. The lifespan will log a warning and degrade
-   to the same legacy mode. A present but invalid models file is fatal at
-   startup instead of silently disabling orchestration.
-
----
-
-## Operations
-
-### First-time setup
-
-```bash
-# Syncs .venv from pyproject.toml + uv.lock and seeds .env from .env.example
 ./setup.sh
-
-# Then edit .env and set your API keys (e.g. GEMINI_API_KEY) and MCP URLs.
+./runscript.sh -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-`runscript.sh` (used everywhere below) activates `.venv`, prepends the
-project root to `PYTHONPATH`, and runs Python. Application startup constructs
-lazy Pydantic `Settings`, which reads the project `.env` without copying its
-contents into `os.environ`; real process variables still take precedence.
+`setup.sh` installs `uv` when absent, synchronizes the locked development
+environment into `.venv`, and creates `.env` from `.env.example` only when
+`.env` does not exist.
 
-### Running the server
+`runscript.sh` activates that environment, prepends the repository root to
+`PYTHONPATH`, and executes the supplied Python arguments. It does not change the
+working directory. Application-relative configuration paths still resolve from
+the repository root.
+
+For a network-accessible deployment, choose the bind address deliberately and
+put normal TLS, proxy, and access controls in front of Uvicorn. Set
+`HYPHAE_API_KEY` whenever untrusted clients can reach protected endpoints.
+
+## Startup and shutdown
+
+Application lifespan performs these operations before accepting traffic:
+
+1. load and validate settings and config assets;
+2. discover enabled MCP catalogs;
+3. create the dispatch policy, in-memory session store, and run guard;
+4. build direct or orchestrated model clients and preflight configured models;
+5. start optional JSONL tracing and create the routing runtime and
+   `ApplicationRuntime`;
+6. log one readiness summary.
+
+The readiness summary reports provider/default model, routing mode, MCP health,
+and tool count; orchestrated mode also reports its ready-model count. It
+deliberately omits trace state. When tracing is enabled, the tracer logs its
+path separately; startup or writer failure is also logged separately. Disabled
+tracing emits no readiness field.
+
+Invalid present configuration is fatal. Missing optional orchestration assets,
+an explicitly disabled orchestrator, or an unsuitable control model uses the
+documented fixed/direct mode. A configured orchestration registry whose default
+model is unavailable is fatal; other unavailable models are omitted from the
+ready inventory.
+
+On shutdown, Hyphae closes model clients, MCP leases/connections, and the trace
+worker. Cleanup failures are logged without hiding another active failure or
+cancellation.
+
+## Health and smoke checks
 
 ```bash
-./runscript.sh -m uvicorn main:app --host 0.0.0.0 --port 8000
-
-# With auto-reload (dev only)
-./runscript.sh -m uvicorn main:app --reload
-
-# With workers (production)
-./runscript.sh -m uvicorn main:app --workers 4
+curl -sS http://127.0.0.1:8000/health
+curl -sS http://127.0.0.1:8000/v1/models
+curl -sS http://127.0.0.1:8000/chat \
+  -H 'Content-Type: text/plain' \
+  --data 'Reply with one short sentence.'
 ```
 
-**Note on workers**: each uvicorn worker is a separate Python process with
-its own `InMemorySessionStore` **and** its own in-process `SessionGuard`.
-Two consequences for multi-worker deployments: a session created on one
-worker isn't visible on another (fine here — LibreChat re-feeds context),
-and the same-session 409 guard only holds *within* a worker. If you ever
-need the guard to span workers, promote it to a shared claim (see "Adding
-persistence"). The orchestrator's LLMRegistry is per-worker too; that's fine
-because client construction is idempotent. **Single process (the default)
-is fully covered** — distinct sessions run concurrently, same-session
-overlaps get 409.
+Add `-H 'X-API-Key: ...'` to protected calls when authentication is enabled.
+The health endpoint is intentionally unauthenticated.
 
-### Graceful shutdown
+Interpret `/health` at the server level rather than only reading the top-level
+status. A degraded MCP server retains its last sanitized error and catalog
+metadata. `catalog_revision`, discovery/refresh times, and `active_leases` help
+distinguish stale discovery, scheduled refresh, and in-flight turn ownership.
 
-Uvicorn lifespan shutdown closes every constructed LLM SDK client, active
-turn-local MCP leases, and the tracer. MCP catalogs are cleared and records
-transition to `closed`; startup discovery does not retain MCP connections.
-The default LLM and lazy registry cache are combined by object identity, so a
-client reachable through both paths is closed once. Prompted-tool wrappers
-forward lifecycle ownership to their inner provider. One cleanup failure is
-logged and does not skip the remaining LLMs or the MCP/tracer owners; an active
-task cancellation is preserved. Healthy tracer shutdown drains all accepted
-buffered records before closing and logs its final `accepted`, `written`,
-`dropped`, and `writer_failures` counters. A trace writer failure permanently
-disables further writes and discards its remaining backlog so shutdown does not
-retry-spin.
+## Logging
 
-For OpenAI streaming, the agent loop closes the normalized generation adapter,
-the generation layer closes the provider iterator, and the provider iterator
-closes its inner SDK stream. This releases the HTTP response on normal
-completion, timeout, provider failure, cancellation, and clients that stop
-reading early. Repeated graceful shutdown is safe. A forced process kill
-(`SIGKILL`, container hard-stop, or equivalent) bypasses Python lifespan hooks,
-so the operating system must reclaim any remaining sockets and file handles;
-queued trace records may be lost.
+`LOG_LEVEL` controls Python logging. Normal startup logs name the configured
+provider/default model, routing state, ready model count, enabled MCP server
+count, and tool count. Enabled tracing logs its path separately; disabled
+tracing emits no state line. Provider and MCP failures keep private diagnostics
+in logs while API responses use stable safe messages.
 
-### Logs
+Do not use debug logs as a durable audit record. Do not assume they contain the
+complete prompt or transcript; logging is owned by each subsystem and may omit
+sensitive payloads.
 
-Logging is `INFO` by default. Key log lines to know:
+## Optional JSONL tracing
 
-| Line                                                                              | When                                                |
-|-----------------------------------------------------------------------------------|-----------------------------------------------------|
-| `harness ready: provider=... \| orchestration=... \| mcp=...`                     | End of lifespan startup. One greppable summary.    |
-| `chat: orchestrator picked model=... tools=N fallback=false`                     | Per request, when orchestration is on.            |
-| `chat: legacy mode (orchestration disabled), tools=N`                             | Per request, when orchestration is off.            |
-| `chat: done reason=... iterations=... tokens=... session=...`                    | At the end of every request.                       |
-| `orchestration fallback in effect: ...`                                          | Per request when the orchestrator's LLM call fails.|
-| `trace queue full ... dropping newest record`                                    | Trace storage is behind; warning is rate-limited. |
-| `tracing stopped: ... accepted=... written=... dropped=... writer_failures=...`  | Final trace accounting after shutdown.            |
+Tracing is off by default. Enable it explicitly:
 
-`httpx` and `mcp.client.*` are chatty — each MCP request and each LLM
-API call shows up at INFO. For production quieting:
-
-```python
-# in main.py lifespan, after logging.basicConfig:
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("mcp.client.streamable_http").setLevel(logging.WARNING)
+```dotenv
+TRACE_ENABLED=true
+TRACE_JSONL_PATH=traces/harness.jsonl
 ```
 
-For per-request orchestration detail (full system prompt and tool list),
-set `LOG_LEVEL=DEBUG`. The route logs the generated system prompt at
-DEBUG so you can audit what the agent was told without spamming INFO.
+The tracer persists the loop's emitted event records with run ID, step,
+timestamp, and latency metadata. Depending on the event, records can contain
+assistant text or reasoning, orchestration selections, tool arguments/results,
+usage, and terminal/error data. It does not independently serialize the full
+incoming request, system prompt, or conversation history, but its event
+payloads are still sensitive and should be protected at the filesystem level.
 
-### Health checks
+Retention is application-owned and fixed: one active file is limited to 10
+MiB, with three backups (`.1` newest through `.3` oldest). Complete records are
+never split. A single record larger than the file limit disables the optional
+tracer through its nonfatal writer-failure path. The in-memory queue is also
+bounded; overflow drops new trace records with rate-limited warnings rather
+than blocking execution. There are no trace size/count/queue tuning settings.
 
-`GET /health` returns 200 as long as the app is up. `mcp_servers` reports every
-configured enabled server's current state, sanitized last error, and advertised
-tool count. `connected_servers` remains the healthy-only compatibility list and
-`tool_count` remains the aggregate healthy inventory. Top-level status is `ok`
-when all enabled servers are healthy (or none are enabled) and `degraded`
-otherwise.
+## Sessions and process topology
 
-This is a truthful passive snapshot, not an active reachability probe. A
-transport/protocol tool-call failure marks the server unhealthy and removes its
-advertised tools. An accepted request refreshes a due catalog before routing;
-an actual tool call opens a bounded turn-local lease lazily. The failed call is
-never replayed. `/health` itself does not refresh catalogs, open leases, or
-probe the orchestrator's LLM provider. Add a separate liveness/readiness policy
-if deployment requirements need active probes.
+Native `/chat` sessions live only in the process memory. They expire by idle
+TTL, are bounded by capacity and transcript characters, and cannot be processed
+concurrently within one process. Restarting the process loses them.
 
-### Failure modes
+The `/v1/chat/completions` adapter creates a fresh ephemeral session per
+request. The OpenAI client must resend prior messages.
 
-| Symptom                                       | Likely cause                                                 |
-|-----------------------------------------------|--------------------------------------------------------------|
-| App fails to start with missing-key error     | Provider key missing from the process environment/project `.env`, or wrong `LLM_PROVIDER` |
-| `/health` is `degraded` or an MCP server is `unhealthy` | The server failed, was cancelled, exceeded `MCP_CONNECT_TIMEOUT_SECONDS` during startup/recovery, or raised a transport/protocol failure during dispatch; healthy siblings remain usable |
-| Tool result says its outcome is unknown and was not replayed | The MCP call crossed the remote invocation boundary and then failed. The server was invalidated; retry only if the operation is safe to issue as a new invocation. |
-| `/health` shows `orchestration_enabled: false` | `models.yaml` or `orchestrator_prompt.md` is missing, or `ORCHESTRATION_ENABLED=false`. Present but invalid orchestration files fail startup. |
-| Every response has `orchestration.fallback_used: true` | Orchestrator's LLM call is failing. Check the `orchestration fallback in effect:` warning logs for the underlying provider error. |
-| 400 from `/chat`                              | Empty request body. `/chat` is plain text — send the prompt as the body. |
-| 400 from Gemini after first tool result       | `provider_metadata` round-trip broken somewhere              |
-| `done_reason: "max_iterations"`               | Run hit the iteration cap. The loop forces a best-effort answer on the last step (tools withheld + wrap-up prompt), so `response` is populated — but recurring `max_iterations` means the model is churning; review the prompt or raise `LOOP_MAX_ITERATIONS`. Repeated-identical tool calls are already short-circuited (stall detection); look for genuinely distinct-but-unproductive calls. |
-| `done_reason: "llm_error"`                    | API call failed (after retries); see logs for the underlying exception |
-| `done_reason: "truncated"`                    | Model hit `LLM_MAX_TOKENS` mid-answer; `response` is clipped. Raise `LLM_MAX_TOKENS` or the model's per-entry `max_tokens`. |
-| `tool_result` with `is_error` "timed out"     | A tool exceeded `TOOL_TIMEOUT_SECONDS`. The MCP server is slow/hung; the loop continues and the model sees the error. |
-| `tool_result` with `is_error` "invalid arguments for field ..." | The model's tool call failed `jsonschema` validation against the tool's `input_schema`; `mcp.call_tool` was never reached. The model sees the offending field + expected shape and can retry. |
-| `done_reason: "budget_exceeded"`              | Run hit `RUN_MAX_TOKENS`. Disabled (`0`) by default; raise or disable the cap. Works even when the provider reports all-zero usage — the local estimator fills in. |
-| `context over budget under 'naive'` warnings  | The estimated request exceeds `context_window − max output − margin`. Set the model's `context_window` accurately in `models.yaml`, and consider `CONTEXT_STRATEGY=compaction` for long tool-heavy runs. |
-| `done_reason: "deadline_exceeded"`            | Run hit `RUN_MAX_SECONDS`, including while an LLM/tool call or retry sleep was in flight. Disabled (`0`) by default; raise or disable the cap, or investigate why the run is slow (retries, a slow provider). |
-| `done_reason: "no_progress"`                  | `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` consecutive tool-call failures (including validation failures). Disabled (`0`) by default. Review the failing tool/args in the logs — the consecutive-failure nudge already tried to steer the model before the abort fired. |
-| 404 on `/chat`                                | The `X-Session-Id` header names a session that doesn't exist (e.g. evicted by TTL/max-size, or after a restart wiped state)|
-| 409 on `/chat`                                | The `X-Session-Id` session already has a request in flight; `SessionGuard` rejects the concurrent turn. Retry after the first completes. |
+These guarantees are process-local. Multiple workers do not share sessions or
+the same-session guard. Use a single worker unless the client owns all history
+or a separately designed shared session/claim backend is introduced.
 
----
+## Common failures
 
-## Tests
+### Startup rejects configuration
 
-Pytest is the canonical regression runner. Its default selection is hermetic: tests
-use scripted provider/MCP fakes, temporary configuration, and in-process ASGI wiring,
-so a normal run neither loads developer credentials nor contacts configured services.
+- Confirm `.env` contains the credential for every configured provider.
+- Confirm every `${NAME}` referenced by MCP YAML is present.
+- Check transport-specific MCP fields and URL schemes.
+- Check `models.yaml` provider IDs, model IDs, exactly one default when needed,
+  capability enums, sampling ranges, and context/output limits.
+- Do not select a prompted-only model as the orchestration control model.
 
-```bash
-./runscript.sh -m pytest
-```
+### Health is degraded or tools are absent
 
-The current verified default suite contains 742 hermetic cases and deselects
-the seven explicitly live cases. The exact count may grow, but the live split
-must remain explicit.
+- Inspect the matching `mcp_servers[]` record and server logs.
+- Confirm the endpoint is reachable from the Hyphae process.
+- Confirm the configured transport and endpoint path match the server.
+- Check `disabled`, `disabled_tools`, and the top-level `tool_policy`.
+- An age-driven catalog refresh occurs only at an accepted request boundary;
+  startup and a turn lease can also discover a catalog.
 
-Configured-backend checks live behind an explicit `live` marker and are never part of
-that default signal. Select all live checks, or narrow them by capability:
+### Model requests fail
 
-```bash
-./runscript.sh -m pytest -m live
-./runscript.sh -m pytest -m "live and model"
-./runscript.sh -m pytest -m "live and mcp"
-./runscript.sh -m pytest -m "live and http_server"
-```
+- Compare `/v1/models` with the requested ID.
+- For OpenAI-compatible servers, ensure `OPENAI_COMPAT_BASE_URL` ends at the
+  correct API root and `model` matches the server's identifier.
+- Ensure a nonempty OpenAI API key is supplied even when a local server ignores
+  it, because the SDK requires one.
+- Distinguish `invalid_model` (not admitted) from `model_unavailable`
+  (configured but not ready) and `provider_failure` (execution failed).
 
-Live checks opt into `Settings()` and its `.env`, can contact configured MCP and model endpoints,
-and may spend model tokens. The `http_server` marker identifies checks of the fully
-configured FastAPI surface; these currently run the app in-process with its lifespan
-and do not require a separately launched Uvicorn process.
+### A run stops early
 
-All former smoke coverage is now pytest-native. Configured MCP, model, agent,
-orchestrator, HTTP, concurrency, and OpenAI-provider checks live in focused
-`test_*_live.py` modules with explicit markers. See `tests/README.md` for the
-current organization and focused commands.
+Inspect `X-Done-Reason`, the stream terminal, or trace/log records. Iteration,
+token, deadline, consecutive-failure, context, and retained-session limits are
+separate controls. Their exact settings are documented in
+[Configuration](configuration.md).
 
-### Static and CI checks
+### Streaming appears buffered
 
-Run the repository-owned verification commands from the project root:
+Test directly against Uvicorn first. Reverse proxies can buffer SSE even when
+Hyphae emits chunks correctly; disable proxy buffering for streaming routes.
 
-```bash
-uv run ruff check .
-uv run mypy
-uv run python -m compileall -q \
-  agent api config llm mcp_runtime orchestrator tooling main.py tests
-uv run pytest --collect-only -q -m live
-uv run pytest -q
-```
+## Known limitations
 
-Mypy is strict. Its roots are declared once in `pyproject.toml`: all 48
-production Python modules plus `tests/fakes.py` and `tests/_app_support.py`.
-Ordinary test modules remain outside strict checking; the two shared support
-modules are included because they implement reusable production boundaries.
-The GitHub verification workflow runs the same argument-free `uv run mypy`
-command, so local and CI target sets cannot drift.
-
----
-
-## Eval Suite
-
-The deterministic eval suite is the harness's regression net for "did the
-agent produce the right outcome?", separate from smoke tests that prove
-subsystems run. It is intentionally cheap: no pytest, no LLM judge, no external
-eval framework.
-
-Run the hermetic tier:
-
-```bash
-./runscript.sh tests/eval_agent.py
-```
-
-Hermetic evals load `tests/eval_data/agent_eval_v1.yaml`, drive the agent loop
-or `TurnRunner` with scripted LLM/MCP fakes, print a per-case pass/fail table,
-and exit non-zero if the pass rate is below the dataset threshold. The live tier
-is skipped loudly by default.
-
-Run live evals manually:
-
-```bash
-EVAL_LIVE=1 ./runscript.sh tests/eval_agent.py
-```
-
-Live evals use the configured real LLM backend from `.env`/`Settings` and an
-empty MCP inventory unless a future live case says otherwise. They are
-best-effort and should not be treated as hermetic CI signal.
-
-Add a new eval case by editing only `tests/eval_data/agent_eval_v1.yaml`:
-
-1. Add an entry under `cases` with a unique `id`, `tier`, `prompt`, scripted
-   `llm.script` responses, optional `mcp.tools`/`mcp.results`, optional `run`
-   knobs, and an `expect` block.
-2. Prefer programmatic expectations: `done_reason`, `answer_contains`,
-   `tool_called`, `tool_not_called`, `tool_call_count`, `mcp_call_count`,
-   `tool_result_contains`, `tool_result_error_count`, `llm_calls`, and
-   `max_iterations`.
-3. Keep the case hermetic unless it genuinely needs a real model; mark live
-   cases with `tier: live`.
-
-The dataset threshold is the minimum pass rate required for the selected tier.
-The current hermetic dataset uses `threshold: 1.0`, meaning any hermetic
-regression fails the runner. If the suite grows to include known-flaky live
-cases, keep that tolerance in the live tier, not in hermetic checks.
-
----
-
-## Known Limitations
-
-These are deliberate v1 simplifications, not bugs. Each has a clear
-extension path described above.
-
-- **Sessions are in-memory by design.** Conversation history dies with the
-  process — intentional, since LibreChat holds the durable context and
-  re-feeds it. The store is bounded (`SESSION_TTL_SECONDS`,
-  `SESSION_CAPACITY`, `SESSION_HISTORY_MAX_CHARS`) so neither the session count
-  nor one persistent transcript can grow without limit. Over-limit turns keep
-  the prior complete checkpoint and must continue in a new session. Durable
-  persistence is the `SessionStore` ABC's job if the use case ever changes.
-- **Streaming is available on `/v1`.** `POST /v1/chat/completions` with
-  `stream: true` returns an SSE stream of `chat.completion.chunk` frames. The
-  native `/chat` endpoint is still non-streaming; use `/chat/stream` for the
-  native live activity feed with tool and reasoning events.
-- **Optional API-key auth.** Set `HYPHAE_API_KEY` to require a key on `/chat`,
-  `/chat/stream`, and `/v1/*` (via `X-API-Key` or `Authorization: Bearer`);
-  `/health` stays open. Unset = auth off (dev default), the pre-existing wide-open
-  behavior. Enforced at the route layer only — see
-  [api.md](api.md#authentication). No per-user/multi-tenant policy, rate limiting,
-  or trace-file protection is included.
-- **Optional tool-dispatch policy.** `tool_policy` in `mcp_config.yaml`
-  (`allow_all` default, or `allow_list` with patterns) gates which tools may
-  *execute* at dispatch; a denied call never reaches MCP and comes back as a
-  teaching `is_error` result. Distinct from `disabled_tools` (which controls tool
-  *visibility*). See [configuration.md](configuration.md).
-- **Capability profiles are declarative.** `models.yaml` can declare
-  `supports_native_tools`, `thinking`, and `sampling` per model. Sampling and
-  supported thinking hints are consumed by providers; setting
-  `supports_native_tools` to `false` selects the prompted-tool wrapper for
-  downstream agent turns.
-- **Reasoning is separate from answer text.** OpenAI-compatible
-  leading `<think>...</think>` content is separated from visible text and
-  emitted as sanitized reasoning deltas/events. Session replay excludes it;
-  `/v1` streaming can render it through `reasoning_content`, while native
-  routes continue to omit it.
-  Gemini reasoning remains `None` unless the SDK exposes thought content in a
-  detectable form; Gemini `thought_signature` still round-trips through
-  `provider_metadata`.
-- **Per-call timeouts, plus optional overall token/wall-clock caps.** Each
-  `llm.complete()` attempt is bounded by `LLM_TIMEOUT_SECONDS` and each
-  `mcp.call_tool()` by `TOOL_TIMEOUT_SECONDS`, so a single hung call can't
-  stall a request indefinitely. A timeout cancels the in-flight call and
-  abandons it; for the LLM that feeds the retry path, for a tool it becomes an
-  `is_error` result. `RUN_MAX_TOKENS` and `RUN_MAX_SECONDS` (both `0`/disabled
-  by default) additionally bound *total* run cost/duration. The wall-clock
-  budget begins after the session claim and covers routing, retries, generation,
-  tool calls, and backoff. See [configuration.md](configuration.md) and the *Bounded &
-  safe runs* section of [architecture.md](architecture.md). The token cap
-  works even against a provider that reports all-zero usage — the local
-  token estimator (`agent/context.py`) fills in from the outgoing messages
-  and response. Estimates are heuristic (chars/4), so treat the cap as a
-  guard rail, not billing-grade accounting, on such servers.
-- **No parallel tool execution.** Sequential is safer; switch when you
-  need it.
-- **No token/cost tracking aggregated across requests.** Per-request
-  usage is in the response; aggregation is the caller's job.
-- **Concurrent `/chat` on the same session_id is rejected, not raced.**
-  `SessionGuard` returns **409** for a second in-flight request on a session
-  (distinct sessions are fully isolated and run in parallel freely). The
-  guard is in-process; a multi-worker deployment would need a shared claim
-  (see "Adding persistence") to cover the same id across workers.
-- **`/health` doesn't probe MCP.** It truthfully reports every enabled server's
-  current catalog state and healthy advertised inventory, but does not refresh
-  catalogs or open leases. Accepted requests refresh due catalogs before
-  routing; actual tool calls open turn-local leases lazily. It also doesn't
-  probe the orchestrator's LLM provider.
-- **Two LLM providers implemented: Gemini and OpenAI-compatible.** The OpenAI
-  client also drives any OpenAI-compatible server (local Ollama/vLLM) via
-  `base_url`. The checked-in orchestrated registry defaults to
-  `ornith-1.0-35b`; when orchestration is disabled, the separately configurable
-  `LLM_PROVIDER` and `LLM_MODEL` select the default client. Anthropic keys are
-  recognized but its client is still stubbed (`build_llm_client` /
-  `build_llm_client_from_entry` raise `NotImplementedError`).
-- **Per-worker session isolation.** Multi-worker uvicorn deployments
-  have independent in-memory stores per worker.
-- **Orchestration adds an LLM call per request.** That's the cost of
-  dynamic routing. Use a cheap model for the orchestrator
-  (`ORCHESTRATOR_MODEL_ID`) to keep it affordable.
-- **Switching models mid-session can be lossy.** Provider-specific
-  conversation state (Gemini's `thought_signature`, OpenAI's reasoning
-  traces) doesn't always cross providers cleanly. The orchestrator may
-  pick different models on different turns of the same session; in
-  practice modern models tolerate this but pathological cases exist.
-- **The orchestrator has no per-request budget control.** It picks the
-  best model for the job, not the cheapest acceptable one — descriptions
-  in `models.yaml` are the only steering. A future change could add
-  explicit cost ceilings.
-- **No A/B testing or routing experimentation.** The orchestrator is one
-  LLM call making one decision; there's no shadow-routing or sampling
-  policy.
+- Sessions and same-session exclusion are in-memory and single-process.
+- There is no durable job queue, resume protocol, or cross-process run state.
+- Each accepted turn's policy-visible tool snapshot is fixed; the underlying
+  process-owned MCP catalogs have separate discovery/refresh ownership. There
+  is no progressive tool discovery or mutable active tool view within a turn.
+- Prompt composition has distinct local owners; there is no template framework,
+  temporal context injection, or hot reload.
+- The OpenAI adapter intentionally supports text `system`/`user`/`assistant`
+  messages only, not the complete OpenAI API surface.
+- Gemini uses the inherited coarse complete-based stream; the
+  OpenAI-compatible provider implements native incremental streaming.

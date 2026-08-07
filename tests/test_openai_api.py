@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 
 import pytest
 
+import main as main_module
 from agent import InMemorySessionStore, Session
 from api import openai_compatible
 from api.request_body import MAX_REQUEST_BODY_BYTES
@@ -29,6 +30,42 @@ from tests._app_support import replace_routing, runtime_of, wired_app
 
 
 pytestmark = pytest.mark.anyio
+
+
+def test_openapi_keeps_the_narrow_public_surface_and_health_contract() -> None:
+    schema = main_module.app.openapi()
+
+    assert schema["openapi"] == "3.1.0"
+    assert {
+        path: set(path_item)
+        for path, path_item in schema["paths"].items()
+    } == {
+        "/health": {"get"},
+        "/chat": {"post"},
+        "/chat/stream": {"post"},
+        "/v1/chat/completions": {"post"},
+        "/v1/models": {"get"},
+    }
+
+    schemas = schema["components"]["schemas"]
+    assert set(schemas["HealthResponse"]["required"]) == {
+        "status",
+        "provider",
+        "model",
+        "connected_servers",
+        "tool_count",
+        "mcp_servers",
+    }
+    assert set(schemas["MCPServerHealth"]["required"]) == {
+        "name",
+        "state",
+        "last_error",
+        "tool_count",
+        "catalog_revision",
+        "last_discovered_at",
+        "next_refresh_at",
+        "active_leases",
+    }
 
 
 class FakeLLM(LLMClient):

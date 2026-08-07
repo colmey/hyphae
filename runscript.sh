@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# runscript.sh -- canonical launcher for the harness and its smoke tests.
+# runscript.sh -- project-environment Python launcher.
 #
 # Activates the project virtualenv, prepends the project root to PYTHONPATH
 # (so scripts under tests/ can import config, main, etc.), and

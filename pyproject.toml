@@ -64,6 +64,7 @@ files = [
     "llm",
     "mcp_runtime",
     "orchestrator",
+    "scripts",
     "tooling",
     "main.py",
     "tests/fakes.py",

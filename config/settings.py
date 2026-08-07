@@ -59,7 +59,11 @@ class LLMSettings(BaseModel):
         description="Provider-native model name to use",
         validation_alias=AliasChoices("model", "model_name"),
     )
-    max_tokens: int = Field(default=4096, gt=0)
+    max_tokens: int = Field(
+        default=4096,
+        gt=0,
+        description="Default output-token cap for one LLM completion.",
+    )
     timeout_seconds: float = Field(
         default=120,
         allow_inf_nan=False,
@@ -162,7 +166,13 @@ class Settings(BaseSettings):
         return settings
 
     # Only the selected provider's key must be set.
-    anthropic_api_key: str = Field(default="", description="Anthropic API key")
+    anthropic_api_key: str = Field(
+        default="",
+        description=(
+            "Reserved for a future Anthropic provider; no Anthropic provider is "
+            "implemented."
+        ),
+    )
     gemini_api_key: str = Field(default="", description="Gemini API key")
     openai_api_key: str = Field(default="", description="OpenAI API key")
     openai_compat_base_url: str = Field(
@@ -181,7 +191,10 @@ class Settings(BaseSettings):
     # Provider validation lives in llm.client to keep this layer import-light.
     # The one-split environment mapping preserves LLM_PROVIDER,
     # LLM_MODEL, LLM_MAX_TOKENS, and the LLM execution-control names.
-    llm: LLMSettings = Field(default_factory=LLMSettings)
+    llm: LLMSettings = Field(
+        default_factory=LLMSettings,
+        description="LLM defaults populated from the flat LLM_* environment variables.",
+    )
 
     # Non-LLM execution timeouts; <= 0 disables the respective bound.
     tool_timeout_seconds: float = Field(
@@ -279,8 +292,8 @@ class Settings(BaseSettings):
     context_strategy: Literal["naive", "compaction"] = Field(
         default="naive",
         description=(
-            "Context assembly strategy: 'naive' (pass-through + budget warning) "
-            "or 'compaction' (summarize over-budget middle history)."
+            "Context assembly strategy: 'naive' rejects over-budget context; "
+            "'compaction' summarizes over-budget middle history before submission."
         ),
     )
     context_default_window_tokens: int = Field(
@@ -315,16 +328,20 @@ class Settings(BaseSettings):
     )
 
     # Application paths. All runtime config lives under config/ by convention.
-    mcp_config_path: Path = Field(default=CONFIG_DIR / "mcp_config.yaml")
+    mcp_config_path: Path = Field(
+        default=CONFIG_DIR / "mcp_config.yaml",
+        description="Path to the MCP server and tool-policy YAML configuration.",
+    )
     loop_max_iterations: int = Field(
         default=10,
         gt=0,
+        description="Maximum agent-loop iterations for one accepted run.",
         validation_alias=AliasChoices(
             "loop_max_iterations",
             "max_loop_iterations",
         ),
     )
-    log_level: str = Field(default="INFO")
+    log_level: str = Field(default="INFO", description="Python logging level.")
 
     # Optional API-key gate for /chat, /chat/stream, and /v1/*; /health stays open.
     hyphae_api_key: str = Field(
@@ -336,7 +353,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("hyphae_api_key", "harness_api_key"),
     )
 
-    # JSONL traces include full prompts/tool data; protect the file accordingly.
+    # JSONL traces contain emitted event payloads, including tool data; protect them.
     trace_enabled: bool = Field(
         default=False,
         description="Persist the loop's event stream as a JSONL trace.",
@@ -350,11 +367,17 @@ class Settings(BaseSettings):
     # In-memory session bounds; <= 0 disables the respective dimension.
     session_ttl_seconds: int = Field(
         default=3600,
-        description="Idle TTL (seconds) before an in-memory session is evicted.",
+        description=(
+            "Idle TTL (seconds) for lazy in-memory eviction; active claims are "
+            "protected. <=0 disables TTL eviction."
+        ),
     )
     session_capacity: int = Field(
         default=1000,
-        description="Max sessions retained in memory; oldest-updated evicted first.",
+        description=(
+            "Max in-memory sessions; admission evicts oldest-updated unclaimed "
+            "sessions first. <=0 disables the count cap."
+        ),
         validation_alias=AliasChoices("session_capacity", "session_max_count"),
     )
     session_history_max_chars: int = Field(
@@ -363,7 +386,7 @@ class Settings(BaseSettings):
         description="Maximum canonical retained transcript characters per session.",
     )
 
-    # When off, routes use the default LLM and full tool inventory directly.
+    # When off, routes use the default LLM and policy-visible tool inventory.
     orchestration_enabled: bool = Field(
         default=True,
         description="Master toggle for the orchestration layer.",

@@ -3,29 +3,26 @@
 """
 Run tracing: serialize the loop's event stream as a bounded JSONL trace.
 
-The agent loop already keeps an append-only event log as its run state (see
-`agent/events.py`). A *trace* is just that log written to disk — one JSON record
-per event, tagged with the run's `run_id`, a monotonic step index, an ISO
-timestamp, and (for LLM/tool steps) latency. This is observability for nearly
-free: we serialize the events the loop emits anyway rather than running a second
-logging subsystem (research Doc 08, "the trace is the state log").
+The agent loop emits typed events defined in `agent/events.py`. A trace
+serializes those events as one JSON record each, tagged with the run's `run_id`,
+a monotonic step index, an ISO timestamp, and latency where available. It does
+not create a second execution-state owner.
 
-The `Tracer` ABC is the swappable seam, mirroring `SessionStore`: a no-op
-default, a JSONL implementation today, and a clean path to an OpenTelemetry
-exporter later (instrument once, send anywhere) without touching the loop.
+The `Tracer` ABC is the observability seam. The current implementation is a
+bounded JSONL sink; disabled tracing constructs no sink or worker.
 
 A tracer is neither the LLM client nor the MCP manager, so threading one into
 `run_agent` preserves the "loop is the only bridge" invariant. Tracing is also
-strictly optional: a missing or failing sink degrades silently and never breaks
-a request — the loop wraps every emit, and a tracer that can't open its file
-falls back to no tracing at startup.
+strictly optional: a missing or failing sink degrades nonfatally and never
+breaks a request — the loop wraps every emit, and a tracer that can't open its
+file logs the failure and falls back to no tracing at startup.
 
-Sensitivity: the JSONL trace captures *full* message text, tool arguments, and
-tool results by default. Route authentication does not protect the local trace
-file, so full bodies are appropriate only for the single-operator dev harness;
-treat the trace file as sensitive. A
-metadata-only mode (omit bodies, keep names/usage/latency) is the natural next
-toggle once multi-tenant exposure exists.
+Sensitivity: the JSONL trace captures emitted event payloads. Depending on the
+event, those payloads can include assistant output or reasoning, routing
+selections, tool arguments and results, usage, and safe error data. The tracer
+does not independently serialize the complete incoming request, system prompt,
+or conversation history. Route authentication does not protect the local trace
+file, so treat it as sensitive and protect it at the filesystem level.
 """
 
 from __future__ import annotations

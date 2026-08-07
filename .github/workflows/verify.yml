@@ -31,7 +31,13 @@ jobs:
       - name: Compile
         run: >-
           uv run python -m compileall -q
-          agent api config llm mcp_runtime orchestrator tooling main.py tests
+          agent api application config llm mcp_runtime orchestrator scripts
+          tooling main.py tests
+
+      - name: Documentation
+        run: |
+          uv run python scripts/render_settings_reference.py --check
+          uv run python scripts/check_markdown_links.py
 
       - name: Collect live tests
         run: uv run pytest --collect-only -q -m live

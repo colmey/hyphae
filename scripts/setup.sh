@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# setup.sh -- sync the project virtualenv and locked dependencies with uv.
+# scripts/setup.sh -- sync the project virtualenv and locked dependencies with uv.
 #
 # Uses `uv` (https://docs.astral.sh/uv/), which bundles its own Python and
 # venv machinery, so it works even where the system `python3-venv`/`ensurepip`
 # package is missing. If uv isn't installed, this script installs it.
 #
 # Usage:
-#   ./setup.sh
+#   ./scripts/setup.sh
 #
 # Idempotent: re-running reuses the existing .venv and re-syncs deps.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 VENV="$ROOT/.venv"
@@ -52,6 +52,6 @@ fi
 echo
 echo "Setup complete."
 echo "  1. Edit .env and set your API keys (e.g. GEMINI_API_KEY) and MCP URLs."
-echo "  2. Run the server:  ./runscript.sh -m uvicorn main:app --host 0.0.0.0 --port 8000"
-echo "  3. Run hermetic tests: ./runscript.sh -m pytest"
-echo "     Live integrations: ./runscript.sh -m pytest -m live"
+echo "  2. Run the server:  uv run uvicorn main:app --host 0.0.0.0 --port 8000"
+echo "  3. Run hermetic tests: uv run pytest"
+echo "     Live integrations: uv run pytest -m live"

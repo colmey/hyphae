@@ -10,18 +10,17 @@ for verification commands.
 Hyphae requires Python 3.12 and uses the committed `uv.lock`.
 
 ```bash
-./setup.sh
-./runscript.sh -m uvicorn main:app --host 127.0.0.1 --port 8000
+./scripts/setup.sh
+uv run uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-`setup.sh` installs `uv` when absent, synchronizes the locked development
+`scripts/setup.sh` installs `uv` when absent, synchronizes the locked development
 environment into `.venv`, and creates `.env` from `.env.example` only when
 `.env` does not exist.
 
-`runscript.sh` activates that environment, prepends the repository root to
-`PYTHONPATH`, and executes the supplied Python arguments. It does not change the
-working directory. Application-relative configuration paths still resolve from
-the repository root.
+Run `uv` commands from the repository root. `uv run` selects the synchronized
+project environment directly; application-relative configuration paths resolve
+from the repository root.
 
 For a network-accessible deployment, choose the bind address deliberately and
 put normal TLS, proxy, and access controls in front of Uvicorn. Set

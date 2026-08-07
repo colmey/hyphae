@@ -65,8 +65,6 @@ hyphae/
 ├── main.py
 ├── pyproject.toml
 ├── uv.lock
-├── setup.sh
-├── runscript.sh
 ├── config/
 │   ├── settings.py
 │   ├── schemas.py
@@ -114,6 +112,7 @@ hyphae/
 │   ├── routes.py
 │   └── openai_compatible.py
 ├── scripts/
+│   ├── setup.sh
 │   ├── render_settings_reference.py
 │   └── check_markdown_links.py
 ├── tests/

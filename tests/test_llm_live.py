@@ -10,7 +10,7 @@ build_llm_client(settings) -> the provider registry, in three scenarios:
      send tools, receive tool_use, execute the tool via MCPManager, send the
      result back, get a final answer.
 
-Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
+Run explicitly with ``uv run pytest -m "live and model and mcp"``.
 """
 
 from __future__ import annotations

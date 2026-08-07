@@ -13,7 +13,7 @@ prompt, and the trusted downstream agent prompt).
 Read lazily into `Settings` via `pydantic-settings`. `SettingsConfigDict.env_file`
 is the sole production reader for the project-root `.env`; importing `main`
 does not load credentials or mutate `os.environ`. Copy `.env.example` to `.env`
-(the `setup.sh` script does this for you) and fill in your values. Real process
+(the `scripts/setup.sh` script does this for you) and fill in your values. Real process
 environment variables take precedence over `.env`, so the same file works for
 local dev, containers, and CI. Tests that need hermetic defaults construct
 `Settings(_env_file=None)`.

@@ -3,7 +3,7 @@
 Connects to all enabled MCP servers, lists their tools, optionally calls one
 tool, then shuts down cleanly. No LLM, no HTTP server.
 
-Run explicitly with ``./runscript.sh -m pytest -m "live and mcp"``.
+Run explicitly with ``uv run pytest -m "live and mcp"``.
 """
 
 from __future__ import annotations

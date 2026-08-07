@@ -17,7 +17,7 @@ Scenarios:
   4. POST /chat with an unknown session header -> 404
   5. POST /chat with an empty body -> 400
 
-Run explicitly with ``./runscript.sh -m pytest -m "live and http_server"``.
+Run explicitly with ``uv run pytest -m "live and http_server"``.
 """
 
 from __future__ import annotations

@@ -14,7 +14,7 @@ Scenarios:
 Makes real LLM + MCP calls, so Settings loads the configured project ``.env``
 when lifespan starts.
 
-Run explicitly with ``./runscript.sh -m pytest -m "live and http_server"``.
+Run explicitly with ``uv run pytest -m "live and http_server"``.
 """
 
 from __future__ import annotations

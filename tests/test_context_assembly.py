@@ -30,7 +30,7 @@ manager drive assemble_context() and run_agent() directly.
   8. Token accounting   - fallback includes exact tools; auxiliary usage is
                           separately emitted/traced and included in caps/done.
 
-Run from the project root with ``./runscript.sh -m pytest tests/test_context_assembly.py``.
+Run from the project root with ``uv run pytest tests/test_context_assembly.py``.
 """
 
 from __future__ import annotations

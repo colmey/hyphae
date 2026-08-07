@@ -2,10 +2,10 @@
 Deterministic agent eval runner.
 
 Hermetic by default:
-    ./runscript.sh tests/eval_agent.py
+    uv run python -m tests.eval_agent
 
 Live evals are skipped unless explicitly enabled:
-    EVAL_LIVE=1 ./runscript.sh tests/eval_agent.py
+    EVAL_LIVE=1 uv run python -m tests.eval_agent
 
 This is deliberately not pytest and not an eval framework. Cases live as data
 under tests/eval_data/; adding a hermetic case should only require editing the

@@ -9,10 +9,10 @@ configured MCP servers.
 
 ```bash
 # Create .venv, install the locked development environment, and seed .env.
-./setup.sh
+./scripts/setup.sh
 
 # Edit .env and the files under config/, then start the server.
-./runscript.sh -m uvicorn main:app --host 0.0.0.0 --port 8000
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 The four runtime configuration assets are:

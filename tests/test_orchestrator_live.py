@@ -21,7 +21,7 @@ default. The earlier version of this test missed that case because its
 structural assertions (model_id in registry, tools in MCP inventory)
 were satisfied by the fallback values too.
 
-Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
+Run explicitly with ``uv run pytest -m "live and model and mcp"``.
 """
 
 from __future__ import annotations

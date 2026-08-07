@@ -36,9 +36,6 @@ uv run pytest -q
 git diff --check
 ```
 
-The same Python test commands can be launched through `./runscript.sh`; `uv run`
-is used above because it is also the CI form.
-
 ## Suite policy
 
 `pyproject.toml` excludes `live` by default and gives hermetic tests a 30-second
@@ -106,13 +103,13 @@ uv run pytest --collect-only -q -m live
 evaluation framework. Its default tier is deterministic:
 
 ```bash
-./runscript.sh tests/eval_agent.py
+uv run python -m tests.eval_agent
 ```
 
 The live tier is separately opt-in and may use the configured model backend:
 
 ```bash
-EVAL_LIVE=1 ./runscript.sh tests/eval_agent.py
+EVAL_LIVE=1 uv run python -m tests.eval_agent
 ```
 
 Add hermetic evaluation scenarios as data in `eval_data/agent_eval_v1.yaml`.

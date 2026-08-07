@@ -17,7 +17,7 @@ Configure via the process environment or project ``.env`` before running:
     export OPENAI_API_KEY=<key>                         # any non-empty value
     export OPENAI_MODEL=qwen3.6-35b-a3b                 # an `ollama list` tag
 
-Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
+Run explicitly with ``uv run pytest -m "live and model and mcp"``.
 """
 
 from __future__ import annotations

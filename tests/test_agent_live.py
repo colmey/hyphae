@@ -15,7 +15,7 @@ Three scenarios:
 We run each scenario with both the streaming-style consumer (iterating the
 generator and reacting to events) and verify the final session state.
 
-Run explicitly with ``./runscript.sh -m pytest -m "live and model and mcp"``.
+Run explicitly with ``uv run pytest -m "live and model and mcp"``.
 """
 
 from __future__ import annotations

@@ -326,6 +326,12 @@ class Settings(BaseSettings):
         gt=0,
         description="Output cap for the one-call compaction summarizer.",
     )
+    system_prompt_time_enabled: bool = Field(
+        default=True,
+        description=(
+            "Append one UTC turn-start timestamp to the downstream system prompt."
+        ),
+    )
 
     # Application paths. Bundled runtime config lives under hyphae/config/.
     mcp_config_path: Path = Field(

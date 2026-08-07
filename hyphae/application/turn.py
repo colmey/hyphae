@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, AsyncContextManager, Protocol, runtime_checkable
 
@@ -37,6 +38,24 @@ from hyphae.tooling import ToolRuntime, ToolSnapshot
 from hyphae.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _with_turn_start_time(system_prompt: str | None, started_at: datetime) -> str:
+    """Append stable application-owned time context to one downstream prompt."""
+    timestamp = started_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ")
+    runtime_context = (
+        "Runtime context:\n"
+        f"- Current time at turn start: {timestamp} (UTC)."
+    )
+    if not system_prompt:
+        return runtime_context
+    if system_prompt.endswith("\n\n"):
+        separator = ""
+    elif system_prompt.endswith("\n"):
+        separator = "\n"
+    else:
+        separator = "\n\n"
+    return f"{system_prompt}{separator}{runtime_context}"
 
 
 class PersistencePolicy(Enum):
@@ -210,6 +229,7 @@ class ApplicationRuntime:
             guard=self.guard,
             policy=self.policy,
             tracer=self.tracer,
+            system_prompt_time_enabled=self.settings.system_prompt_time_enabled,
         )
 
 
@@ -260,6 +280,7 @@ class TurnRunner:
     guard: SessionGuard
     policy: ToolPolicy | None
     tracer: Tracer | None
+    system_prompt_time_enabled: bool
 
     async def create_session(self) -> Session:
         """Create a persistent session while preserving active checkpoints."""
@@ -465,6 +486,9 @@ class TurnRunner:
                 base_logger=logger,
                 tracer=self.tracer,
             )
+            turn_started_at = (
+                datetime.now(UTC) if self.system_prompt_time_enabled else None
+            )
             if request.persistence is PersistencePolicy.PERSISTENT:
                 source_session = await self.store.get(request.session.session_id)
                 prospective = source_session.staged_copy()
@@ -490,6 +514,15 @@ class TurnRunner:
                 )
                 staged_request = replace(request, session=source_session.staged_copy())
                 routing = await self._resolve_routing(staged_request, visible_tools, context)
+                if self.system_prompt_time_enabled:
+                    assert turn_started_at is not None
+                    routing = replace(
+                        routing,
+                        system_prompt=_with_turn_start_time(
+                            routing.system_prompt,
+                            turn_started_at,
+                        ),
+                    )
                 limits = self.limits.for_model(routing.model_entry)
                 metadata = TurnMetadata(
                     run_id=context.run_id,

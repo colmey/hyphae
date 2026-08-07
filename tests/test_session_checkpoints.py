@@ -251,6 +251,7 @@ def _runner(
         guard=SessionGuard(),
         policy=None,
         tracer=None,
+        system_prompt_time_enabled=settings.system_prompt_time_enabled,
     )
 
 

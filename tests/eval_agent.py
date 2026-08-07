@@ -306,6 +306,7 @@ async def _run_hermetic(case: dict[str, Any]) -> RunArtifacts:
             guard=SessionGuard(),
             policy=None,
             tracer=None,
+            system_prompt_time_enabled=False,
         )
         turn = TurnRequest(
             prompt=case["prompt"],

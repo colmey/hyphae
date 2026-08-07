@@ -60,6 +60,7 @@ process environment.
 | `CONTEXT_SAFETY_MARGIN_TOKENS` | `1024` | Headroom subtracted from the context window (with max output tokens) when computing the input budget; absorbs estimator error. | — |
 | `CONTEXT_RECENT_MESSAGES` | `6` | Recent protocol-safe units (a user turn, a no-tool assistant turn, or an assistant tool call plus its results) kept verbatim under compaction. Shrinks automatically if the tail alone overflows. | — |
 | `CONTEXT_SUMMARY_MAX_TOKENS` | `512` | Output cap for the one-call compaction summarizer. | — |
+| `SYSTEM_PROMPT_TIME_ENABLED` | `true` | Append one UTC turn-start timestamp to the downstream system prompt. | — |
 | `MCP_CONFIG_PATH` | `hyphae/config/mcp_config.yaml` | Path to the MCP server and tool-policy YAML configuration. | — |
 | `LOOP_MAX_ITERATIONS` | `10` | Maximum agent-loop iterations for one accepted run. | `MAX_LOOP_ITERATIONS` |
 | `LOG_LEVEL` | `INFO` | Python logging level. | — |
@@ -262,6 +263,12 @@ turns. An authorized `TurnRequest.system_override` (used by the `/v1` adapter
 for caller-supplied system messages) replaces it for that ephemeral turn.
 Router output, user text, conversation history, and tool metadata cannot modify
 this trusted behavior prompt.
+
+When `SYSTEM_PROMPT_TIME_ENABLED=true`, the application appends one
+minute-precision UTC timestamp after the effective downstream prompt. It is
+captured at turn start and stays unchanged across every model iteration in that
+turn. The timestamp also applies to caller overrides and unorchestrated turns;
+setting the toggle to `false` preserves the effective prompt verbatim.
 
 Change this file when the default agent behavior itself should change. Prompt
 changes can affect model behavior even when no Python interface changes, so

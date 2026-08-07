@@ -23,10 +23,11 @@ def test_settings_reference_uses_metadata_without_constructing_settings(
     table = render_settings_reference.render_settings_table()
     setting_rows = [line for line in table.splitlines() if line.startswith("| `")]
 
-    assert len(setting_rows) == 38
+    assert len(setting_rows) == 39
     assert "`LLM_MODEL`" in table
     assert "`LLM_MODEL_NAME`" in table
     assert "`AGENT_PROMPT_PATH`" in table
+    assert "`SYSTEM_PROMPT_TIME_ENABLED`" in table
     assert "`hyphae/config/models.yaml`" in table
     assert "`traces/harness.jsonl`" in table
     assert "environment-secret" not in table

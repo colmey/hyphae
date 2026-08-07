@@ -94,6 +94,7 @@ def wired_app(
     previous = dict(app.state._state)
     settings_values: dict[str, Any] = {
         "orchestration_enabled": False,
+        "system_prompt_time_enabled": False,
         **dict(settings_overrides or {}),
     }
     # pydantic-settings accepts _env_file, but omits it from the generated

@@ -11,6 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable
@@ -21,6 +22,7 @@ from fastapi import FastAPI, Request
 import hyphae.api.schemas as api_schemas
 import hyphae.api.dependencies as api_dependencies
 import hyphae.application as application_package
+import hyphae.application.turn as turn_module
 import hyphae.main as main_module
 from hyphae.agent import (
     DoneEvent,
@@ -236,6 +238,7 @@ class RecordingTracer(Tracer):
 def _settings(**overrides: Any) -> Settings:
     values = {
         "orchestration_enabled": True,
+        "system_prompt_time_enabled": False,
         "llm": {
             "model": "unorchestrated-executing-model",
             "max_retries": 0,
@@ -280,6 +283,7 @@ def _runner(
         guard=SessionGuard(),
         policy=policy,
         tracer=tracer,
+        system_prompt_time_enabled=resolved_settings.system_prompt_time_enabled,
     )
 
 
@@ -694,6 +698,103 @@ async def test_untrusted_routing_data_cannot_author_downstream_system_prompt() -
         )
     )
     assert agent.requests_seen[1].system == "authorized caller override"
+
+
+async def test_turn_start_time_applies_to_default_override_and_direct_prompts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FixedDateTime:
+        calls = 0
+
+        @classmethod
+        def now(cls, zone: object) -> datetime:
+            assert zone is UTC
+            cls.calls += 1
+            return datetime(2026, 8, 7, 3, 42, 59, tzinfo=UTC)
+
+    monkeypatch.setattr(turn_module, "datetime", FixedDateTime)
+    runtime_context = (
+        "Runtime context:\n"
+        "- Current time at turn start: 2026-08-07T03:42Z (UTC)."
+    )
+    settings = _settings(system_prompt_time_enabled=True)
+
+    orchestrated_agent = AnswerLLM()
+    orchestrated = _runner(
+        agent=orchestrated_agent,
+        mcp=CountingMCP(),
+        settings=settings,
+        orchestrator=FakeOrchestrator(),
+        registry=RegistryStub(orchestrated_agent),
+    )
+    default_session = await orchestrated.store.create()
+    await orchestrated.run(
+        TurnRequest("default", default_session, PersistencePolicy.PERSISTENT)
+    )
+    override_session = await orchestrated.store.create()
+    await orchestrated.run(
+        TurnRequest(
+            "override",
+            override_session,
+            PersistencePolicy.PERSISTENT,
+            system_override="authorized caller override",
+        )
+    )
+
+    direct_agent = AnswerLLM()
+    direct = _runner(
+        agent=direct_agent,
+        mcp=CountingMCP(),
+        settings=_settings(
+            orchestration_enabled=False,
+            system_prompt_time_enabled=True,
+        ),
+    )
+    direct_session = await direct.store.create()
+    await direct.run(
+        TurnRequest("direct", direct_session, PersistencePolicy.PERSISTENT)
+    )
+
+    assert orchestrated_agent.requests_seen[0].system == (
+        f"trusted agent system\n\n{runtime_context}"
+    )
+    assert orchestrated_agent.requests_seen[1].system == (
+        f"authorized caller override\n\n{runtime_context}"
+    )
+    assert direct_agent.requests_seen[0].system == runtime_context
+    assert FixedDateTime.calls == 3
+
+
+async def test_turn_start_time_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ForbiddenDateTime:
+        @staticmethod
+        def now(_zone: object) -> datetime:
+            raise AssertionError("disabled timestamp must not read the clock")
+
+    monkeypatch.setattr(turn_module, "datetime", ForbiddenDateTime)
+    agent = AnswerLLM()
+    runner = _runner(
+        agent=agent,
+        mcp=CountingMCP(),
+        settings=_settings(
+            orchestration_enabled=False,
+            system_prompt_time_enabled=False,
+        ),
+    )
+    session = await runner.store.create()
+
+    await runner.run(
+        TurnRequest(
+            "disabled",
+            session,
+            PersistencePolicy.PERSISTENT,
+            system_override="verbatim override",
+        )
+    )
+
+    assert agent.requests_seen[0].system == "verbatim override"
 
 
 async def test_guard_releases_after_normal_completion_and_exception() -> None:
@@ -1195,6 +1296,7 @@ def test_runtime_wiring_names_optional_unorchestrated_client_and_removes_dead_he
         "guard",
         "policy",
         "tracer",
+        "system_prompt_time_enabled",
     ]
     assert "routing" in TurnRunner.__dataclass_fields__
     assert "unorchestrated_llm" not in TurnRunner.__dataclass_fields__

@@ -139,6 +139,7 @@ models:
     supports_native_tools: true
     context_window: 204800
     max_tokens: 32768
+    default: true
 
   ornith-1.0-35b:
     provider: openai_compatible
@@ -151,4 +152,3 @@ models:
     supports_native_tools: true
     context_window: 262144
     max_tokens: 32768
-    default: true

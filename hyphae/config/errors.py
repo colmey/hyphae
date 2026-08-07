@@ -72,6 +72,7 @@ _SAFE_LOCATION_PARTS = frozenset(
         "session_max_count",
         "session_ttl_seconds",
         "supports_native_tools",
+        "system_prompt_time_enabled",
         "temperature",
         "thinking",
         "timeout_seconds",

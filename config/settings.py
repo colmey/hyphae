@@ -343,7 +343,7 @@ class Settings(BaseSettings):
     )
     trace_jsonl_path: Path = Field(
         default=Path("traces/harness.jsonl"),
-        description="Append-only JSONL trace file. Parent dirs are created.",
+        description="Active bounded JSONL trace file. Parent dirs are created.",
         validation_alias=AliasChoices("trace_jsonl_path", "trace_path"),
     )
 

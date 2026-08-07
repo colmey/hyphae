@@ -168,6 +168,21 @@ def _read_jsonl(path: Path) -> list[dict]:
     ]
 
 
+def _backup_path(path: Path, index: int) -> Path:
+    return path.with_name(f"{path.name}.{index}")
+
+
+def _read_retained_jsonl(path: Path) -> list[dict]:
+    retained = [
+        candidate
+        for index in range(tracing_module.TRACE_BACKUP_COUNT, 0, -1)
+        if (candidate := _backup_path(path, index)).exists()
+    ]
+    if path.exists():
+        retained.append(path)
+    return [record for candidate in retained for record in _read_jsonl(candidate)]
+
+
 async def test_backend_exception_details_stay_out_of_events_transcripts_and_traces(
     tmp_path: Path,
 ) -> None:
@@ -372,6 +387,146 @@ async def test_disabled_and_unstarted_tracing_allocate_no_resources(
     assert not unstarted_path.parent.exists()
     await tracer.aclose()
     assert not unstarted_path.parent.exists()
+
+
+def test_trace_rotation_policy_is_fixed() -> None:
+    assert tracing_module.TRACE_MAX_FILE_BYTES == 10 * 1024 * 1024
+    assert tracing_module.TRACE_BACKUP_COUNT == 3
+
+
+def test_file_sink_rotates_only_after_the_exact_utf8_byte_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tracing_module, "TRACE_MAX_FILE_BYTES", 10)
+    path = tmp_path / "trace.jsonl"
+    sink = tracing_module._JSONLFileSink(path)
+
+    sink.write_batch(("1234\n", "5678\n"))
+    assert path.read_bytes() == b"1234\n5678\n"
+    assert not _backup_path(path, 1).exists()
+
+    sink.write_batch(("éé\n",))
+    sink.close()
+
+    assert _backup_path(path, 1).read_bytes() == b"1234\n5678\n"
+    assert path.read_bytes() == "éé\n".encode()
+
+
+def test_file_sink_rejects_a_single_record_over_the_byte_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tracing_module, "TRACE_MAX_FILE_BYTES", 4)
+    path = tmp_path / "trace.jsonl"
+    sink = tracing_module._JSONLFileSink(path)
+
+    with pytest.raises(ValueError, match="trace record exceeds rotation limit"):
+        sink.write_batch(("12345",))
+    sink.close()
+
+    assert path.read_bytes() == b""
+    assert not _backup_path(path, 1).exists()
+
+
+def test_file_sink_keeps_three_backups_and_expires_the_oldest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tracing_module, "TRACE_MAX_FILE_BYTES", 4)
+    path = tmp_path / "trace.jsonl"
+    sink = tracing_module._JSONLFileSink(path)
+
+    sink.write_batch(tuple(f"{index:03}\n" for index in range(5)))
+    sink.close()
+
+    assert tracing_module.TRACE_BACKUP_COUNT == 3
+    assert path.read_text(encoding="utf-8") == "004\n"
+    assert _backup_path(path, 1).read_text(encoding="utf-8") == "003\n"
+    assert _backup_path(path, 2).read_text(encoding="utf-8") == "002\n"
+    assert _backup_path(path, 3).read_text(encoding="utf-8") == "001\n"
+    assert all(
+        "000" not in candidate.read_text(encoding="utf-8")
+        for candidate in tmp_path.iterdir()
+    )
+
+
+async def test_rotation_preserves_concurrent_enqueue_order_while_close_drains(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tracing_module, "TRACE_MAX_FILE_BYTES", 80)
+    path = tmp_path / "trace.jsonl"
+    tracer = JSONLTracer(path)
+    await tracer.start()
+    submitted: list[dict[str, object]] = []
+
+    async def producer(source: str) -> None:
+        for _ in range(4):
+            record: dict[str, object] = {
+                "sequence": len(submitted),
+                "source": source,
+            }
+            submitted.append(record)
+            tracer.emit(record)
+            await asyncio.sleep(0)
+
+    await asyncio.gather(producer("first"), producer("second"))
+    await tracer.aclose()
+
+    assert _read_retained_jsonl(path) == submitted
+    assert tracer.accepted == tracer.written == len(submitted)
+    assert tracer.dropped == tracer.writer_failures == 0
+
+
+async def test_rotation_rename_failure_disables_tracing_without_leaking_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first_record = {"sequence": 1}
+    first_line = (
+        json.dumps(
+            first_record,
+            default=tracing_module._json_default,
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(
+        tracing_module,
+        "TRACE_MAX_FILE_BYTES",
+        len(first_line.encode("utf-8")),
+    )
+    path = tmp_path / "trace.jsonl"
+    tracer = JSONLTracer(path)
+    await tracer.start()
+    tracer.emit(first_record)
+
+    async def wait_for_first_write() -> None:
+        while tracer.written == 0:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_first_write(), timeout=1.0)
+    original_replace = Path.replace
+
+    def fail_active_rename(source: Path, target: Path) -> Path:
+        if source == path:
+            raise OSError("Authorization: Bearer rotation-secret")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_active_rename)
+    caplog.set_level(logging.WARNING, logger=tracing_module.__name__)
+    tracer.emit({"sequence": 2})
+    await _wait_for_writer_failure(tracer)
+    tracer.emit({"sequence": 3})
+    await tracer.aclose()
+
+    assert tracer.accepted == 2
+    assert tracer.written == 1
+    assert tracer.dropped == 2
+    assert tracer.writer_failures == 1
+    assert "rotation-secret" not in caplog.text
 
 
 async def test_serialized_line_is_stable_and_detached_from_record(

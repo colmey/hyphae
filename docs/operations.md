@@ -292,6 +292,21 @@ thread, preserving submission order. If the queue fills, the newest submission
 is dropped so older queued records retain their order; the warning is emitted
 immediately and then at most once every 60 seconds.
 
+Retention is application-owned and fixed: before a complete UTF-8 JSONL record
+would take the active file beyond 10 MiB, the same writer rotates
+`harness.jsonl` to `harness.jsonl.1`, shifts older backups through `.3`, and
+deletes the previous `.3`. Thus the active file plus three backups are retained,
+with `.1` newest and `.3` oldest. Records are never split or truncated for
+rotation; a single serialized record larger than 10 MiB is treated as a writer
+failure and disables tracing through the normal nonfatal failure path. Do not
+configure a second external rotation owner for this file.
+
+`TRACE_ENABLED=false` remains the default and complete off switch. When off,
+Hyphae creates no trace queue, worker, directory, active file, or backups. When
+enabled, restrict the trace directory and every numbered backup to the harness
+operator: all retained files may contain full prompts, reasoning, tool arguments,
+and tool results.
+
 The read-only counters mean:
 
 - `accepted`: records successfully placed on the queue;

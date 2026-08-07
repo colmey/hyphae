@@ -990,7 +990,9 @@ order and performs append-plus-flush batches off the event-loop thread: at most
 100 records, or a partial batch after 250 ms from its first record. A full queue
 drops the newest submission, preserving older queued records. The first sink
 write failure permanently disables tracing and accounts for the failed batch
-and backlog as dropped; see `agent/tracing.py` and operations docs.
+and backlog as dropped. The same writer owns fixed size-based retention: the
+10 MiB active JSONL file rotates through three numbered backups, with `.1` the
+newest. See `agent/tracing.py` and the operations docs.
 
 ---
 

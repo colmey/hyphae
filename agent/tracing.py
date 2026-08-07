@@ -1,7 +1,7 @@
 # agent/tracing.py
 
 """
-Run tracing: serialize the loop's event stream as an append-only JSONL trace.
+Run tracing: serialize the loop's event stream as a bounded JSONL trace.
 
 The agent loop already keeps an append-only event log as its run state (see
 `agent/events.py`). A *trace* is just that log written to disk — one JSON record
@@ -60,6 +60,10 @@ TRACE_QUEUE_CAPACITY = 4096
 TRACE_BATCH_SIZE = 100
 TRACE_FLUSH_INTERVAL_SECONDS = 0.250
 TRACE_OVERFLOW_WARNING_INTERVAL_SECONDS = 60.0
+# Application-owned retention: the active file plus three backups bounds enabled
+# tracing without adding deployment/configuration ownership or another worker.
+TRACE_MAX_FILE_BYTES = 10 * 1024 * 1024
+TRACE_BACKUP_COUNT = 3
 _TRACE_PATH_DISPLAY_MAX_CHARS = 512
 
 
@@ -170,20 +174,52 @@ class _BatchSink(Protocol):
 
 
 class _JSONLFileSink:
+    """Append complete records while retaining ``path`` plus ``path.1``–``.3``."""
+
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = path.open("a", encoding="utf-8")
+        self._path = path
+        self._max_file_bytes = TRACE_MAX_FILE_BYTES
+        self._backup_count = TRACE_BACKUP_COUNT
+        self._fh = path.open("a", encoding="utf-8", newline="")
+        self._size = path.stat().st_size
 
     def write_batch(self, lines: tuple[str, ...]) -> None:
-        self._fh.writelines(lines)
+        line_sizes = tuple(len(line.encode("utf-8")) for line in lines)
+        if any(size > self._max_file_bytes for size in line_sizes):
+            raise ValueError("trace record exceeds rotation limit")
+
+        for line, line_bytes in zip(lines, line_sizes, strict=True):
+            if self._size and self._size + line_bytes > self._max_file_bytes:
+                self._rotate()
+            self._fh.write(line)
+            self._size += line_bytes
         self._fh.flush()
+
+    def _rotate(self) -> None:
+        self._fh.flush()
+        self._fh.close()
+
+        self._backup_path(self._backup_count).unlink(missing_ok=True)
+        for index in range(self._backup_count - 1, 0, -1):
+            source = self._backup_path(index)
+            if source.exists():
+                source.replace(self._backup_path(index + 1))
+        if self._path.exists():
+            self._path.replace(self._backup_path(1))
+
+        self._fh = self._path.open("a", encoding="utf-8", newline="")
+        self._size = 0
+
+    def _backup_path(self, index: int) -> Path:
+        return self._path.with_name(f"{self._path.name}.{index}")
 
     def close(self) -> None:
         self._fh.close()
 
 
 class JSONLTracer(Tracer):
-    """Bounded, append-only JSONL sink with an off-loop batch writer."""
+    """Bounded, rotating JSONL sink with an off-loop batch writer."""
 
     def __init__(
         self,

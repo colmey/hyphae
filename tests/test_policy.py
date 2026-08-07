@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     InMemorySessionStore,
     RunLimits,
@@ -29,15 +29,15 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
     CompletionUsage,
 )
-from tooling import ToolCallResult
+from hyphae.tooling import ToolCallResult
 
 pytestmark = pytest.mark.anyio
 

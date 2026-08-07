@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from config import (
+from hyphae.config import (
     LLMSettings,
     MCPConfig,
     Settings,
@@ -380,9 +380,9 @@ mcpServers:
 
 def test_application_import_does_not_mutate_environment() -> None:
     code = (
-        "import os; import config.settings as settings_module; "
+        "import os; import hyphae.config.settings as settings_module; "
         "before = dict(os.environ); assert settings_module._settings_cache is None; "
-        "import main; assert settings_module._settings_cache is None; "
+        "import hyphae.main; assert settings_module._settings_cache is None; "
         "assert os.environ == before"
     )
     environment = dict(os.environ)

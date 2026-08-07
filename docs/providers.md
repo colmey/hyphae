@@ -2,7 +2,8 @@
 
 Hyphae isolates provider SDKs behind one provider-neutral generation contract.
 The agent, application, orchestrator, and session layers exchange only the
-types in `llm.schemas` and the `LLMClient` interface in `llm.client`.
+types in `hyphae.llm.schemas` and the `LLMClient` interface in
+`hyphae.llm.client`.
 
 ## Contract
 
@@ -29,7 +30,7 @@ adapter.
 
 ### Gemini
 
-`llm/providers/gemini/` contains:
+`hyphae/llm/providers/gemini/` contains:
 
 - `client.py`, which owns the `google.genai.Client`, invocation, lifecycle, and
   Gemini-specific transient-error classification;
@@ -40,7 +41,7 @@ The provider registry name is `gemini`.
 
 ### OpenAI-compatible
 
-`llm/providers/openai_compatible/` contains:
+`hyphae/llm/providers/openai_compatible/` contains:
 
 - `client.py`, which owns `AsyncOpenAI`, buffered and streaming invocation,
   lifecycle, and OpenAI-specific transient-error classification;
@@ -70,7 +71,7 @@ structured output; prompted-only models remain valid downstream choices.
 
 ## Registry and multi-provider routing
 
-`llm.client._PROVIDERS` is the single provider registry. Builders import SDK
+`hyphae.llm.client._PROVIDERS` is the single provider registry. Builders import SDK
 adapters lazily. `build_llm_client_from_entry()` resolves credentials by the
 provider on that model row, so one process can own ready clients from multiple
 providers. `LLMRegistry` preflights the configured clients and exposes only
@@ -90,7 +91,7 @@ Adding a provider is a deliberate contract change, not only a registry edit:
 3. Implement idempotent, cancellation-safe SDK cleanup and provider-specific
    transient-error classification. Add native streaming only when the SDK can
    satisfy the same terminal contract.
-4. Add a lazy builder and registry entry in `llm.client`.
+4. Add a lazy builder and registry entry in `hyphae.llm.client`.
 5. Add typed credential/endpoint configuration only when the provider needs
    it, plus representative `models.yaml` documentation.
 6. Test request/response translation, malformed provider output, usage and stop

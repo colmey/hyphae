@@ -13,9 +13,9 @@ from typing import Any
 
 import pytest
 
-import agent.tracing as tracing_module
-from agent import JSONLTracer, RunContext, RunLimits, Session, build_tracer, run_agent
-from agent.events import (
+import hyphae.agent.tracing as tracing_module
+from hyphae.agent import JSONLTracer, RunContext, RunLimits, Session, build_tracer, run_agent
+from hyphae.agent.events import (
     DoneEvent,
     ErrorEvent,
     OrchestrationDecisionEvent,
@@ -23,9 +23,9 @@ from agent.events import (
     ToolResultEvent,
     UsageEvent,
 )
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
-from tooling import ToolCallResult
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
+from hyphae.tooling import ToolCallResult
 
 
 pytestmark = pytest.mark.anyio

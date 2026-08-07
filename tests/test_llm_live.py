@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import pytest
 
-from config import get_settings, load_mcp_config_from_settings, reset_settings
-from llm import (
+from hyphae.config import get_settings, load_mcp_config_from_settings, reset_settings
+from hyphae.llm import (
     GenerationRequest,
     LLMClient,
     Message,
@@ -27,8 +27,8 @@ from llm import (
     ToolUseBlock,
     build_llm_client,
 )
-from llm.schemas import TextBlock
-from mcp_runtime import MCPManager, TurnToolRuntime
+from hyphae.llm.schemas import TextBlock
+from hyphae.mcp_runtime import MCPManager, TurnToolRuntime
 
 
 pytestmark = [

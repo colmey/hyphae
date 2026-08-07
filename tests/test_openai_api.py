@@ -8,13 +8,13 @@ from typing import Any, AsyncIterator
 
 import pytest
 
-import main as main_module
-from agent import InMemorySessionStore, Session
-from api import openai_compatible
-from api.request_body import MAX_REQUEST_BODY_BYTES
-from application import OrchestratedRouting, UnorchestratedRouting
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+import hyphae.main as main_module
+from hyphae.agent import InMemorySessionStore, Session
+from hyphae.api import openai_compatible
+from hyphae.api.request_body import MAX_REQUEST_BODY_BYTES
+from hyphae.application import OrchestratedRouting, UnorchestratedRouting
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     Role,
     StreamChunk,
@@ -23,9 +23,9 @@ from llm.schemas import (
     TextDelta,
     CompletionUsage,
 )
-from config import load_models_config
-from orchestrator import LLMRegistry
-from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
+from hyphae.config import load_models_config
+from hyphae.orchestrator import LLMRegistry
+from hyphae.orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
 from tests._app_support import replace_routing, runtime_of, wired_app
 
 

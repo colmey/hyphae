@@ -15,10 +15,10 @@ from typing import Any
 
 import pytest
 
-from llm.client import GenerationRequest, build_llm_client, supported_providers
-from llm.providers.openai_compatible import OpenAICompatibleLLMClient
-from llm.providers.openai_compatible.client import OpenAICompatibleClientConfig
-from llm.providers.openai_compatible.codec import (
+from hyphae.llm.client import GenerationRequest, build_llm_client, supported_providers
+from hyphae.llm.providers.openai_compatible import OpenAICompatibleLLMClient
+from hyphae.llm.providers.openai_compatible.client import OpenAICompatibleClientConfig
+from hyphae.llm.providers.openai_compatible.codec import (
     build_request,
     build_tool_use_block,
     merge_extra_body,
@@ -26,11 +26,11 @@ from llm.providers.openai_compatible.codec import (
     response_to_message,
     usage_from_raw,
 )
-from llm.providers.openai_compatible.stream import (
+from hyphae.llm.providers.openai_compatible.stream import (
     _ReasoningStreamStripper,
     decode_stream,
 )
-from llm.schemas import (
+from hyphae.llm.schemas import (
     Message,
     ModelProfile,
     ReasoningDelta,
@@ -41,7 +41,7 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from orchestrator.schemas import OrchestrationProposal
+from hyphae.orchestrator.schemas import OrchestrationProposal
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,12 +108,12 @@ def _message(response: Any) -> Any:
 def test_public_imports_remain_sdk_lazy() -> None:
     commands = [
         (
-            "import sys; import llm.client; "
+            "import sys; import hyphae.llm.client; "
             "assert 'openai' not in sys.modules; "
-            "assert 'llm.providers.openai_compatible' not in sys.modules"
+            "assert 'hyphae.llm.providers.openai_compatible' not in sys.modules"
         ),
         (
-            "import sys; from llm.providers.openai_compatible import "
+            "import sys; from hyphae.llm.providers.openai_compatible import "
             "OpenAICompatibleLLMClient; "
             "assert OpenAICompatibleLLMClient.__name__ == "
             "'OpenAICompatibleLLMClient'; "

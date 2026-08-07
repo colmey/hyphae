@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
@@ -34,9 +34,9 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from config import get_settings, load_mcp_config_from_settings, reset_settings
-from llm import build_llm_client
-from mcp_runtime import MCPManager, TurnToolRuntime
+from hyphae.config import get_settings, load_mcp_config_from_settings, reset_settings
+from hyphae.llm import build_llm_client
+from hyphae.mcp_runtime import MCPManager, TurnToolRuntime
 
 
 pytestmark = [

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, CompletionUsage
-from api.request_body import MAX_REQUEST_BODY_BYTES
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import AssistantMessage, TextBlock, CompletionUsage
+from hyphae.api.request_body import MAX_REQUEST_BODY_BYTES
 from tests._app_support import wired_app
 
 

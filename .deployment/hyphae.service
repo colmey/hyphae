@@ -1,15 +1,16 @@
 # Hyphae systemd service
 #
-# Install and start (run from the repository root):
-#   sudo install -m 0644 .deployment/hyphae.service /etc/systemd/system/hyphae.service
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now hyphae
+# Render, install, and start (run as the normal user from the repository root):
+#   ./scripts/install.sh
 #
 # Inspect status and follow logs:
 #   sudo systemctl status hyphae
 #   journalctl -u hyphae.service -f
 #
-# Stop and remove:
+# Stop and remove automatically:
+#   ./scripts/uninstall.sh
+#
+# Equivalent manual removal commands:
 #   sudo systemctl disable --now hyphae
 #   sudo rm /etc/systemd/system/hyphae.service
 #   sudo systemctl daemon-reload
@@ -23,8 +24,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User={USER}
-WorkingDirectory=/home/{USER}/repo/hyphae
-ExecStart=/home/{USER}/repo/hyphae/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+WorkingDirectory={ROOT}
+ExecStart={ROOT}/.venv/bin/uvicorn hyphae.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=5
 

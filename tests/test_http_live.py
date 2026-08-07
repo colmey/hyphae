@@ -29,8 +29,8 @@ import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport
 
-from config import reset_settings
-from main import app
+from hyphae.config import reset_settings
+from hyphae.main import app
 
 
 pytestmark = [

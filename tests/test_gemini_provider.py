@@ -17,10 +17,10 @@ from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 import pytest
 
-from llm.client import GenerationRequest, build_llm_client
-from llm.providers.gemini import GeminiLLMClient
-from llm.providers.gemini.client import GeminiClientConfig
-from llm.providers.gemini.codec import (
+from hyphae.llm.client import GenerationRequest, build_llm_client
+from hyphae.llm.providers.gemini import GeminiLLMClient
+from hyphae.llm.providers.gemini.client import GeminiClientConfig
+from hyphae.llm.providers.gemini.codec import (
     build_generation_config,
     canonical_stop_reason,
     messages_to_contents,
@@ -29,7 +29,7 @@ from llm.providers.gemini.codec import (
     tools_to_gemini,
     usage_from_response,
 )
-from llm.schemas import (
+from hyphae.llm.schemas import (
     CompletionUsage,
     Message,
     ModelProfile,
@@ -136,9 +136,9 @@ def test_public_import_and_registry_remain_lazy() -> None:
             sys.executable,
             "-c",
             (
-                "import sys; import llm.client; "
+                "import sys; import hyphae.llm.client; "
                 "assert 'google.genai' not in sys.modules; "
-                "assert 'llm.providers.gemini' not in sys.modules"
+                "assert 'hyphae.llm.providers.gemini' not in sys.modules"
             ),
         ],
         check=True,

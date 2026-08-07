@@ -8,12 +8,12 @@ from typing import Any
 
 import pytest
 
-import agent.tool_execution as tool_execution_module
-from agent import DoneEvent, InMemorySessionStore, RunLimits, ToolPolicy, run_agent
-from agent.tool_policy import PolicyDecision, PolicyVerdict
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
-from tooling import ToolCallResult
+import hyphae.agent.tool_execution as tool_execution_module
+from hyphae.agent import DoneEvent, InMemorySessionStore, RunLimits, ToolPolicy, run_agent
+from hyphae.agent.tool_policy import PolicyDecision, PolicyVerdict
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
+from hyphae.tooling import ToolCallResult
 
 pytestmark = pytest.mark.anyio
 

@@ -8,17 +8,17 @@ from typing import Any
 
 import pytest
 
-from agent import DoneEvent
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+from hyphae.agent import DoneEvent
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     CanonicalStopReason,
     CompletionUsage,
     TextBlock,
     ToolUseBlock,
 )
-from api.request_body import MAX_REQUEST_BODY_BYTES
-from application import TurnExecution, TurnMetadata, TurnRunner
+from hyphae.api.request_body import MAX_REQUEST_BODY_BYTES
+from hyphae.application import TurnExecution, TurnMetadata, TurnRunner
 from tests._app_support import wired_app
 
 

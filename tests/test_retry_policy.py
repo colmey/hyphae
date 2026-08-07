@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-import agent.generation as generation_module
-from agent import (
+import hyphae.agent.generation as generation_module
+from hyphae.agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
@@ -20,9 +20,9 @@ from agent import (
     TextEvent,
     run_agent,
 )
-from agent.runtime import RunDeadlineExceeded
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+from hyphae.agent.runtime import RunDeadlineExceeded
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     ReasoningDelta,
     StreamChunk,

@@ -9,13 +9,13 @@ from typing import Any
 
 import pytest
 
-import orchestrator.orchestrator as orchestrator_module
-from agent.runtime import ModelLimits
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, CompletionUsage, Message, TextBlock
-from tooling import ToolSnapshot
-from orchestrator import Orchestrator, ToolPreferences
-from orchestrator.schemas import OrchestrationProposal
+import hyphae.orchestrator.orchestrator as orchestrator_module
+from hyphae.agent.runtime import ModelLimits
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import AssistantMessage, CompletionUsage, Message, TextBlock
+from hyphae.tooling import ToolSnapshot
+from hyphae.orchestrator import Orchestrator, ToolPreferences
+from hyphae.orchestrator.schemas import OrchestrationProposal
 
 
 @pytest.mark.parametrize(
@@ -40,9 +40,12 @@ def test_thinking_level_is_normalized(value: str | None, expected: str) -> None:
 
 
 def test_routing_prompt_contract_is_selection_only() -> None:
-    prompt = (Path(__file__).parents[1] / "config" / "orchestrator_prompt.md").read_text(
-        encoding="utf-8"
-    )
+    prompt = (
+        Path(__file__).parents[1]
+        / "hyphae"
+        / "config"
+        / "orchestrator_prompt.md"
+    ).read_text(encoding="utf-8")
 
     assert "exactly three fields" in prompt
     assert "generated_system_prompt" not in prompt

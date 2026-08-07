@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from config.settings import LLMSettings, Settings
+from hyphae.config.settings import LLMSettings, Settings
 from scripts import check_markdown_links, render_settings_reference
 
 
@@ -27,7 +27,7 @@ def test_settings_reference_uses_metadata_without_constructing_settings(
     assert "`LLM_MODEL`" in table
     assert "`LLM_MODEL_NAME`" in table
     assert "`AGENT_PROMPT_PATH`" in table
-    assert "`config/models.yaml`" in table
+    assert "`hyphae/config/models.yaml`" in table
     assert "`traces/harness.jsonl`" in table
     assert "environment-secret" not in table
 
@@ -53,11 +53,13 @@ def test_settings_default_rendering_is_deterministic_and_secret_safe(
 
 
 def test_settings_path_defaults_are_portable() -> None:
-    repository_path = render_settings_reference.REPOSITORY_ROOT / "config/models.yaml"
+    repository_path = (
+        render_settings_reference.REPOSITORY_ROOT / "hyphae/config/models.yaml"
+    )
 
     assert (
         render_settings_reference._render_default("models_config_path", repository_path)
-        == "`config/models.yaml`"
+        == "`hyphae/config/models.yaml`"
     )
     assert (
         render_settings_reference._render_default(

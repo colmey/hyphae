@@ -18,11 +18,11 @@ from typing import Any, AsyncIterator, Callable
 import pytest
 from fastapi import FastAPI, Request
 
-import api.schemas as api_schemas
-import api.dependencies as api_dependencies
-import application as application_package
-import main as main_module
-from agent import (
+import hyphae.api.schemas as api_schemas
+import hyphae.api.dependencies as api_dependencies
+import hyphae.application as application_package
+import hyphae.main as main_module
+from hyphae.agent import (
     DoneEvent,
     ErrorEvent,
     Event,
@@ -37,10 +37,10 @@ from agent import (
     ToolPolicy,
     TextEvent,
 )
-from api.dependencies import get_application_runtime
-from agent.runtime import ModelLimits
-from api.schemas import TokenUsage
-from application import (
+from hyphae.api.dependencies import get_application_runtime
+from hyphae.agent.runtime import ModelLimits
+from hyphae.api.schemas import TokenUsage
+from hyphae.application import (
     ApplicationRuntime,
     ExecutionProtocolError,
     InvalidModelError,
@@ -52,10 +52,10 @@ from application import (
     TurnMetadata,
     UnorchestratedRouting,
 )
-from application.turn import _collect
-from config import Settings
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+from hyphae.application.turn import _collect
+from hyphae.config import Settings
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     StreamChunk,
     StreamEnd,
@@ -64,10 +64,10 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from tooling import ToolCallResult, ToolSnapshot
-from orchestrator import ModelUnavailableError, Orchestrator
-from orchestrator.contracts import ModelRegistry, RoutingService
-from orchestrator.schemas import (
+from hyphae.tooling import ToolCallResult, ToolSnapshot
+from hyphae.orchestrator import ModelUnavailableError, Orchestrator
+from hyphae.orchestrator.contracts import ModelRegistry, RoutingService
+from hyphae.orchestrator.schemas import (
     OrchestrationDecision,
     OrchestrationProposal,
     ToolPreferences,
@@ -257,7 +257,7 @@ def _runner(
     tracer: Tracer | None = None,
     policy: ToolPolicy | None = None,
 ) -> TurnRunner:
-    from agent import InMemorySessionStore
+    from hyphae.agent import InMemorySessionStore
 
     store = InMemorySessionStore()
     resolved_settings = settings or _settings()
@@ -1110,8 +1110,14 @@ def test_routing_construction_accepts_only_complete_runtime_forms() -> None:
 
 def test_application_production_import_boundary_and_removed_api_turn() -> None:
     root = Path(__file__).parents[1]
-    application_dir = root / "application"
-    forbidden = {"fastapi", "starlette", "sse_starlette", "api.schemas", "api.turn"}
+    application_dir = root / "hyphae" / "application"
+    forbidden = {
+        "fastapi",
+        "starlette",
+        "sse_starlette",
+        "hyphae.api.schemas",
+        "hyphae.api.turn",
+    }
 
     for path in application_dir.glob("*.py"):
         tree = ast.parse(path.read_text())
@@ -1127,7 +1133,7 @@ def test_application_production_import_boundary_and_removed_api_turn() -> None:
                 for name in imported
                 for blocked in forbidden
             ), path
-    assert not (root / "api" / "turn.py").exists()
+    assert not (root / "hyphae" / "api" / "turn.py").exists()
 
 
 def test_application_publishes_the_supported_runtime_entry_points() -> None:

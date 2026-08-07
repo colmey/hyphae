@@ -22,7 +22,7 @@ END_MARKER = "<!-- END GENERATED SETTINGS -->"
 # Running a file by path puts scripts/, rather than the repository root, first.
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from config.settings import LLMSettings, Settings  # noqa: E402
+from hyphae.config.settings import LLMSettings, Settings  # noqa: E402
 
 
 def _escape_markdown_cell(value: str) -> str:

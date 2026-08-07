@@ -6,12 +6,12 @@ from typing import Any
 
 import pytest
 
-from agent import RunLimits, Session, TextEvent, UsageEvent
-from agent.loop import _AgentRun
-from agent.tool_execution import ToolDispatcher
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, CompletionUsage, TextBlock
-from tooling import ToolCallResult
+from hyphae.agent import RunLimits, Session, TextEvent, UsageEvent
+from hyphae.agent.loop import _AgentRun
+from hyphae.agent.tool_execution import ToolDispatcher
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import AssistantMessage, CompletionUsage, TextBlock
+from hyphae.tooling import ToolCallResult
 
 
 class _BufferedLLM(LLMClient):

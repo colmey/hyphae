@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     InMemorySessionStore,
     RunLimits,
@@ -31,11 +31,11 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from agent.loop import _FAILURE_NUDGE, _FINAL_ITERATION_WRAPUP
-from agent.tool_execution import _STALL_MESSAGE
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
-from tooling import ToolCallResult
+from hyphae.agent.loop import _FAILURE_NUDGE, _FINAL_ITERATION_WRAPUP
+from hyphae.agent.tool_execution import _STALL_MESSAGE
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
+from hyphae.tooling import ToolCallResult
 
 pytestmark = pytest.mark.anyio
 

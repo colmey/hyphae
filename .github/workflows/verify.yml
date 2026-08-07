@@ -31,8 +31,7 @@ jobs:
       - name: Compile
         run: >-
           uv run python -m compileall -q
-          agent api application config llm mcp_runtime orchestrator scripts
-          tooling main.py tests
+          hyphae scripts tests
 
       - name: Documentation
         run: |

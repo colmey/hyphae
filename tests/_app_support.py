@@ -9,25 +9,25 @@ from typing import Any, Iterator
 
 from fastapi import FastAPI
 
-from agent import (
+from hyphae.agent import (
     InMemorySessionStore,
     RunLimits,
     SessionGuard,
     SessionStore,
     Tracer,
 )
-from application import (
+from hyphae.application import (
     ApplicationMCP,
     ApplicationRuntime,
     OrchestratedRouting,
     RoutingRuntime,
     UnorchestratedRouting,
 )
-from config import Settings
-from llm.client import LLMClient
-from mcp_runtime import MCPServerStatus, Tool
-from orchestrator.contracts import ModelRegistry, RoutingService
-from tooling import ToolCallResult, ToolRuntime
+from hyphae.config import Settings
+from hyphae.llm.client import LLMClient
+from hyphae.mcp_runtime import MCPServerStatus, Tool
+from hyphae.orchestrator.contracts import ModelRegistry, RoutingService
+from hyphae.tooling import ToolCallResult, ToolRuntime
 
 
 class EmptyMCP:
@@ -89,15 +89,16 @@ def wired_app(
     settings_overrides: Mapping[str, object] | None = None,
 ) -> Iterator[tuple[FastAPI, Settings]]:
     """Publish deterministic dependencies and restore global app state afterward."""
-    from main import app
+    from hyphae.main import app
 
     previous = dict(app.state._state)
-    settings = Settings.model_validate(
-        {
-            "orchestration_enabled": False,
-            **dict(settings_overrides or {}),
-        }
-    )
+    settings_values: dict[str, Any] = {
+        "orchestration_enabled": False,
+        **dict(settings_overrides or {}),
+    }
+    # pydantic-settings accepts _env_file, but omits it from the generated
+    # model constructor signature exposed to mypy.
+    settings = Settings(_env_file=None, **settings_values)  # type: ignore[call-arg]
     tool_source = mcp if mcp is not None else EmptyMCP()
     application_mcp: ApplicationMCP = (
         tool_source

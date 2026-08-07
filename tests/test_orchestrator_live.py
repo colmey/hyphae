@@ -30,13 +30,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from config import get_settings, load_mcp_config_from_settings, reset_settings
-from llm.schemas import Message, TextBlock
-from mcp_runtime import MCPManager
-from tooling import ToolSnapshot
-from config import load_models_config, load_orchestrator_prompt
-from orchestrator import LLMRegistry, Orchestrator, ToolPreferences
-from orchestrator.schemas import OrchestrationProposal
+from hyphae.config import get_settings, load_mcp_config_from_settings, reset_settings
+from hyphae.llm.schemas import Message, TextBlock
+from hyphae.mcp_runtime import MCPManager
+from hyphae.tooling import ToolSnapshot
+from hyphae.config import load_models_config, load_orchestrator_prompt
+from hyphae.orchestrator import LLMRegistry, Orchestrator, ToolPreferences
+from hyphae.orchestrator.schemas import OrchestrationProposal
 
 
 pytestmark = [

@@ -41,7 +41,7 @@ from typing import Any
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     InMemorySessionStore,
     RunContext,
@@ -50,7 +50,7 @@ from agent import (
     UsageEvent,
     run_agent,
 )
-from agent.context import (
+from hyphae.agent.context import (
     _SUMMARY_HEADER,
     _SUMMARY_SYSTEM,
     _protocol_units,
@@ -62,8 +62,8 @@ from agent.context import (
     estimate_tools_tokens,
     estimate_usage_tokens,
 )
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     Message,
     Role,
@@ -72,7 +72,7 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from tooling import ToolCallResult
+from hyphae.tooling import ToolCallResult
 
 def test_protocol_unit_formation_rejects_malformed_transcript() -> None:
     malformed = [

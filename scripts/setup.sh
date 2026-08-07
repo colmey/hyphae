@@ -52,6 +52,6 @@ fi
 echo
 echo "Setup complete."
 echo "  1. Edit .env and set your API keys (e.g. GEMINI_API_KEY) and MCP URLs."
-echo "  2. Run the server:  uv run uvicorn main:app --host 0.0.0.0 --port 8000"
+echo "  2. Run the server:  uv run uvicorn hyphae.main:app --host 0.0.0.0 --port 8000"
 echo "  3. Run hermetic tests: uv run pytest"
 echo "     Live integrations: uv run pytest -m live"

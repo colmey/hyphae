@@ -5,9 +5,9 @@ from typing import Any, AsyncIterator
 
 import pytest
 
-from agent import DoneEvent, ErrorEvent, TextEvent
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+from hyphae.agent import DoneEvent, ErrorEvent, TextEvent
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     StreamChunk,
     StreamEnd,

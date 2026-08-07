@@ -8,13 +8,13 @@ see the [HTTP API](api.md).
 
 | Term | Lifetime | Owner |
 |---|---|---|
-| Application runtime | One server process | `application.ApplicationRuntime`, assembled by `main.lifespan` |
-| Session | Conversation history across native turns | `agent.Session` and `SessionStore` |
+| Application runtime | One server process | `hyphae.application.ApplicationRuntime`, assembled by `hyphae.main.lifespan` |
+| Session | Conversation history across native turns | `hyphae.agent.Session` and `SessionStore` |
 | HTTP request | One inbound native or OpenAI-compatible operation | `api` |
-| Turn | One accepted user request, including routing, execution, publication, and cleanup | `application.TurnRunner` |
-| Run | One provider-neutral agent-loop execution inside a turn | `agent.run_agent` and private `_AgentRun` |
+| Turn | One accepted user request, including routing, execution, publication, and cleanup | `hyphae.application.TurnRunner` |
+| Run | One provider-neutral agent-loop execution inside a turn | `hyphae.agent.run_agent` and private `_AgentRun` |
 | Iteration | One context assembly and downstream model response within a run | `_AgentRun` |
-| Attempt | One provider call or retry inside an iteration | `agent.generation` |
+| Attempt | One provider call or retry inside an iteration | `hyphae.agent.generation` |
 
 A typical accepted turn contains one agent run and that run can contain several
 model iterations because tool results return to the model. Routing and optional
@@ -65,7 +65,7 @@ model with no tools. Router output never supplies a system prompt.
 
 An explicit `/v1` model ID pins the downstream model while routing still
 selects tools and thinking level. A `/v1` system message is the authorized
-downstream override; otherwise orchestrated turns use `config/agent_prompt.md`.
+downstream override; otherwise orchestrated turns use `hyphae/config/agent_prompt.md`.
 
 `UnorchestratedRouting` uses one fixed client and all tools remaining after
 policy projection. It has no application system prompt; an optional `/v1`
@@ -87,7 +87,7 @@ Per iteration, `_AgentRun`:
    and wrap-up text when applicable;
 3. assembles a context view that is known to fit the selected model's input
    budget;
-4. consumes normalized generation chunks from `agent.generation`;
+4. consumes normalized generation chunks from `hyphae.agent.generation`;
 5. records the complete canonical assistant response and usage;
 6. publishes a complete non-tool checkpoint, or starts a tool batch;
 7. dispatches requested tools sequentially and appends the complete matching
@@ -115,7 +115,7 @@ model call is counted once.
 
 ### Generation
 
-`agent.generation` owns the shared attempt policy for buffered and streaming
+`hyphae.agent.generation` owns the shared attempt policy for buffered and streaming
 calls:
 
 - the smaller of the per-attempt timeout and remaining run deadline applies;
@@ -134,7 +134,7 @@ unknown or incomplete provider termination.
 
 ### Tool execution
 
-`agent.tool_execution.ToolDispatcher` owns one run's dispatch state. Before an
+`hyphae.agent.tool_execution.ToolDispatcher` owns one run's dispatch state. Before an
 MCP invocation it:
 
 1. blocks an exact repeated name/argument call;

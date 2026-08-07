@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator, Callable
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
@@ -20,16 +20,16 @@ from agent import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from agent.session import session_history_chars
-from application import (
+from hyphae.agent.session import session_history_chars
+from hyphae.application import (
     PersistencePolicy,
     TurnRequest,
     TurnRunner,
     UnorchestratedRouting,
 )
-from config import Settings
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+from hyphae.config import Settings
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     Message,
     Role,
@@ -41,7 +41,7 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from tooling import ToolCallResult
+from hyphae.tooling import ToolCallResult
 
 pytestmark = pytest.mark.anyio
 

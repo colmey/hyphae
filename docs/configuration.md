@@ -1,7 +1,7 @@
 # hyphae — Configuration
 
 Everything the harness reads at startup: environment variables and four files
-under `config/` (MCP servers, the model registry, the orchestrator control
+under `hyphae/config/` (MCP servers, the model registry, the orchestrator control
 prompt, and the trusted downstream agent prompt).
 
 > See also: the [documentation index](README.md), [architecture.md](architecture.md)
@@ -52,7 +52,7 @@ process environment.
 | `TOOL_RESULT_MAX_CHARS` | `20000` | Clip threshold for a single flattened tool result before it enters session history. <=0 disables clipping. | — |
 | `OPENAI_COMPAT_TOOL_ACTIVITY_MAX_CHARS` | `2000` | Presentation threshold for displayed arguments or results in one /v1 tool-activity payload. Distinct from tool_result_max_chars, which clips session history. | `OPENAI_TOOL_BLOCK_MAX_CHARS` |
 | `OPENAI_COMPAT_TOOL_ACTIVITY_MODE` | `reasoning` | OpenAI-compatible streaming activity: 'reasoning' emits model reasoning and compact tool progress through delta.reasoning_content; 'reasoning_full' adds bounded tool arguments and results; 'hidden' omits that optional channel. | `OPENAI_COMPAT_TOOL_ACTIVITY` |
-| `RUN_MAX_TOKENS` | `0` | Hard ceiling on cumulative total_tokens for one run; ends the run budget_exceeded with the partial answer. <=0 disables. When a provider reports absent/all-zero usage, the local token estimator (agent/context.py) fills in, so the cap works against local OpenAI-compatible servers too. | `MAX_RUN_TOKENS` |
+| `RUN_MAX_TOKENS` | `0` | Hard ceiling on cumulative total_tokens for one run; ends the run budget_exceeded with the partial answer. <=0 disables. When a provider reports absent/all-zero usage, the local token estimator (hyphae/agent/context.py) fills in, so the cap works against local OpenAI-compatible servers too. | `MAX_RUN_TOKENS` |
 | `RUN_MAX_SECONDS` | `0` | Hard wall-clock ceiling on one accepted turn, measured immediately after the session claim and enforced across routing, retries, LLM/tool calls, and backoff; ends the run deadline_exceeded with the partial answer. <=0 disables. | `MAX_RUN_SECONDS` |
 | `ABORT_AFTER_CONSECUTIVE_TOOL_FAILURES` | `0` | Abort the run no_progress after this many tool-call failures in a row (a success resets the count). Should be greater than the fixed at-3 consecutive-failure nudge so the model gets a chance to recover first. <=0 disables. | — |
 | `CONTEXT_STRATEGY` | `naive` | Context assembly strategy: 'naive' rejects over-budget context; 'compaction' summarizes over-budget middle history before submission. | — |
@@ -60,7 +60,7 @@ process environment.
 | `CONTEXT_SAFETY_MARGIN_TOKENS` | `1024` | Headroom subtracted from the context window (with max output tokens) when computing the input budget; absorbs estimator error. | — |
 | `CONTEXT_RECENT_MESSAGES` | `6` | Recent protocol-safe units (a user turn, a no-tool assistant turn, or an assistant tool call plus its results) kept verbatim under compaction. Shrinks automatically if the tail alone overflows. | — |
 | `CONTEXT_SUMMARY_MAX_TOKENS` | `512` | Output cap for the one-call compaction summarizer. | — |
-| `MCP_CONFIG_PATH` | `config/mcp_config.yaml` | Path to the MCP server and tool-policy YAML configuration. | — |
+| `MCP_CONFIG_PATH` | `hyphae/config/mcp_config.yaml` | Path to the MCP server and tool-policy YAML configuration. | — |
 | `LOOP_MAX_ITERATIONS` | `10` | Maximum agent-loop iterations for one accepted run. | `MAX_LOOP_ITERATIONS` |
 | `LOG_LEVEL` | `INFO` | Python logging level. | — |
 | `HYPHAE_API_KEY` | *unset* | Optional API key protecting /chat, /chat/stream, /v1/*. Empty disables auth; set enforces it. Accepts X-API-Key or Bearer. | `HARNESS_API_KEY` |
@@ -70,9 +70,9 @@ process environment.
 | `SESSION_CAPACITY` | `1000` | Max in-memory sessions; admission evicts oldest-updated unclaimed sessions first. <=0 disables the count cap. | `SESSION_MAX_COUNT` |
 | `SESSION_HISTORY_MAX_CHARS` | `256000` | Maximum canonical retained transcript characters per session. | — |
 | `ORCHESTRATION_ENABLED` | `true` | Master toggle for the orchestration layer. | — |
-| `MODELS_CONFIG_PATH` | `config/models.yaml` | Path to the model registry YAML consumed by the orchestrator. | — |
-| `ORCHESTRATOR_PROMPT_PATH` | `config/orchestrator_prompt.md` | Path to the orchestrator's system prompt file (markdown or plain text). | — |
-| `AGENT_PROMPT_PATH` | `config/agent_prompt.md` | Path to the trusted downstream agent system prompt file. | — |
+| `MODELS_CONFIG_PATH` | `hyphae/config/models.yaml` | Path to the model registry YAML consumed by the orchestrator. | — |
+| `ORCHESTRATOR_PROMPT_PATH` | `hyphae/config/orchestrator_prompt.md` | Path to the orchestrator's system prompt file (markdown or plain text). | — |
+| `AGENT_PROMPT_PATH` | `hyphae/config/agent_prompt.md` | Path to the trusted downstream agent system prompt file. | — |
 | `ORCHESTRATOR_MODEL_ID` | *unset* | Override which model_id the orchestrator itself uses to make routing decisions. Empty = use the default entry from models.yaml. | — |
 
 <!-- END GENERATED SETTINGS -->
@@ -96,7 +96,7 @@ flush after 250 ms, and overflow warnings repeat at most once per 60 seconds.
 There are deliberately no queue-size, batch-size, flush-interval, warning-rate,
 or overflow-policy settings.
 
-## MCP Config YAML — `config/mcp_config.yaml`
+## MCP Config YAML — `hyphae/config/mcp_config.yaml`
 
 ```yaml
 mcpServers:
@@ -158,7 +158,7 @@ tool_policy:
 - HTTP/SSE URLs require an `http` or `https` scheme and a nonblank host;
   internal names such as `mcp.internal` or `service.local` remain valid.
 
-## Model Registry — `config/models.yaml`
+## Model Registry — `hyphae/config/models.yaml`
 
 ```yaml
 models:
@@ -180,11 +180,11 @@ them, so `selected_model_id` is a real decision, not a no-op.
 
 **Schema notes:**
 
-- `provider` must be registered in `llm/client.py`'s `_PROVIDERS` —
+- `provider` must be registered in `hyphae/llm/client.py`'s `_PROVIDERS` —
   validated against `supported_providers()` at load time, so an unknown
   provider is rejected up front rather than at first request. Implemented
-  today: `gemini` (`llm/providers/gemini/`) and `openai_compatible`
-  (`llm/providers/openai_compatible/`). The compatibility `openai` provider ID
+  today: `gemini` (`hyphae/llm/providers/gemini/`) and `openai_compatible`
+  (`hyphae/llm/providers/openai_compatible/`). The compatibility `openai` provider ID
   remains accepted for existing configuration. Set `OPENAI_COMPAT_BASE_URL`
   to point the adapter at a local Ollama (or any compatible server); an empty
   value targets real OpenAI. For Ollama, `model` must match an `ollama list`
@@ -237,7 +237,7 @@ Unknown fields, invalid enum values, and out-of-range sampling values fail
 startup during `models.yaml` parsing, with the model id and field path in the
 validation error.
 
-## Orchestrator Prompt — `config/orchestrator_prompt.md`
+## Orchestrator Prompt — `hyphae/config/orchestrator_prompt.md`
 
 A markdown file (text is fine too — extension doesn't matter to the
 loader) that's the system instruction for the orchestrator's own LLM
@@ -255,7 +255,7 @@ call. The current prompt teaches it to:
 The orchestrator is selection-only. Its output cannot author downstream system
 instructions. Modify this file to change routing guidance, not agent behavior.
 
-## Agent Prompt — `config/agent_prompt.md`
+## Agent Prompt — `hyphae/config/agent_prompt.md`
 
 This file is the trusted application-owned system prompt for downstream agent
 turns. An authorized `TurnRequest.system_override` (used by the `/v1` adapter

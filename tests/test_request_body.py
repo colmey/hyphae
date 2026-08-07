@@ -6,8 +6,8 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import ClientDisconnect, Request
 
-from api.request_body import MAX_REQUEST_BODY_BYTES, read_request_body
-from api.public_errors import PublicError
+from hyphae.api.request_body import MAX_REQUEST_BODY_BYTES, read_request_body
+from hyphae.api.public_errors import PublicError
 
 
 def _request(

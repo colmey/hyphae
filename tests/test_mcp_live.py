@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from config import get_settings, load_mcp_config_from_settings, reset_settings
-from mcp_runtime import MCPManager
+from hyphae.config import get_settings, load_mcp_config_from_settings, reset_settings
+from hyphae.mcp_runtime import MCPManager
 
 
 pytestmark = [

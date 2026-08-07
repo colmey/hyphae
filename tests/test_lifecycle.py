@@ -15,10 +15,10 @@ from fastapi import FastAPI
 from google.genai.client import AsyncClient as GeminiAsyncClient
 from openai import AsyncOpenAI, AsyncStream
 
-import main as main_module
-import orchestrator.registry as registry_module
-from application import OrchestratedRouting
-from config import (
+import hyphae.main as main_module
+import hyphae.orchestrator.registry as registry_module
+from hyphae.application import OrchestratedRouting
+from hyphae.config import (
     ConfigLoadError,
     ConfigValidationError,
     MCPConfig,
@@ -26,16 +26,16 @@ from config import (
     ModelsConfig,
     Settings,
 )
-from config.errors import CredentialUnavailableError
-from llm.client import GenerationRequest, LLMClient
-from llm.tool_prompt_protocol import PromptedToolLLMClient
-from llm.providers.gemini import GeminiLLMClient
-from llm.providers.openai_compatible import OpenAICompatibleLLMClient
-from llm.schemas import AssistantMessage
-from main import _close_application_resources, _start_optional_tracer, lifespan
-from mcp_runtime import MCPServerStatus, Tool
-from orchestrator import LLMRegistry, ModelUnavailableError
-from tooling import ToolCallResult, ToolRuntime
+from hyphae.config.errors import CredentialUnavailableError
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.tool_prompt_protocol import PromptedToolLLMClient
+from hyphae.llm.providers.gemini import GeminiLLMClient
+from hyphae.llm.providers.openai_compatible import OpenAICompatibleLLMClient
+from hyphae.llm.schemas import AssistantMessage
+from hyphae.main import _close_application_resources, _start_optional_tracer, lifespan
+from hyphae.mcp_runtime import MCPServerStatus, Tool
+from hyphae.orchestrator import LLMRegistry, ModelUnavailableError
+from hyphae.tooling import ToolCallResult, ToolRuntime
 
 pytestmark = pytest.mark.anyio
 

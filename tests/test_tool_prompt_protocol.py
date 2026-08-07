@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     InMemorySessionStore,
     TextEvent,
@@ -21,13 +21,13 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from llm.client import GenerationRequest, LLMClient, build_llm_client_from_entry
-from llm.tool_prompt_protocol import (
+from hyphae.llm.client import GenerationRequest, LLMClient, build_llm_client_from_entry
+from hyphae.llm.tool_prompt_protocol import (
     PromptedToolLLMClient,
     parse_prompted_action,
     render_prompted_tools,
 )
-from llm.schemas import (
+from hyphae.llm.schemas import (
     AssistantMessage,
     Message,
     TextBlock,
@@ -35,8 +35,8 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from tooling import ToolCallResult
-from config import ModelEntry
+from hyphae.tooling import ToolCallResult
+from hyphae.config import ModelEntry
 
 
 TOOL = {
@@ -416,7 +416,7 @@ async def test_drop_in_loop() -> None:
 
 async def test_factory_selection() -> None:
     print("--- factory selection by profile ---")
-    import llm.client as client_module
+    import hyphae.llm.client as client_module
 
     specs = []
 
@@ -495,7 +495,7 @@ async def test_orchestrator_guardrail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     print("--- orchestrator prompted-only guardrail ---")
-    from main import _try_build_orchestration
+    from hyphae.main import _try_build_orchestration
 
     models_path = tmp_path / "models.yaml"
     prompt_path = tmp_path / "orchestrator_prompt.md"
@@ -522,7 +522,7 @@ models:
         context_default_window_tokens=32768,
         context_safety_margin_tokens=1024,
     )
-    import orchestrator.registry as registry_module
+    import hyphae.orchestrator.registry as registry_module
 
     monkeypatch.setattr(
         registry_module,

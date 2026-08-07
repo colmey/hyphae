@@ -3,8 +3,9 @@
 # open-websearch MCP server for the harness.
 #
 # This deploys ONLY the external web-search MCP server (https://github.com/aas-ee/open-websearch),
-# not the harness itself — the harness still runs on the host via `uv run uvicorn` while
-# it's under active development. Placed in the project root for convenience for now;
+# not the harness itself — the harness still runs on the host via
+# `uv run uvicorn hyphae.main:app` while it's under active development. Placed in
+# the project root for convenience for now;
 # move it under a deploy/ dir (or fold into a full stack) once the harness is also
 # containerized.
 #

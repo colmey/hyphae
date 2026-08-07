@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from pydantic import AliasChoices, ValidationError
 
-from config import (
+from hyphae.config import (
     ConfigLoadError,
     ConfigValidationError,
     LLMSettings,
@@ -33,7 +33,7 @@ from config import (
     get_settings,
     reset_settings,
 )
-from config.errors import _SAFE_LOCATION_PARTS, safe_validation_summary
+from hyphae.config.errors import _SAFE_LOCATION_PARTS, safe_validation_summary
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -674,7 +674,7 @@ def test_application_settings_source_error_is_safely_wrapped(
 def test_executable_samples_load_from_alternate_process_cwd(tmp_path: Path) -> None:
     code = f"""
 from pathlib import Path
-from config import (
+from hyphae.config import (
     Settings,
     load_mcp_config_from_settings,
     load_models_config_from_settings,
@@ -683,10 +683,10 @@ from config import (
 )
 root = Path({str(_REPO_ROOT)!r})
 settings = Settings(_env_file=root / '.env.example')
-assert settings.mcp_config_path == root / 'config/mcp_config.yaml'
-assert settings.models_config_path == root / 'config/models.yaml'
-assert settings.orchestrator_prompt_path == root / 'config/orchestrator_prompt.md'
-assert settings.agent_prompt_path == root / 'config/agent_prompt.md'
+assert settings.mcp_config_path == root / 'hyphae/config/mcp_config.yaml'
+assert settings.models_config_path == root / 'hyphae/config/models.yaml'
+assert settings.orchestrator_prompt_path == root / 'hyphae/config/orchestrator_prompt.md'
+assert settings.agent_prompt_path == root / 'hyphae/config/agent_prompt.md'
 assert settings.trace_jsonl_path == root / 'traces/harness.jsonl'
 assert load_mcp_config_from_settings(settings).mcp_servers
 assert load_models_config_from_settings(

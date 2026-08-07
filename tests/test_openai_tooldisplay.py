@@ -9,7 +9,7 @@ from typing import Literal
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     ReasoningEvent,
     Session,
@@ -17,7 +17,7 @@ from agent import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from api.openai_compatible import (
+from hyphae.api.openai_compatible import (
     _AssistantMessage,
     _InvalidChatRequest,
     _SystemMessage,
@@ -28,7 +28,7 @@ from api.openai_compatible import (
     _stream_chat_completion,
     _strip_legacy_tool_blocks,
 )
-from application import (
+from hyphae.application import (
     PersistencePolicy,
     TurnExecution,
     TurnMetadata,

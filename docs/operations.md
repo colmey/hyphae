@@ -11,7 +11,7 @@ Hyphae requires Python 3.12 and uses the committed `uv.lock`.
 
 ```bash
 ./scripts/setup.sh
-uv run uvicorn main:app --host 127.0.0.1 --port 8000
+uv run uvicorn hyphae.main:app --host 127.0.0.1 --port 8000
 ```
 
 `scripts/setup.sh` installs `uv` when absent, synchronizes the locked development
@@ -25,6 +25,36 @@ from the repository root.
 For a network-accessible deployment, choose the bind address deliberately and
 put normal TLS, proxy, and access controls in front of Uvicorn. Set
 `HYPHAE_API_KEY` whenever untrusted clients can reach protected endpoints.
+
+## Optional systemd service
+
+Install Hyphae as a system service by running the installer as the normal
+account that should own the process:
+
+```bash
+./scripts/install.sh
+```
+
+The installer runs the idempotent setup, renders the current `USER` and
+repository root into `.deployment/hyphae.service`, installs the unit through
+`sudo`, reloads systemd, and enables and starts Hyphae. The service binds to
+`127.0.0.1:8000` and restarts after failures. It refuses an existing `.env`
+that still names the removed pre-namespace `config/` paths rather than
+silently editing that file.
+
+```bash
+sudo systemctl status hyphae
+journalctl -u hyphae.service -f
+```
+
+Stop, disable, and remove only the installed service with:
+
+```bash
+./scripts/uninstall.sh
+```
+
+Uninstalling retains the repository, `.env`, virtual environment, traces, and
+other application data.
 
 ## Startup and shutdown
 

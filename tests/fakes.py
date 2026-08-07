@@ -7,10 +7,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from agent import Event, InMemorySessionStore, RunLimits, run_agent
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import AssistantMessage
-from tooling import ToolCallResult, ToolRuntime
+from hyphae.agent import Event, InMemorySessionStore, RunLimits, run_agent
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import AssistantMessage
+from hyphae.tooling import ToolCallResult, ToolRuntime
 
 
 class ScriptedLLM(LLMClient):

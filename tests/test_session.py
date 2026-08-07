@@ -6,20 +6,20 @@ from datetime import timedelta
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     InMemorySessionStore,
     Session,
     SessionBusyError,
     SessionCapacityError,
     SessionGuard,
 )
-from agent.session import (
+from hyphae.agent.session import (
     SessionHistoryLimitExceeded,
     SessionNotFoundError,
     session_history_chars,
     validate_transcript,
 )
-from llm.schemas import (
+from hyphae.llm.schemas import (
     AssistantMessage,
     Message,
     Role,

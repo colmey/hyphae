@@ -57,16 +57,8 @@ select = ["E4", "E7", "E9", "F"]
 python_version = "3.12"
 strict = true
 files = [
-    "agent",
-    "api",
-    "application",
-    "config",
-    "llm",
-    "mcp_runtime",
-    "orchestrator",
+    "hyphae",
     "scripts",
-    "tooling",
-    "main.py",
     "tests/fakes.py",
     "tests/_app_support.py",
 ]

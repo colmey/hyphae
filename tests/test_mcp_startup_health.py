@@ -11,9 +11,9 @@ from typing import Any
 
 import pytest
 
-import mcp_runtime.client as client_module
-from config import MCPConfig
-from mcp_runtime import MCPManager, MCPServerState, Tool
+import hyphae.mcp_runtime.client as client_module
+from hyphae.config import MCPConfig
+from hyphae.mcp_runtime import MCPManager, MCPServerState, Tool
 from tests._app_support import wired_app
 from tests.fakes import ScriptedLLM
 

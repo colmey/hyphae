@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.requests import ClientDisconnect
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     ErrorEvent,
     Session,
@@ -20,13 +20,13 @@ from agent import (
     SessionNotFoundError,
     TextEvent,
 )
-from api.openai_compatible import (
+from hyphae.api.openai_compatible import (
     _FINISH_REASONS,
     _finish_reason,
     _stream_chat_completion,
     chat_completions,
 )
-from application import (
+from hyphae.application import (
     ExecutionProtocolError,
     InvalidModelError,
     ModelInventoryError,
@@ -37,9 +37,9 @@ from application import (
     TurnRequest,
     TurnResult,
 )
-from api.public_errors import native_error_body, openai_error_body, public_error_from_exception
-from llm.schemas import CompletionUsage
-from orchestrator import ModelUnavailableError
+from hyphae.api.public_errors import native_error_body, openai_error_body, public_error_from_exception
+from hyphae.llm.schemas import CompletionUsage
+from hyphae.orchestrator import ModelUnavailableError
 
 
 class _EventsRunner:

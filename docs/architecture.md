@@ -11,108 +11,93 @@ See [execution](execution.md) for turn/run mechanics and
 HTTP client
     │
     ▼
-api
+hyphae.api
   authentication, bounded body parsing, DTO validation, public errors,
   native/OpenAI response rendering
     │ obtains one process-owned ApplicationRuntime
     ▼
-application
+hyphae.application
   TurnRunner: accepted-turn claim, deadline, tool snapshot, routing,
   trusted prompt precedence, persistence policy, buffered/event result
     ├───────────────┬───────────────────┐
     ▼               ▼                   ▼
-orchestrator      agent               tooling
+hyphae.orchestrator  hyphae.agent      hyphae.tooling
 selection only   provider-neutral     immutable ToolSnapshot and
 ready model +    run composition      neutral ToolRuntime contract
 visible tools    │
-                 ├─ generation ───────────────► llm
+                 ├─ generation ───────────────► hyphae.llm
                  │   retries and streams        canonical request/response;
                  │                              provider codecs and SDK clients
-                 └─ tool_execution ───────────► mcp_runtime
+                 └─ tool_execution ───────────► hyphae.mcp_runtime
                      validation/policy          process catalogs and lazy,
                      sequential dispatch        turn-owned server leases
 ```
 
-`main.lifespan` builds one immutable `application.ApplicationRuntime` and
+`hyphae.main.lifespan` builds one immutable
+`hyphae.application.ApplicationRuntime` and
 publishes it as `app.state.runtime`. Routes read that value through the sole
-dynamic framework adapter in `api.dependencies` and derive a `TurnRunner` from
+dynamic framework adapter in `hyphae.api.dependencies` and derive a `TurnRunner` from
 it. No route assembles a partial runtime from independent state fields.
 
 The orchestrator is a selection-only control call. It selects a structurally
 ready model, a subset of the policy-visible tool snapshot, and a thinking
 level. It cannot author downstream system instructions. Downstream authority
-comes from the startup-loaded `config/agent_prompt.md`, or from the documented
+comes from the startup-loaded `hyphae/config/agent_prompt.md`, or from the documented
 `/v1` caller override.
 
 ## Package ownership
 
 | Package | Owns | Does not own |
 |---|---|---|
-| `config` | Frozen settings, typed YAML schemas/loaders, path and validation policy | Provider SDKs or request execution |
-| `tooling` | Provider-neutral tool values, immutable snapshots, dispatch protocol | MCP connections or agent policy |
-| `mcp_runtime` | Catalog discovery/refresh, health, namespaced routes, task-owned turn leases | Model selection or LLM schemas |
-| `llm` | Canonical messages, `GenerationRequest`, `LLMClient`, provider registry and adapters | Retries, sessions, MCP, or HTTP |
-| `orchestrator` | One selection-only routing call and ready-model registry | Downstream prompt authority or tool execution |
-| `agent` | Run limits/context, generation policy, tool dispatch policy, transcripts, checkpoints, typed events and tracing | HTTP rendering or process composition |
-| `application` | Process runtime value and complete accepted-turn lifecycle | FastAPI, Starlette, or wire-format rendering |
-| `api` | HTTP authentication, body/DTO boundaries, stable public errors, native/OpenAI renderers | Agent-loop mechanics or resource ownership |
-| `main.py` | Startup/shutdown composition | Request-specific business logic |
+| `hyphae.config` | Frozen settings, typed YAML schemas/loaders, path and validation policy | Provider SDKs or request execution |
+| `hyphae.tooling` | Provider-neutral tool values, immutable snapshots, dispatch protocol | MCP connections or agent policy |
+| `hyphae.mcp_runtime` | Catalog discovery/refresh, health, namespaced routes, task-owned turn leases | Model selection or LLM schemas |
+| `hyphae.llm` | Canonical messages, `GenerationRequest`, `LLMClient`, provider registry and adapters | Retries, sessions, MCP, or HTTP |
+| `hyphae.orchestrator` | One selection-only routing call and ready-model registry | Downstream prompt authority or tool execution |
+| `hyphae.agent` | Run limits/context, generation policy, tool dispatch policy, transcripts, checkpoints, typed events and tracing | HTTP rendering or process composition |
+| `hyphae.application` | Process runtime value and complete accepted-turn lifecycle | FastAPI, Starlette, or wire-format rendering |
+| `hyphae.api` | HTTP authentication, body/DTO boundaries, stable public errors, native/OpenAI renderers | Agent-loop mechanics or resource ownership |
+| `hyphae.main` | Startup/shutdown composition | Request-specific business logic |
 
 ## Repository layout
 
 ```text
-hyphae/
-├── main.py
+repository/
 ├── pyproject.toml
 ├── uv.lock
-├── config/
-│   ├── settings.py
-│   ├── schemas.py
-│   ├── loaders.py
-│   ├── mcp_config.yaml
-│   ├── models.yaml
-│   ├── orchestrator_prompt.md
-│   └── agent_prompt.md
-├── tooling/
-│   └── contracts.py
-├── mcp_runtime/
-│   ├── catalog.py
-│   ├── client.py
-│   ├── lease.py
-│   └── manager.py
-├── llm/
-│   ├── client.py
-│   ├── schemas.py
-│   ├── tool_prompt_protocol.py
-│   └── providers/
-│       ├── gemini/
-│       └── openai_compatible/
-├── orchestrator/
-│   ├── contracts.py
-│   ├── schemas.py
-│   ├── registry.py
-│   └── orchestrator.py
-├── agent/
-│   ├── session.py
-│   ├── runtime.py
-│   ├── context.py
-│   ├── generation.py
-│   ├── tool_execution.py
-│   ├── tool_policy.py
-│   ├── events.py
-│   ├── tracing.py
-│   └── loop.py
-├── application/
-│   └── turn.py
-├── api/
-│   ├── dependencies.py
-│   ├── request_body.py
-│   ├── public_errors.py
-│   ├── schemas.py
-│   ├── routes.py
-│   └── openai_compatible.py
+├── hyphae/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── config/
+│   │   ├── settings.py
+│   │   ├── schemas.py
+│   │   ├── loaders.py
+│   │   ├── mcp_config.yaml
+│   │   ├── models.yaml
+│   │   ├── orchestrator_prompt.md
+│   │   └── agent_prompt.md
+│   ├── tooling/
+│   │   └── contracts.py
+│   ├── mcp_runtime/
+│   │   ├── catalog.py
+│   │   ├── client.py
+│   │   ├── lease.py
+│   │   └── manager.py
+│   ├── llm/
+│   │   ├── client.py
+│   │   ├── schemas.py
+│   │   ├── tool_prompt_protocol.py
+│   │   └── providers/
+│   │       ├── gemini/
+│   │       └── openai_compatible/
+│   ├── orchestrator/
+│   ├── agent/
+│   ├── application/
+│   └── api/
 ├── scripts/
 │   ├── setup.sh
+│   ├── install.sh
+│   ├── uninstall.sh
 │   ├── render_settings_reference.py
 │   └── check_markdown_links.py
 ├── tests/
@@ -152,20 +137,19 @@ shutdown drains accepted records before closing.
 The intended direction is:
 
 ```text
-api ──► application ──► agent ──► llm
- │           ├───────────────► orchestrator
- │           ├───────────────► tooling
- │           ├───────────────► config (typed Settings value)
- │           ├───────────────► llm (client/usage types)
- │           └───────────────► mcp_runtime (health/catalog types)
- └───────────────────────────► mcp_runtime (health types only)
+hyphae.api ──► hyphae.application ──► hyphae.agent ──► hyphae.llm
+      │                 ├──────────────────────► hyphae.orchestrator
+      │                 ├──────────────────────► hyphae.tooling
+      │                 ├──────────────────────► hyphae.config
+      │                 └──────────────────────► hyphae.mcp_runtime
+      └────────────────────────────────────────► hyphae.mcp_runtime
 
-mcp_runtime ──► tooling
-orchestrator ──► llm + tooling + config values
-main ──► every composition participant
+hyphae.mcp_runtime ──► hyphae.tooling
+hyphae.orchestrator ──► hyphae.llm + hyphae.tooling + config values
+hyphae.main ──► every composition participant
 ```
 
-`application` must remain framework-neutral. Provider SDK shapes must remain
+`hyphae.application` must remain framework-neutral. Provider SDK shapes must remain
 inside their provider packages. The agent and orchestrator consume only
 provider-neutral LLM/tool contracts.
 
@@ -189,8 +173,8 @@ provider-neutral LLM/tool contracts.
 6. **Providers normalize at the edge.** Canonical messages, stop reasons,
    usage, reasoning, and tool calls cross the LLM boundary; SDK objects and wire
    quirks do not.
-7. **Generation and dispatch have focused owners.** `agent.generation` owns
-   retry/timeout/stream cleanup. `agent.tool_execution` owns schema validation,
+7. **Generation and dispatch have focused owners.** `hyphae.agent.generation` owns
+   retry/timeout/stream cleanup. `hyphae.agent.tool_execution` owns schema validation,
    repeat detection, policy enforcement, sequential invocation, and interrupted
    batch balancing. `_AgentRun` composes them.
 8. **Published transcripts are protocol-safe.** Persistent turns stage copies
@@ -214,12 +198,12 @@ transport failure is automatically replayed.
 
 Prompt-producing code remains beside its distinct owner:
 
-- `config/orchestrator_prompt.md` governs routing only;
-- `config/agent_prompt.md` supplies trusted downstream behavior;
+- `hyphae/config/orchestrator_prompt.md` governs routing only;
+- `hyphae/config/agent_prompt.md` supplies trusted downstream behavior;
 - `/v1` system messages are an authorized per-request downstream override;
-- `agent.context` owns compaction instructions;
-- `agent.loop` owns terminal wrap-up text; and
-- `llm.tool_prompt_protocol` owns the prose-tool action and repair protocol.
+- `hyphae.agent.context` owns compaction instructions;
+- `hyphae.agent.loop` owns terminal wrap-up text; and
+- `hyphae.llm.tool_prompt_protocol` owns the prose-tool action and repair protocol.
 
 No temporal context, generic prompting framework, or progressive tool
 activation is implemented.

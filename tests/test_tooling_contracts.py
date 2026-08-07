@@ -12,13 +12,13 @@ from typing import get_type_hints
 
 import pytest
 
-import tooling
-from agent import run_agent
-from mcp_runtime.client import MCPConnection
-from mcp_runtime.lease import TurnToolRuntime
-from mcp_runtime.manager import MCPManager
-from orchestrator.contracts import RoutingService
-from tooling import ToolCallResult, ToolRuntime, ToolSnapshot, ToolSpec
+import hyphae.tooling as tooling
+from hyphae.agent import run_agent
+from hyphae.mcp_runtime.client import MCPConnection
+from hyphae.mcp_runtime.lease import TurnToolRuntime
+from hyphae.mcp_runtime.manager import MCPManager
+from hyphae.orchestrator.contracts import RoutingService
+from hyphae.tooling import ToolCallResult, ToolRuntime, ToolSnapshot, ToolSpec
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,9 +134,9 @@ def test_tooling_import_is_independent_of_mcp_infrastructure() -> None:
             sys.executable,
             "-c",
             (
-                "import sys; import tooling; "
-                "assert not any(name == 'mcp_runtime' or "
-                "name.startswith('mcp_runtime.') for name in sys.modules); "
+                "import sys; import hyphae.tooling; "
+                "assert not any(name == 'hyphae.mcp_runtime' or "
+                "name.startswith('hyphae.mcp_runtime.') for name in sys.modules); "
                 "assert not any(name == 'mcp' or name.startswith('mcp.') "
                 "for name in sys.modules)"
             ),
@@ -185,30 +185,20 @@ def _imports_from(path: Path) -> set[str]:
 
 
 def test_neutral_consumers_do_not_import_mcp_runtime() -> None:
-    for package in (ROOT / "agent", ROOT / "orchestrator"):
+    for package in (ROOT / "hyphae" / "agent", ROOT / "hyphae" / "orchestrator"):
         for path in package.rglob("*.py"):
             imports = _imports_from(path)
             assert not any(
-                name == "mcp_runtime" or name.startswith("mcp_runtime.")
+                name == "hyphae.mcp_runtime" or name.startswith("hyphae.mcp_runtime.")
                 for name in imports
             ), path
 
 
 def _implementation_and_configuration_paths() -> list[Path]:
-    paths: list[Path] = []
-    for name in (
-        "agent",
-        "api",
-        "config",
-        "llm",
-        "mcp_runtime",
-        "orchestrator",
-        "tooling",
-        "tests",
-    ):
-        paths.extend((ROOT / name).rglob("*"))
+    paths = list((ROOT / "hyphae").rglob("*"))
+    paths.extend((ROOT / "tests").rglob("*"))
     paths.extend((ROOT / ".github").rglob("*"))
-    paths.extend((ROOT / "main.py", ROOT / "pyproject.toml"))
+    paths.append(ROOT / "pyproject.toml")
     return paths
 
 
@@ -226,21 +216,12 @@ def test_old_package_is_absent_from_implementation_and_configuration() -> None:
 
 def test_neutral_values_have_one_canonical_definition() -> None:
     definitions: dict[str, list[Path]] = {name: [] for name in CANONICAL_VALUES}
-    for package_name in (
-        "agent",
-        "api",
-        "config",
-        "llm",
-        "mcp_runtime",
-        "orchestrator",
-        "tooling",
-    ):
-        for path in (ROOT / package_name).rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef) and node.name in definitions:
-                    definitions[node.name].append(path.relative_to(ROOT))
+    for path in (ROOT / "hyphae").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name in definitions:
+                definitions[node.name].append(path.relative_to(ROOT))
 
     assert definitions == {
-        name: [Path("tooling/contracts.py")] for name in CANONICAL_VALUES
+        name: [Path("hyphae/tooling/contracts.py")] for name in CANONICAL_VALUES
     }

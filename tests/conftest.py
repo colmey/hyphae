@@ -8,8 +8,8 @@ from typing import Any
 
 import httpx
 import pytest
-from agent import InMemorySessionStore, Session
-from config import Settings, reset_settings
+from hyphae.agent import InMemorySessionStore, Session
+from hyphae.config import Settings, reset_settings
 
 from tests.fakes import ScriptedLLM, ScriptedMCP, collect_agent_events
 

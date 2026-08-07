@@ -24,7 +24,7 @@ from typing import Any
 
 import yaml
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
@@ -35,12 +35,12 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from application import OrchestratedRouting, PersistencePolicy, TurnRequest, TurnRunner
-from config import get_settings
-from llm.client import GenerationRequest, LLMClient, build_llm_client
-from llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
-from tooling import ToolCallResult
-from orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
+from hyphae.application import OrchestratedRouting, PersistencePolicy, TurnRequest, TurnRunner
+from hyphae.config import get_settings
+from hyphae.llm.client import GenerationRequest, LLMClient, build_llm_client
+from hyphae.llm.schemas import AssistantMessage, TextBlock, ToolUseBlock, CompletionUsage
+from hyphae.tooling import ToolCallResult
+from hyphae.orchestrator.schemas import OrchestrationDecision, OrchestrationProposal
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET = ROOT / "tests" / "eval_data" / "agent_eval_v1.yaml"

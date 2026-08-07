@@ -11,16 +11,16 @@ configured MCP servers.
 # Create .venv, install the locked development environment, and seed .env.
 ./scripts/setup.sh
 
-# Edit .env and the files under config/, then start the server.
-uv run uvicorn main:app --host 0.0.0.0 --port 8000
+# Edit .env and the files under hyphae/config/, then start the server.
+uv run uvicorn hyphae.main:app --host 0.0.0.0 --port 8000
 ```
 
 The four runtime configuration assets are:
 
-- `config/mcp_config.yaml` — MCP servers and dispatch policy;
-- `config/models.yaml` — routable model catalog and capabilities;
-- `config/orchestrator_prompt.md` — selection-only routing instructions; and
-- `config/agent_prompt.md` — trusted downstream agent instructions.
+- `hyphae/config/mcp_config.yaml` — MCP servers and dispatch policy;
+- `hyphae/config/models.yaml` — routable model catalog and capabilities;
+- `hyphae/config/orchestrator_prompt.md` — selection-only routing instructions; and
+- `hyphae/config/agent_prompt.md` — trusted downstream agent instructions.
 
 In another terminal:
 

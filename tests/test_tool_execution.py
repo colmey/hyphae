@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 
-from agent import RunContext, RunLimits, Session, ToolPolicy
-from agent.runtime import RunDeadlineExceeded
-from agent.tool_execution import (
+from hyphae.agent import RunContext, RunLimits, Session, ToolPolicy
+from hyphae.agent.runtime import RunDeadlineExceeded
+from hyphae.agent.tool_execution import (
     ActiveToolBatch,
     ToolDispatchResult,
     ToolDispatcher,
@@ -19,9 +19,9 @@ from agent.tool_execution import (
     _TOOL_EXECUTION_FAILED_MESSAGE,
     make_skipped_tool_result,
 )
-from agent.tool_policy import PolicyDecision, PolicyVerdict
-from llm.schemas import Role, ToolResultBlock, ToolUseBlock
-from tooling import ToolCallResult
+from hyphae.agent.tool_policy import PolicyDecision, PolicyVerdict
+from hyphae.llm.schemas import Role, ToolResultBlock, ToolUseBlock
+from hyphae.tooling import ToolCallResult
 
 
 pytestmark = pytest.mark.anyio

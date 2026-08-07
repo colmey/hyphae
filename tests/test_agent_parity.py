@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     ErrorEvent,
     Event,
@@ -26,10 +26,10 @@ from agent import (
     ToolResultEvent,
     run_agent,
 )
-from llm.client import GenerationRequest, LLMClient
-from llm.providers.gemini import GeminiLLMClient
-from llm.providers.openai_compatible import OpenAICompatibleLLMClient
-from llm.schemas import (
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.providers.gemini import GeminiLLMClient
+from hyphae.llm.providers.openai_compatible import OpenAICompatibleLLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     CompletionUsage,
     Message,
@@ -41,7 +41,7 @@ from llm.schemas import (
     ToolUseBlock,
 )
 from tests.fakes import ScriptedLLM, ScriptedMCP
-from tooling import ToolCallResult, ToolRuntime
+from hyphae.tooling import ToolCallResult, ToolRuntime
 
 
 pytestmark = pytest.mark.anyio
@@ -296,7 +296,7 @@ async def _persistent_run(
 
 
 def test_public_imports_and_run_agent_calling_contract() -> None:
-    assert run_agent.__module__ == "agent.loop"
+    assert run_agent.__module__ == "hyphae.agent.loop"
     assert OpenAICompatibleLLMClient.__name__ == "OpenAICompatibleLLMClient"
     assert GeminiLLMClient.__name__ == "GeminiLLMClient"
 

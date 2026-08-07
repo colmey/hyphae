@@ -12,11 +12,11 @@ from typing import Any
 
 import pytest
 
-import mcp_runtime.manager as manager_module
-from config import MCPConfig
-from mcp_runtime import MCPManager, MCPServerState, Tool
-from mcp_runtime.client import MCPConnection, MCPTransportError
-from tooling import ToolCallResult, ToolSnapshot
+import hyphae.mcp_runtime.manager as manager_module
+from hyphae.config import MCPConfig
+from hyphae.mcp_runtime import MCPManager, MCPServerState, Tool
+from hyphae.mcp_runtime.client import MCPConnection, MCPTransportError
+from hyphae.tooling import ToolCallResult, ToolSnapshot
 
 pytestmark = pytest.mark.anyio
 

@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator
 
 import pytest
 
-from agent import (
+from hyphae.agent import (
     DoneEvent,
     ErrorEvent,
     InMemorySessionStore,
@@ -20,8 +20,8 @@ from agent import (
     ToolCallEvent,
     run_agent,
 )
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     ReasoningDelta,
     StreamChunk,
@@ -31,7 +31,7 @@ from llm.schemas import (
     ToolUseBlock,
     CompletionUsage,
 )
-from tooling import ToolCallResult
+from hyphae.tooling import ToolCallResult
 
 pytestmark = pytest.mark.anyio
 

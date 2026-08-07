@@ -20,15 +20,15 @@ from typing import Any
 import yaml
 import pytest
 
-from agent.events import ReasoningEvent, ToolResultEvent
-from agent.loop import run_agent
-from agent.session import InMemorySessionStore
-from agent.tracing import event_record
-from llm.providers.openai_compatible import OpenAICompatibleLLMClient
-from llm.providers.openai_compatible.codec import response_to_message
-from llm.schemas import AssistantMessage, Message, ModelProfile, TextBlock, ToolUseBlock
-from config import ModelsConfig
-from llm.client import GenerationRequest, profile_from_entry
+from hyphae.agent.events import ReasoningEvent, ToolResultEvent
+from hyphae.agent.loop import run_agent
+from hyphae.agent.session import InMemorySessionStore
+from hyphae.agent.tracing import event_record
+from hyphae.llm.providers.openai_compatible import OpenAICompatibleLLMClient
+from hyphae.llm.providers.openai_compatible.codec import response_to_message
+from hyphae.llm.schemas import AssistantMessage, Message, ModelProfile, TextBlock, ToolUseBlock
+from hyphae.config import ModelsConfig
+from hyphae.llm.client import GenerationRequest, profile_from_entry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,7 +111,9 @@ class CapturingScriptedLLM(ScriptedLLM):
 
 def test_model_config_defaults() -> None:
     print("--- model config default profile parse ---")
-    raw = yaml.safe_load((ROOT / "config" / "models.yaml").read_text(encoding="utf-8"))
+    raw = yaml.safe_load(
+        (ROOT / "hyphae" / "config" / "models.yaml").read_text(encoding="utf-8")
+    )
     cfg = ModelsConfig.model_validate(raw)
     model_id = cfg.default_id()
     profile = profile_from_entry(cfg.models[model_id])

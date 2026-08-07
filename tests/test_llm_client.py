@@ -7,9 +7,9 @@ from typing import AsyncIterator
 
 import pytest
 
-from llm import GenerationRequest as ExportedGenerationRequest
-from llm.client import GenerationRequest, LLMClient
-from llm.schemas import (
+from hyphae.llm import GenerationRequest as ExportedGenerationRequest
+from hyphae.llm.client import GenerationRequest, LLMClient
+from hyphae.llm.schemas import (
     AssistantMessage,
     Message,
     ReasoningDelta,

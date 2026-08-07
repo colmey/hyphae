@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
-import mcp_runtime.client as client_module
-from config import SSEServer, StreamableHTTPServer
-from mcp_runtime.client import MCPClient
+import hyphae.mcp_runtime.client as client_module
+from hyphae.config import SSEServer, StreamableHTTPServer
+from hyphae.mcp_runtime.client import MCPClient
 
 pytestmark = pytest.mark.anyio
 
